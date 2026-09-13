@@ -1,0 +1,649 @@
+:root {
+  --tile: 130px;
+  --gap: 12px;
+  --pad: 20px;
+  --radius-panel: 28px;
+  --radius-tile: 20px;
+
+  --panel: rgba(210, 226, 240, 0.78);
+  --panel-border: rgba(255, 255, 255, 0.55);
+  /* An "on" tile is always a bright white card with dark text, matching
+     the iOS Home widget, regardless of the app's own light/dark theme -
+     so unlike the other tokens below, these three are never redefined per
+     theme. */
+  --tile-on: rgba(255, 255, 255, 0.92);
+  --tile-on-text-1: #1d1d1f;
+  --tile-on-text-2: #6e6e73;
+  --tile-off: rgba(90, 96, 108, 0.55);
+  --tile-off-hover: rgba(100, 106, 118, 0.65);
+  --text-on-1: #1d1d1f;
+  --text-on-2: #6e6e73;
+  --text-off-1: #ffffff;
+  --text-off-2: #e4e4e7;
+  --accent-yellow: #ffb320;
+  --accent-blue: #409cff;
+  --accent-cyan: #48aaff;
+  --accent-green: #34c759;
+  --accent-red: #ff5b4a;
+  --btn-fill: rgba(0, 0, 0, 0.08);
+  --btn-fill-strong: rgba(0, 0, 0, 0.14);
+  --btn-text: #1d1d1f;
+  --input-bg: rgba(255, 255, 255, 0.6);
+  --input-border: rgba(0, 0, 0, 0.12);
+  --shadow: 0 18px 40px rgba(20, 30, 45, 0.28);
+  --scrollbar: rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme="dark"] {
+  --panel: rgba(36, 40, 46, 0.78);
+  --panel-border: rgba(255, 255, 255, 0.10);
+  --tile-off: rgba(30, 32, 38, 0.6);
+  --tile-off-hover: rgba(40, 42, 48, 0.7);
+  --text-on-1: #f5f5f7;
+  --text-on-2: #b6b6bb;
+  --text-off-1: #f5f5f7;
+  --text-off-2: #cfcfd4;
+  --btn-fill: rgba(255, 255, 255, 0.12);
+  --btn-fill-strong: rgba(255, 255, 255, 0.2);
+  --btn-text: #f5f5f7;
+  --input-bg: rgba(0, 0, 0, 0.25);
+  --input-border: rgba(255, 255, 255, 0.14);
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+  --scrollbar: rgba(255, 255, 255, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] {
+    --panel: rgba(36, 40, 46, 0.78);
+    --panel-border: rgba(255, 255, 255, 0.10);
+    --tile-off: rgba(30, 32, 38, 0.6);
+    --tile-off-hover: rgba(40, 42, 48, 0.7);
+    --text-on-1: #f5f5f7;
+    --text-on-2: #b6b6bb;
+    --text-off-1: #f5f5f7;
+    --text-off-2: #cfcfd4;
+    --btn-fill: rgba(255, 255, 255, 0.12);
+    --btn-fill-strong: rgba(255, 255, 255, 0.2);
+    --btn-text: #f5f5f7;
+    --input-bg: rgba(0, 0, 0, 0.25);
+    --input-border: rgba(255, 255, 255, 0.14);
+    --shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+    --scrollbar: rgba(255, 255, 255, 0.2);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* Anything toggled via the `hidden` attribute must actually disappear.
+   Several elements below (views, the tile grid, the empty-state hint) also
+   have an author rule that sets `display` for their visible state, and an
+   author rule beats the browser's own `[hidden]{display:none}` UA style
+   regardless of specificity - so without `!important` here, a hidden
+   element with its own `display` rule silently stays on screen stacked
+   underneath whatever replaced it. */
+[hidden] {
+  display: none !important;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei", -apple-system, sans-serif;
+  -ms-overflow-style: none;
+  user-select: none;
+  -webkit-user-select: none;
+  /* ClearType assumes an opaque background to compute its subpixel color
+     fringing; against this window's real transparency it instead paints a
+     visible light halo around text and shape edges. Plain grayscale AA
+     doesn't make that assumption. */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#stage {
+  position: relative;
+  display: inline-block;
+}
+
+.view {
+  position: relative;
+}
+
+.card-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow);
+  transition: background 0.25s ease;
+}
+
+/* ================= Grid view ================= */
+
+#view-grid {
+  padding: var(--pad);
+  width: fit-content;
+}
+
+.tiles-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 4), var(--tile));
+  gap: var(--gap);
+  pointer-events: none;
+}
+/* An empty grid still reserves its full column-template width even with
+   zero children, which briefly widens #stage before JS has a chance to
+   hide it in favor of the empty-hint. Kill that at the CSS level too. */
+.tiles-grid:empty {
+  display: none;
+}
+
+.tile {
+  position: relative;
+  width: var(--tile);
+  height: var(--tile);
+  border-radius: var(--radius-tile);
+  background: var(--tile-off);
+  cursor: pointer;
+  pointer-events: auto;
+  overflow: hidden;
+  transition: background 0.2s ease, transform 0.12s ease;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.tile:active { transform: scale(0.96); }
+.tile.is-on { background: var(--tile-on); }
+.tile.is-readonly { cursor: default; }
+.tile.is-pressing { transform: scale(0.95); }
+
+.tile .tile-icon {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tile .tile-icon svg { width: 100%; height: 100%; fill: currentColor; }
+
+.tile .tile-room {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-off-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .tile-label {
+  font-size: 11.5px;
+  color: var(--text-off-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+.tile.is-on .tile-room { color: var(--tile-on-text-1); }
+.tile.is-on .tile-label { color: var(--tile-on-text-2); }
+
+.tile .tile-value {
+  position: absolute;
+  top: 56px;
+  left: 14px;
+  right: 14px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-off-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile.is-on .tile-value { color: var(--tile-on-text-1); }
+
+.tile.flash { animation: tile-flash 0.6s ease; }
+@keyframes tile-flash {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+  30% { box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.35) inset; }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+}
+
+.tile .mini-btns {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 6px;
+}
+.tile .mini-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  pointer-events: auto;
+}
+.tile .mini-btn:hover { background: var(--btn-fill-strong); }
+.tile .conn-warn {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-red);
+}
+
+.fab {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  opacity: 0;
+  transition: opacity 0.18s ease, background 0.18s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+}
+.fab svg { width: 15px; height: 15px; fill: currentColor; }
+#view-grid:hover .fab { opacity: 0.85; }
+.fab:hover { opacity: 1 !important; background: var(--btn-fill-strong); }
+
+.empty-hint {
+  position: relative;
+  width: 300px;
+  height: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-on-2);
+  text-align: center;
+  pointer-events: auto;
+}
+html[data-theme="dark"] .empty-hint,
+html:not([data-theme="light"]) .empty-hint { color: var(--text-off-2); }
+.empty-icon { font-size: 30px; margin-bottom: 2px; color: var(--accent-blue); }
+.empty-title { font-size: 14px; font-weight: 600; color: var(--text-off-1); }
+html[data-theme="light"] .empty-title { color: var(--text-on-1); }
+.empty-sub { font-size: 12px; }
+
+/* ================= Detail / Settings shared chrome ================= */
+
+#view-detail, #view-settings, #view-picker {
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Flex/grid children default to a min-content floor that can silently
+   overflow a fixed-width card (e.g. a button next to a long label). Since
+   nothing here relies on that floor, drop it everywhere inside a view. */
+.view-body * {
+  min-width: 0;
+}
+
+.view-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 8px 8px;
+  cursor: default;
+}
+.header-titles { flex: 1; min-width: 0; }
+.header-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-on-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-sub {
+  font-size: 11.5px;
+  color: var(--text-on-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  flex: none;
+}
+.icon-btn:hover { background: var(--btn-fill-strong); }
+.back-btn { font-size: 22px; font-weight: 700; padding-bottom: 2px; }
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-red);
+  flex: none;
+}
+.conn-dot.ok { background: var(--accent-green); }
+
+.view-body {
+  position: relative;
+  padding: 4px 16px 16px 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: 520px;
+  pointer-events: auto;
+}
+.view-body::-webkit-scrollbar { width: 6px; }
+.view-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+/* ================= Detail view controls ================= */
+
+.detail-power-row {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0 18px;
+}
+.power-toggle {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  border: none;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+.power-toggle svg { width: 32px; height: 32px; fill: currentColor; }
+.power-toggle.is-on { background: var(--accent-yellow); color: #3a2a00; }
+
+.slider-block { margin: 14px 0; }
+.slider-block .slider-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-on-2);
+  margin-bottom: 6px;
+}
+input[type="range"] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--btn-fill);
+  pointer-events: auto;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+  cursor: pointer;
+}
+
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.btn-row .seg-btn {
+  flex: 1;
+  padding: 9px 4px;
+  border-radius: 12px;
+  border: none;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  font-size: 12.5px;
+  pointer-events: auto;
+  text-align: center;
+}
+.btn-row .seg-btn.active { background: var(--accent-blue); color: #fff; }
+
+.big-value {
+  text-align: center;
+  font-size: 40px;
+  font-weight: 700;
+  color: var(--text-on-1);
+  margin: 4px 0;
+}
+.sub-value {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-on-2);
+  margin-bottom: 10px;
+}
+
+.stepper-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  margin: 8px 0 16px;
+}
+.stepper-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: none;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  font-size: 22px;
+  font-weight: 700;
+  pointer-events: auto;
+}
+.stepper-btn:hover { background: var(--btn-fill-strong); }
+
+.color-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  pointer-events: auto;
+}
+.swatch.active { border-color: var(--accent-blue); }
+
+.media-controls { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 8px 0 16px; }
+.media-controls .icon-btn { width: 40px; height: 40px; }
+.media-controls .play-btn { width: 56px; height: 56px; }
+.media-controls svg { width: 20px; height: 20px; fill: currentColor; }
+.media-controls .play-btn svg { width: 24px; height: 24px; }
+
+/* ================= Settings view ================= */
+
+.settings-body { display: flex; flex-direction: column; gap: 2px; }
+.section { margin-bottom: 14px; }
+.section.grow { flex: 1; }
+.section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-on-2);
+  margin-bottom: 8px;
+}
+.row-between {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-on-2);
+}
+.field input, .search-input, select {
+  pointer-events: auto;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text-on-1);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+}
+.field input:focus, .search-input:focus, select:focus { border-color: var(--accent-blue); }
+
+.row { display: flex; align-items: center; flex-wrap: wrap; }
+.row.gap { gap: 10px; }
+.row.end { justify-content: flex-end; margin-top: 8px; }
+
+.chip-select { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-on-2); }
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-on-1);
+  margin-bottom: 8px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.check-row input[type="checkbox"] {
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.pill-btn {
+  pointer-events: auto;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--accent-blue);
+  color: #fff;
+  cursor: pointer;
+}
+.pill-btn:hover { filter: brightness(1.08); }
+.pill-btn.ghost { background: var(--btn-fill); color: var(--btn-text); }
+.pill-btn.small { padding: 6px 12px; font-size: 12px; }
+.pill-btn.danger { color: var(--accent-red); }
+
+.hint { font-size: 11.5px; color: var(--text-on-2); }
+.hint.ok { color: var(--accent-green); }
+.hint.err { color: var(--accent-red); }
+
+.tile-list { display: flex; flex-direction: column; gap: 6px; }
+.tile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  padding: 7px 8px;
+  pointer-events: auto;
+}
+.tile-row .tr-icon { width: 22px; height: 22px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text-on-2); }
+.tile-row .tr-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.tile-row .tr-text { flex: 1; min-width: 0; }
+.tile-row .tr-room { font-size: 12.5px; font-weight: 600; color: var(--text-on-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-row .tr-entity { font-size: 10.5px; color: var(--text-on-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-row .tr-btn {
+  width: 24px; height: 24px; border-radius: 50%; border: none;
+  background: var(--btn-fill); color: var(--btn-text); font-size: 12px;
+  display: flex; align-items: center; justify-content: center; flex: none;
+}
+.tile-row .tr-btn:hover { background: var(--btn-fill-strong); }
+.tile-row.dragging { opacity: 0.4; }
+.tile-row .tr-handle { cursor: grab; color: var(--text-on-2); font-size: 13px; padding: 0 2px; }
+.tile-row .tr-step {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-on-2);
+}
+.tile-row .tr-step input {
+  pointer-events: auto;
+  width: 40px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text-on-1);
+  border-radius: 6px;
+  padding: 3px 4px;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+/* ================= Picker view ================= */
+
+.search-input { width: 100%; margin-bottom: 8px; }
+.picker-list { display: flex; flex-direction: column; gap: 4px; }
+.picker-group-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-on-2);
+  margin: 10px 0 4px 2px;
+}
+.picker-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px; border-radius: 12px; pointer-events: auto;
+}
+.picker-item:hover { background: var(--btn-fill); }
+.picker-item .tr-icon { width: 22px; height: 22px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text-on-2); }
+.picker-item .tr-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.picker-item .pi-text { flex: 1; min-width: 0; }
+.picker-item .pi-name { font-size: 13px; color: var(--text-on-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picker-item .pi-id { font-size: 10.5px; color: var(--text-on-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ================= Toast ================= */
+
+.toast {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 22, 26, 0.88);
+  color: #fff;
+  font-size: 12px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.toast.show { opacity: 1; }

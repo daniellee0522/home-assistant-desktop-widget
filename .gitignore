@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+ha_widgets_config.json
+desktop.ini
