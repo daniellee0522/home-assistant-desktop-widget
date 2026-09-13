@@ -208,6 +208,7 @@ class Api:
                 "domain": t.get("domain") or cfgmod.domain_of(entity),
                 "room": (t.get("room") or "").strip(),
                 "label": (t.get("label") or "").strip(),
+                "icon": (t.get("icon") or "").strip(),
                 "on_mode": t.get("on_mode") or "cool",
                 "temp_step": t.get("temp_step", 1),
             })
@@ -276,7 +277,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def resize_window(self, phys_w, phys_h, seq=None):
+    def resize_window(self, phys_w, phys_h, seq=None, radius=None):
         # phys_w/phys_h are already-physical pixels: the JS side multiplies
         # its CSS measurement by window.devicePixelRatio itself. pywebview's
         # own resize() does that same conversion internally using Win32's
@@ -301,14 +302,39 @@ class Api:
         hwnd = _get_hwnd(self._window)
         if not hwnd:
             return
+        w = max(80, int(phys_w))
+        h = max(60, int(phys_h))
         with _hwnd_lock:
             try:
                 ctypes.windll.user32.SetWindowPos(
-                    hwnd, 0, 0, 0, max(80, int(phys_w)), max(60, int(phys_h)),
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 )
             except Exception:
                 pass
+            # True per-pixel desktop transparency turned out to need the
+            # hosting framework to build its top-level window on
+            # DirectComposition from the start (how Electron/Chromium do
+            # it) - not something fixable after the fact by calling a
+            # couple of DWM APIs on a WinForms-created HWND (tried three
+            # standard ones; none stuck, one even made the window
+            # disappear). Failing that, at least clip the *window itself*
+            # to the same rounded-rect shape as the CSS card, so the
+            # corners are a real cutout to the desktop instead of square
+            # opaque corners poking out past the rounded card underneath.
+            if radius is not None:
+                try:
+                    r = max(0, int(radius))
+                    # HRGN is a pointer-sized HANDLE; ctypes defaults to a
+                    # 32-bit int return type, which silently truncates (and
+                    # so corrupts) it on 64-bit Windows unless restype is
+                    # set explicitly.
+                    create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
+                    create_rgn.restype = ctypes.c_void_p
+                    hrgn = create_rgn(0, 0, w + 1, h + 1, r * 2, r * 2)
+                    if hrgn and not ctypes.windll.user32.SetWindowRgn(hwnd, hrgn, True):
+                        ctypes.windll.gdi32.DeleteObject(hrgn)
+                except Exception:
+                    pass
 
     def quit_app(self):
         self._quit()
@@ -415,6 +441,7 @@ def _startup_command():
 
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOOLWINDOW = 0x00000080
 HWND_BOTTOM = 1
 HWND_TOP = 0
 SWP_NOMOVE = 0x0002
@@ -503,6 +530,22 @@ def _set_noactivate(window, enable):
             pass
 
 
+def _hide_from_taskbar(window):
+    # WS_EX_TOOLWINDOW (not WinForms' ShowInTaskbar property - changing
+    # that after the handle already exists risks the same handle-recreate
+    # hazard that made AllowTransparency briefly hide the window entirely
+    # during testing) excludes the window from the taskbar and Alt+Tab.
+    hwnd = _get_hwnd(window)
+    if not hwnd:
+        return
+    with _hwnd_lock:
+        try:
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW)
+        except Exception:
+            pass
+
+
 def _send_to_bottom(window):
     hwnd = _get_hwnd(window)
     if not hwnd:
@@ -583,6 +626,7 @@ def main():
         _enable_desktop_transparency(window)
         _enable_backdrop(window)
         _set_noactivate(window, True)
+        _hide_from_taskbar(window)
         _send_to_bottom(window)
         threading.Thread(
             target=_bottom_pin_loop, args=(window, bottom_pin_stop, api._pin_enabled), daemon=True,

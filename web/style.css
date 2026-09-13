@@ -228,8 +228,13 @@ html, body {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: var(--btn-fill);
-  color: var(--btn-text);
+  /* Mini +/- buttons only ever appear on an "on" climate tile, which is
+     always the fixed white-card style (see --tile-on) regardless of
+     theme - so they need fixed dark-on-white colors to match, not the
+     theme-dependent --btn-fill/--btn-text (which, in dark theme, is a
+     near-white-on-white combination here and was effectively invisible). */
+  background: rgba(0, 0, 0, 0.08);
+  color: #1d1d1f;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -238,7 +243,7 @@ html, body {
   border: none;
   pointer-events: auto;
 }
-.tile .mini-btn:hover { background: var(--btn-fill-strong); }
+.tile .mini-btn:hover { background: rgba(0, 0, 0, 0.14); }
 .tile .conn-warn {
   position: absolute;
   bottom: 12px;
@@ -248,27 +253,6 @@ html, body {
   border-radius: 50%;
   background: var(--accent-red);
 }
-
-.fab {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: none;
-  background: var(--btn-fill);
-  color: var(--btn-text);
-  opacity: 0;
-  transition: opacity 0.18s ease, background 0.18s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 5;
-}
-.fab svg { width: 15px; height: 15px; fill: currentColor; }
-#view-grid:hover .fab { opacity: 0.85; }
-.fab:hover { opacity: 1 !important; background: var(--btn-fill-strong); }
 
 .empty-hint {
   position: relative;
@@ -292,12 +276,62 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
 
 /* ================= Detail / Settings shared chrome ================= */
 
-#view-detail, #view-settings, #view-picker {
+#view-settings, #view-picker {
   width: 340px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
+
+/* ================= Detail popover (anchored to its tile) ================= */
+
+.detail-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: auto;
+  background: transparent;
+}
+.detail-popover {
+  position: absolute;
+  width: 260px;
+  height: 336px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.94);
+  transform-origin: top left;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.detail-popover.show {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+.icon-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 14px;
+}
+.icon-picker .icon-swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background: var(--btn-fill);
+  color: var(--btn-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+.icon-picker .icon-swatch svg { width: 18px; height: 18px; fill: currentColor; }
+.icon-picker .icon-swatch.active { border-color: var(--accent-blue); background: var(--btn-fill-strong); }
 
 /* Flex/grid children default to a min-content floor that can silently
    overflow a fixed-width card (e.g. a button next to a long label). Since
@@ -306,7 +340,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   min-width: 0;
 }
 
-.view-header {
+.view-header, .popover-header {
   position: relative;
   display: flex;
   align-items: center;
@@ -389,6 +423,41 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
 }
 .power-toggle svg { width: 32px; height: 32px; fill: currentColor; }
 .power-toggle.is-on { background: var(--accent-yellow); color: #3a2a00; }
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 10px 0 18px;
+  pointer-events: auto;
+}
+.toggle-row .toggle-label { font-size: 14px; font-weight: 600; color: var(--text-on-1); }
+.toggle-switch {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  border-radius: 999px;
+  border: none;
+  background: var(--btn-fill-strong);
+  cursor: pointer;
+  flex: none;
+  pointer-events: auto;
+  transition: background 0.18s ease;
+}
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  transition: transform 0.18s ease;
+}
+.toggle-switch.is-on { background: var(--accent-green); }
+.toggle-switch.is-on::after { transform: translateX(20px); }
 
 .slider-block { margin: 14px 0; }
 .slider-block .slider-label {

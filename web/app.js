@@ -33,8 +33,8 @@ function svgIcon(name) {
  * ============================================================ */
 const DOMAIN_META = {
   light: { icon: 'light', expand: true },
-  switch: { icon: 'switch' },
-  input_boolean: { icon: 'switch' },
+  switch: { icon: 'switch', expand: true },
+  input_boolean: { icon: 'switch', expand: true },
   climate: { icon: 'climate', expand: true },
   fan: { icon: 'fan', expand: true },
   cover: { icon: 'cover', expand: true },
@@ -155,7 +155,7 @@ function applyTheme() {
  * View switching + auto window sizing
  * ============================================================ */
 function showView(name) {
-  for (const id of ['view-grid', 'view-detail', 'view-settings', 'view-picker']) {
+  for (const id of ['view-grid', 'view-settings', 'view-picker']) {
     document.getElementById(id).hidden = id !== name;
   }
   // The widget normally can't take keyboard focus (so tiles never yank it
@@ -217,7 +217,13 @@ function syncWindowSize() {
       cssH = rect.height + 4;
     }
     resizeSeq += 1;
-    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq);
+    // Keep the window's own clip region (see resize_window in main.py) in
+    // step with the card's actual rendered corner radius, including the
+    // zoom setting - CSS zoom scales border-radius rendering the same way
+    // it scales everything else that getBoundingClientRect() picks up.
+    const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
+    const radius = Math.round(28 * zoomFactor * dpr);
+    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq, radius);
   });
 }
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
@@ -290,7 +296,7 @@ function tileEl(tile) {
 
   const iconWrap = document.createElement('div');
   iconWrap.className = 'tile-icon';
-  iconWrap.innerHTML = svgIcon(meta.icon);
+  iconWrap.innerHTML = svgIcon(tile.icon || meta.icon);
   iconWrap.style.color = ok ? iconColorFor(domain, state, on) : 'var(--text-off-1)';
   div.appendChild(iconWrap);
 
@@ -502,16 +508,62 @@ function climateStep(tile, delta) {
 }
 
 /* ============================================================
- * Detail (expanded) view
+ * Detail popover: anchored to the tile that opened it, fixed size,
+ * fades in place instead of replacing the whole widget.
  * ============================================================ */
+const POPOVER_W = 260, POPOVER_H = 336;
+let popoverCloseTimer = null;
+
 function openDetail(tile) {
+  const tileNode = document.querySelector('.tile[data-id="' + tile.id + '"]');
+  const viewGrid = document.getElementById('view-grid');
+  const popover = document.getElementById('detail-popover');
+  const backdrop = document.getElementById('detail-backdrop');
+  if (!tileNode) return;
+  if (popoverCloseTimer) { clearTimeout(popoverCloseTimer); popoverCloseTimer = null; }
+
   currentDetailTileId = tile.id;
+  showEditMode(false);
   renderDetailBody();
-  showView('view-detail');
+
+  const tileRect = tileNode.getBoundingClientRect();
+  const gridRect = viewGrid.getBoundingClientRect();
+  const left = Math.round(tileRect.left - gridRect.left);
+  const top = Math.round(tileRect.top - gridRect.top);
+  popover.style.left = left + 'px';
+  popover.style.top = top + 'px';
+
+  // Absolutely positioned elements don't grow their container's own
+  // auto/shrink-to-fit size, so without forcing the grid to actually be
+  // this big, the window would never resize to fit and the popover would
+  // just get clipped at the old edge.
+  viewGrid.style.minWidth = (left + POPOVER_W + 20) + 'px';
+  viewGrid.style.minHeight = (top + POPOVER_H + 20) + 'px';
+
+  backdrop.hidden = false;
+  popover.hidden = false;
+  requestAnimationFrame(() => popover.classList.add('show'));
+  syncWindowSize();
+  if (window.pywebview && window.pywebview.api) window.pywebview.api.set_activatable(true).catch(() => {});
 }
+
 function closeDetail() {
+  if (!currentDetailTileId) return;
   currentDetailTileId = null;
-  showView('view-grid');
+  const popover = document.getElementById('detail-popover');
+  const backdrop = document.getElementById('detail-backdrop');
+  const viewGrid = document.getElementById('view-grid');
+  popover.classList.remove('show');
+  backdrop.hidden = true;
+  if (window.pywebview && window.pywebview.api) window.pywebview.api.set_activatable(false).catch(() => {});
+  popoverCloseTimer = setTimeout(() => {
+    popoverCloseTimer = null;
+    if (currentDetailTileId) return; // reopened (on a different tile) before the fade finished
+    popover.hidden = true;
+    viewGrid.style.minWidth = '';
+    viewGrid.style.minHeight = '';
+    syncWindowSize();
+  }, 170);
 }
 
 function renderDetailBody() {
@@ -524,17 +576,48 @@ function renderDetailBody() {
   body.innerHTML = '';
   const builder = DETAIL_BUILDERS[tile.domain];
   if (builder) builder(body, tile, state);
-  syncWindowSize();
 }
 
-function powerToggle(on, onClick) {
-  const btn = document.createElement('button');
-  btn.className = 'power-toggle' + (on ? ' is-on' : '');
-  btn.innerHTML = svgIcon('power');
-  btn.addEventListener('click', onClick);
-  const row = document.createElement('div');
-  row.className = 'detail-power-row';
-  row.appendChild(btn);
+/* ---- per-tile edit sub-panel (icon / name / category) ---- */
+const ICON_CHOICES = ['light', 'switch', 'climate', 'fan', 'cover', 'media', 'lock', 'vacuum', 'scene', 'script', 'automation', 'sensor'];
+
+function showEditMode(show) {
+  document.getElementById('detail-body').hidden = show;
+  document.getElementById('detail-edit-body').hidden = !show;
+  if (show) populateEditForm();
+}
+
+function populateEditForm() {
+  const tile = findTile(currentDetailTileId);
+  if (!tile) return;
+  document.getElementById('edit-room-input').value = tile.room || '';
+  document.getElementById('edit-label-input').value = tile.label || '';
+  renderIconPicker(tile);
+}
+
+function renderIconPicker(tile) {
+  const wrap = document.getElementById('icon-picker');
+  wrap.innerHTML = '';
+  const current = tile.icon || domainMeta(tile.domain).icon;
+  for (const name of ICON_CHOICES) {
+    const b = document.createElement('button');
+    b.className = 'icon-swatch' + (name === current ? ' active' : '');
+    b.innerHTML = svgIcon(name);
+    b.addEventListener('click', async () => {
+      tile.icon = name;
+      renderIconPicker(tile);
+      await persistTiles();
+    });
+    wrap.appendChild(b);
+  }
+}
+
+function toggleRow(label, on, onClick) {
+  const row = document.createElement('div'); row.className = 'toggle-row';
+  const l = document.createElement('span'); l.className = 'toggle-label'; l.textContent = label;
+  const sw = document.createElement('button'); sw.className = 'toggle-switch' + (on ? ' is-on' : '');
+  sw.addEventListener('click', onClick);
+  row.appendChild(l); row.appendChild(sw);
   return row;
 }
 function sliderBlock(label, value, min, max, unit, onCommit, step) {
@@ -581,7 +664,7 @@ const DETAIL_BUILDERS = {
   light(body, tile, state) {
     const attrs = (state && state.attributes) || {};
     const on = !!state && state.state === 'on';
-    body.appendChild(powerToggle(on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('light', 'toggle', tile.entity); }));
+    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('light', 'toggle', tile.entity); }));
     if (!on) return;
     if ('brightness' in attrs && attrs.brightness != null) {
       const pct = Math.round((attrs.brightness / 255) * 100);
@@ -599,10 +682,18 @@ const DETAIL_BUILDERS = {
   fan(body, tile, state) {
     const attrs = (state && state.attributes) || {};
     const on = !!state && state.state === 'on';
-    body.appendChild(powerToggle(on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('fan', 'toggle', tile.entity); }));
+    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('fan', 'toggle', tile.entity); }));
     if (on && attrs.percentage != null) {
       body.appendChild(sliderBlock('風速', attrs.percentage, 0, 100, '%', (v) => callService('fan', 'set_percentage', tile.entity, { percentage: Number(v) }), 10));
     }
+  },
+  switch(body, tile, state) {
+    const on = !!state && state.state === 'on';
+    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('switch', 'toggle', tile.entity); }));
+  },
+  input_boolean(body, tile, state) {
+    const on = !!state && state.state === 'on';
+    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('input_boolean', 'toggle', tile.entity); }));
   },
   climate(body, tile, state) {
     const attrs = (state && state.attributes) || {};
@@ -734,7 +825,7 @@ function renderTileList() {
     row.appendChild(handle);
 
     const icon = document.createElement('div'); icon.className = 'tr-icon';
-    icon.innerHTML = svgIcon(domainMeta(t.domain).icon);
+    icon.innerHTML = svgIcon(t.icon || domainMeta(t.domain).icon);
     row.appendChild(icon);
 
     const text = document.createElement('div'); text.className = 'tr-text';
@@ -864,7 +955,7 @@ async function addTileFromEntity(e) {
   const tile = {
     id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('tile-' + Date.now() + '-' + Math.random().toString(36).slice(2)),
     entity: e.entity_id, domain: e.domain,
-    room: e.name || e.entity_id, label: '', on_mode: 'cool', temp_step: 1,
+    room: e.name || e.entity_id, label: '', icon: '', on_mode: 'cool', temp_step: 1,
   };
   CONFIG.tiles = (CONFIG.tiles || []).concat([tile]);
   if (e.state && !STATES[e.entity_id]) STATES[e.entity_id] = e.state;
@@ -890,8 +981,24 @@ function showToast(msg) {
  * ============================================================ */
 function init() {
   document.getElementById('empty-add-btn').addEventListener('click', openSettings);
-  document.getElementById('settings-fab').addEventListener('click', openSettings);
   document.getElementById('add-tile-btn').addEventListener('click', openPicker);
+  document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
+  document.getElementById('detail-edit-btn').addEventListener('click', () => showEditMode(true));
+  document.getElementById('edit-done-btn').addEventListener('click', () => showEditMode(false));
+  document.getElementById('edit-room-input').addEventListener('change', async (e) => {
+    const tile = findTile(currentDetailTileId);
+    if (!tile) return;
+    tile.room = e.target.value.trim() || tile.entity;
+    e.target.value = tile.room;
+    document.getElementById('detail-room').textContent = tile.room;
+    await persistTiles();
+  });
+  document.getElementById('edit-label-input').addEventListener('change', async (e) => {
+    const tile = findTile(currentDetailTileId);
+    if (!tile) return;
+    tile.label = e.target.value.trim();
+    await persistTiles();
+  });
   document.getElementById('close-settings-btn').addEventListener('click', closeSettingsAndSave);
   document.getElementById('quit-btn').addEventListener('click', () => { window.pywebview.api.quit_app(); });
   document.getElementById('theme-select').addEventListener('change', async (e) => {
@@ -981,7 +1088,7 @@ function init() {
     if (e.key !== 'Escape') return;
     if (!document.getElementById('view-picker').hidden) { showView('view-settings'); renderTileList(); }
     else if (!document.getElementById('view-settings').hidden) closeSettingsAndSave();
-    else if (!document.getElementById('view-detail').hidden) closeDetail();
+    else if (currentDetailTileId) closeDetail();
   });
 
   // Keep header/back buttons from also starting a window-drag (they live

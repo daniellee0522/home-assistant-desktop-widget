@@ -47,6 +47,7 @@ def _migrate_tile(t):
         "domain": domain,
         "room": t.get("room", ""),
         "label": t.get("label", ""),
+        "icon": t.get("icon", ""),
         "on_mode": t.get("on_mode", "cool"),
         "temp_step": t.get("temp_step", 1),
     }
