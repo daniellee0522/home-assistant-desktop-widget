@@ -212,7 +212,7 @@ function applyFixedSizeConstraint() {
 // footprint (which is what used to visibly distort the grid whenever a
 // popover opened). Each visible card gets its own rounded-rect region
 // instead, unioned together in Python via CombineRgn.
-function getActiveCardRects(stageRect) {
+function getActiveCardRects(stageRect, zoomFactor) {
   const rects = [];
   for (const id of ['view-grid', 'view-settings', 'view-picker']) {
     const el = document.getElementById(id);
@@ -222,20 +222,24 @@ function getActiveCardRects(stageRect) {
   }
   const popover = document.getElementById('detail-popover');
   if (!popover.hidden) {
-    // Deliberately *not* popover.getBoundingClientRect(): the popover
-    // fades AND scales in (0.94 -> 1) over ~150ms, so its live rect is
-    // smaller than its target size for that whole time. Computing the
-    // region from the live rect at the wrong instant left the window
-    // sized for the final popover but the clip region matching the
-    // smaller mid-transition one - the gap between the two rendered as a
-    // plain black rectangle (no clip there, and no real transparency to
-    // fall back on). left/top/width/height are exactly where it's headed
-    // regardless of where the animation currently is.
+    // Deliberately *not* popover.getBoundingClientRect() for the popover's
+    // own box size: it no longer scale-transforms (only opacity/translateY,
+    // which don't change layout size), but style.left/top/POPOVER_W/H are
+    // all expressed in *un-zoomed* local CSS px, whereas every other rect
+    // above comes from getBoundingClientRect() - already in *post-zoom*
+    // (visual) px, since `zoom` is applied on <html> itself. Multiplying by
+    // zoomFactor here converts to the same post-zoom space as the rest, so
+    // the single dpr-only conversion below applies uniformly. Skipping this
+    // left the popover's clip region ~1/zoomFactor times too big (at 75%
+    // zoom, ~33% oversized) - bigger than the window itself, so it just got
+    // truncated to "whole window, rounded corners", exposing a big
+    // unpainted black rectangle everywhere the actual (correctly zoomed,
+    // much smaller) popover card didn't reach.
     rects.push({
-      x: parseFloat(popover.style.left) || 0,
-      y: parseFloat(popover.style.top) || 0,
-      w: POPOVER_W,
-      h: POPOVER_H,
+      x: (parseFloat(popover.style.left) || 0) * zoomFactor,
+      y: (parseFloat(popover.style.top) || 0) * zoomFactor,
+      w: POPOVER_W * zoomFactor,
+      h: POPOVER_H * zoomFactor,
     });
   }
   return rects;
@@ -266,7 +270,7 @@ function syncWindowSize() {
     const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
     const cssRadius = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--radius-panel')) || 28;
     const radius = Math.round(cssRadius * zoomFactor * dpr);
-    const rects = getActiveCardRects(stageRect).map((r) => [
+    const rects = getActiveCardRects(stageRect, zoomFactor).map((r) => [
       Math.round(r.x * dpr), Math.round(r.y * dpr), Math.round(r.w * dpr), Math.round(r.h * dpr), radius,
     ]);
 
@@ -577,19 +581,30 @@ function openDetail(tile) {
   // below - popover/backdrop are absolutely positioned (relative to
   // stage, a sibling of view-grid, never nested inside it), so opening
   // this never resizes or distorts view-grid's own card.
+  //
+  // getBoundingClientRect() always reports *post-zoom* (visual) px, since
+  // `zoom` is applied on <html> itself (see applyZoom) - but any px value
+  // *assigned* to .style.left/top/width/height is read back by the zoom
+  // engine as a *local, pre-zoom* length and scaled again at render time.
+  // Feeding a getBoundingClientRect() delta straight into .style.left
+  // therefore renders at left*zoomFactor, not at left - dividing by
+  // zoomFactor here converts it back to the local units .style expects.
+  const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
   const gridRect = document.getElementById('view-grid').getBoundingClientRect();
   const stageRect = stage.getBoundingClientRect();
-  const left = Math.round(tileNode.getBoundingClientRect().left - stageRect.left);
-  const top = Math.round(tileNode.getBoundingClientRect().top - stageRect.top);
+  const left = Math.round((tileNode.getBoundingClientRect().left - stageRect.left) / zoomFactor);
+  const top = Math.round((tileNode.getBoundingClientRect().top - stageRect.top) / zoomFactor);
   popover.style.left = left + 'px';
   popover.style.top = top + 'px';
 
   // Absolutely positioned elements don't grow their container's own
   // auto/shrink-to-fit size, so without explicitly setting stage's size
   // to fit both the grid and the popover, the window would never resize
-  // to show it and it'd just get clipped at the old edge.
-  stage.style.width = Math.max(gridRect.width, left + POPOVER_W) + 'px';
-  stage.style.height = Math.max(gridRect.height, top + POPOVER_H) + 'px';
+  // to show it and it'd just get clipped at the old edge. gridRect.width/
+  // height need the same local-units conversion as left/top above so they
+  // combine correctly with POPOVER_W/H (already local/un-zoomed).
+  stage.style.width = Math.max(gridRect.width / zoomFactor, left + POPOVER_W) + 'px';
+  stage.style.height = Math.max(gridRect.height / zoomFactor, top + POPOVER_H) + 'px';
 
   backdrop.hidden = false;
   popover.hidden = false;
