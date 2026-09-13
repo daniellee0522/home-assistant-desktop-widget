@@ -277,7 +277,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def resize_window(self, phys_w, phys_h, seq=None, radius=None):
+    def resize_window(self, phys_w, phys_h, seq=None, rects=None):
         # phys_w/phys_h are already-physical pixels: the JS side multiplies
         # its CSS measurement by window.devicePixelRatio itself. pywebview's
         # own resize() does that same conversion internally using Win32's
@@ -317,24 +317,20 @@ class Api:
             # it) - not something fixable after the fact by calling a
             # couple of DWM APIs on a WinForms-created HWND (tried three
             # standard ones; none stuck, one even made the window
-            # disappear). Failing that, at least clip the *window itself*
-            # to the same rounded-rect shape as the CSS card, so the
-            # corners are a real cutout to the desktop instead of square
-            # opaque corners poking out past the rounded card underneath.
-            if radius is not None:
-                try:
-                    r = max(0, int(radius))
-                    # HRGN is a pointer-sized HANDLE; ctypes defaults to a
-                    # 32-bit int return type, which silently truncates (and
-                    # so corrupts) it on 64-bit Windows unless restype is
-                    # set explicitly.
-                    create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
-                    create_rgn.restype = ctypes.c_void_p
-                    hrgn = create_rgn(0, 0, w + 1, h + 1, r * 2, r * 2)
-                    if hrgn and not ctypes.windll.user32.SetWindowRgn(hwnd, hrgn, True):
-                        ctypes.windll.gdi32.DeleteObject(hrgn)
-                except Exception:
-                    pass
+            # disappear, and one fought visibly with this region clip -
+            # see the removed _enable_desktop_transparency/_enable_backdrop
+            # above). Failing that, at least clip the *window itself* to
+            # the same rounded-rect shape(s) as the CSS card(s) actually
+            # on screen, so corners are a real cutout to the desktop
+            # instead of square opaque corners poking out past the
+            # rounded card underneath. More than one card can be visible
+            # at once (the grid plus a floating detail popover beside it),
+            # so this unions one rounded-rect region per card rather than
+            # using a single rect for the whole window - which would
+            # either round the wrong (bounding-box) shape or force every
+            # card to share one footprint.
+            if rects:
+                _apply_window_region(hwnd, rects)
 
     def quit_app(self):
         self._quit()
@@ -460,54 +456,15 @@ SWP_NOACTIVATE = 0x0010
 _hwnd_lock = threading.Lock()
 
 
-class _Margins(ctypes.Structure):
-    _fields_ = [
-        ("cxLeftWidth", ctypes.c_int),
-        ("cxRightWidth", ctypes.c_int),
-        ("cyTopHeight", ctypes.c_int),
-        ("cyBottomHeight", ctypes.c_int),
-    ]
-
-
-DWMWA_SYSTEMBACKDROP_TYPE = 38
-DWMSBT_TRANSIENTWINDOW = 3  # Acrylic-like blurred backdrop (Windows 11 22H2+)
-
-
-def _enable_backdrop(window):
-    # Best-effort, Windows-11-only frosted-glass backdrop. No-ops safely
-    # (DwmSetWindowAttribute just returns a failing HRESULT, which we
-    # ignore) on Windows 10 or older 11 builds.
-    hwnd = _get_hwnd(window)
-    if not hwnd:
-        return
-    try:
-        value = ctypes.c_int(DWMSBT_TRANSIENTWINDOW)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(value), ctypes.sizeof(value),
-        )
-    except Exception:
-        pass
-
-
-def _enable_desktop_transparency(window):
-    # pywebview's transparent=True makes WebView2's own background
-    # transparent *relative to the hosting Form*, but on this project's
-    # test machine that alone did not make the window see-through to the
-    # desktop/other apps behind it (verified with a real screen capture:
-    # the desktop wallpaper and icons behind the widget were completely
-    # replaced by an opaque dark rectangle, not blended). Telling DWM the
-    # entire client area is "glass" (the -1/-1/-1/-1 sentinel, rather than
-    # pywebview's own 1px-border use of this same call for its shadow
-    # effect) is what actually makes a transparent-background window
-    # composite through to the desktop with real per-pixel alpha.
-    hwnd = _get_hwnd(window)
-    if not hwnd:
-        return
-    try:
-        margins = _Margins(-1, -1, -1, -1)
-        ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
-    except Exception:
-        pass
+# Both DwmExtendFrameIntoClientArea(-1,-1,-1,-1) and DwmSetWindowAttribute
+# with DWMWA_SYSTEMBACKDROP_TYPE were tried here to chase real desktop
+# transparency; neither made the window see-through (verified with a real
+# screen capture - the desktop behind it stayed a plain opaque rectangle),
+# and DwmExtendFrameIntoClientArea specifically fought with the
+# SetWindowRgn corner-clip below: DWM composites the "glass" frame it
+# creates on a layer that doesn't respect the window's region, producing a
+# square, misaligned ghost rectangle behind the properly-rounded clipped
+# window. Removed rather than left in for no benefit and a visible cost.
 
 
 def _get_hwnd(window):
@@ -515,6 +472,44 @@ def _get_hwnd(window):
         return window.native.Handle.ToInt32()
     except Exception:
         return None
+
+
+RGN_OR = 2
+
+
+def _apply_window_region(hwnd, rects):
+    # rects: iterable of (x, y, w, h, radius), all already in physical
+    # pixels relative to the window's own top-left. Builds one rounded-rect
+    # region per entry and unions them (CombineRgn/RGN_OR) into a single
+    # region for SetWindowRgn - a plain rectangular union of the boxes
+    # would put square corners back exactly where this is trying to
+    # remove them, so each piece keeps its own rounded corners in the
+    # final combined shape.
+    try:
+        create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
+        create_rgn.restype = ctypes.c_void_p
+        combine_rgn = ctypes.windll.gdi32.CombineRgn
+        combine_rgn.restype = ctypes.c_int
+
+        combined = None
+        for x, y, w, h, r in rects:
+            x, y, w, h, r = int(x), int(y), int(w), int(h), max(0, int(r))
+            part = create_rgn(x, y, x + w + 1, y + h + 1, r * 2, r * 2)
+            if not part:
+                continue
+            if combined is None:
+                combined = part
+                continue
+            merged = create_rgn(0, 0, 0, 0)
+            combine_rgn(merged, combined, part, RGN_OR)
+            ctypes.windll.gdi32.DeleteObject(combined)
+            ctypes.windll.gdi32.DeleteObject(part)
+            combined = merged
+
+        if combined and not ctypes.windll.user32.SetWindowRgn(hwnd, combined, True):
+            ctypes.windll.gdi32.DeleteObject(combined)
+    except Exception:
+        pass
 
 
 def _set_noactivate(window, enable):
@@ -623,8 +618,6 @@ def main():
     bottom_pin_stop = threading.Event()
 
     def on_shown():
-        _enable_desktop_transparency(window)
-        _enable_backdrop(window)
         _set_noactivate(window, True)
         _hide_from_taskbar(window)
         _send_to_bottom(window)

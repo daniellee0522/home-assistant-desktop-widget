@@ -2,7 +2,7 @@
   --tile: 130px;
   --gap: 12px;
   --pad: 20px;
-  --radius-panel: 28px;
+  --radius-panel: 36px;
   --radius-tile: 20px;
 
   --panel: rgba(210, 226, 240, 0.78);
@@ -223,6 +223,11 @@ html, body {
   right: 10px;
   display: flex;
   gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.tile:hover .mini-btns {
+  opacity: 1;
 }
 .tile .mini-btn {
   width: 24px;
@@ -293,6 +298,18 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   background: transparent;
 }
 .detail-popover {
+  /* Deliberately no transform/scale here: the window's hard clip region
+     (see getActiveCardRects in app.js) is always sized to this box's full
+     260x336 footprint, computed independently of this animation's
+     progress. A scale-in would shrink the *visible* card below that
+     footprint for as long as the transition hasn't finished - and since
+     this is a WS_EX_NOACTIVATE window that never gains real OS focus,
+     Chromium can throttle its rAF/transitions indefinitely, leaving a
+     permanently unpainted (white) sliver between the smaller visible card
+     and the already-full-size clip region. Opacity + a small translate
+     don't change the box's own layout footprint, so they're safe to
+     animate no matter how slowly (or never) the transition actually
+     plays. */
   position: absolute;
   width: 260px;
   height: 336px;
@@ -301,14 +318,13 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   flex-direction: column;
   overflow: hidden;
   opacity: 0;
-  transform: scale(0.94);
-  transform-origin: top left;
+  transform: translateY(6px);
   transition: opacity 0.15s ease, transform 0.15s ease;
   pointer-events: none;
 }
 .detail-popover.show {
   opacity: 1;
-  transform: scale(1);
+  transform: translateY(0);
   pointer-events: auto;
 }
 
@@ -458,6 +474,53 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
 }
 .toggle-switch.is-on { background: var(--accent-green); }
 .toggle-switch.is-on::after { transform: translateX(20px); }
+
+/* Big HomeKit-style accessory tile: the primary glance+toggle control,
+   shared by every expandable domain for a consistent look. Off = dim
+   icon on a plain dark tile; on = a colored fill rising from the bottom
+   (100% for a plain switch, the live percentage for a dimmable one). */
+.accessory-tile {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 150px;
+  border-radius: 22px;
+  border: none;
+  padding: 0;
+  margin: 8px 0 16px;
+  overflow: hidden;
+  background: var(--tile-off);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.accessory-tile .fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0%;
+  background: var(--accessory-color, var(--accent-blue));
+  transition: height 0.25s ease;
+}
+.accessory-tile .accessory-icon {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  width: 30px;
+  height: 30px;
+  color: #fff;
+  z-index: 1;
+}
+.accessory-tile .accessory-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.accessory-tile .accessory-state {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  z-index: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
 
 .slider-block { margin: 14px 0; }
 .slider-block .slider-label {

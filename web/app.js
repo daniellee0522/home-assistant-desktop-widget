@@ -16,6 +16,9 @@ const ICON_PATHS = {
   script: '<path d="M6 3h2v2H7v14h1v2H6a1 1 0 01-1-1V4a1 1 0 011-1zm12 0a1 1 0 011 1v16a1 1 0 01-1 1h-2v-2h1V5h-1V3h2zM10 8l6 4-6 4z"/>',
   automation: '<path d="M13 2L4 14h6l-1 8 9-12h-6z"/>',
   sensor: '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 3a1.6 1.6 0 110 3.2A1.6 1.6 0 0112 5zm-2 6h4v8h-4z"/>',
+  monitor: '<path d="M4 4h16a1 1 0 011 1v11a1 1 0 01-1 1h-5l1 3H9l1-3H5a1 1 0 01-1-1V5a1 1 0 011-1zm1 2v9h14V6H5z"/>',
+  door: '<path d="M6 2h12v20H6V2zm2 2v16h8V4H8zm5.5 7a1.25 1.25 0 110 2.5 1.25 1.25 0 010-2.5z"/>',
+  curtain: '<path d="M4 3h16v2H4V3zm2 2.5c1.8 3-1.8 4-.4 7s-1.4 4 .4 7H5v-14h1zm12 0c-1.8 3 1.8 4 .4 7s1.4 4-.4 7h1v-14h-1zM10.5 5.5h3V19h-3V5.5z"/>',
   power: '<path d="M11 2h2v9h-2zM6.3 5.3l1.4 1.4A6 6 0 1016.3 6.7l1.4-1.4A8 8 0 1112 4a7.95 7.95 0 00-5.7 1.3z"/>',
   gear: '<path d="M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7zM21 12a9 9 0 00-.19-1.86l2.03-1.58a.75.75 0 00.17-.96l-1.92-3.32a.75.75 0 00-.91-.32l-2.39.96c-.98-.75-1.44-.99-2.36-1.32L15.07.6A.75.75 0 0014.33 0h-3.84a.75.75 0 00-.74.64l-.36 2.54c-.93.33-1.38.57-2.36 1.32l-2.39-.96a.75.75 0 00-.91.32L1.81 7.18a.75.75 0 00.17.96l2.03 1.58A9 9 0 003 12c0 .64.07 1.26.19 1.86l-2.03 1.58a.75.75 0 00-.17.96l1.92 3.32c.2.34.6.47.91.32l2.39-.96c.98.75 1.44.99 2.36 1.32l.36 2.54c.06.37.37.64.74.64h3.84c.37 0 .68-.27.74-.64l.36-2.54c.93-.33 1.38-.57 2.36-1.32l2.39.96c.34.14.75 0 .91-.32l1.92-3.32a.75.75 0 00-.17-.96l-2.03-1.58c.12-.6.19-1.22.19-1.86z"/>',
 };
@@ -202,28 +205,72 @@ function applyFixedSizeConstraint() {
   }
 }
 
+// The window can show more than one rounded card at once (the grid, plus
+// a floating detail popover that's a sibling of it, not nested inside) -
+// a single rounded-rect clip for the whole window would either round the
+// *bounding box* of both (wrong shape) or force them to share one
+// footprint (which is what used to visibly distort the grid whenever a
+// popover opened). Each visible card gets its own rounded-rect region
+// instead, unioned together in Python via CombineRgn.
+function getActiveCardRects(stageRect) {
+  const rects = [];
+  for (const id of ['view-grid', 'view-settings', 'view-picker']) {
+    const el = document.getElementById(id);
+    if (el.hidden) continue;
+    const r = el.getBoundingClientRect();
+    rects.push({ x: r.left - stageRect.left, y: r.top - stageRect.top, w: r.width, h: r.height });
+  }
+  const popover = document.getElementById('detail-popover');
+  if (!popover.hidden) {
+    // Deliberately *not* popover.getBoundingClientRect(): the popover
+    // fades AND scales in (0.94 -> 1) over ~150ms, so its live rect is
+    // smaller than its target size for that whole time. Computing the
+    // region from the live rect at the wrong instant left the window
+    // sized for the final popover but the clip region matching the
+    // smaller mid-transition one - the gap between the two rendered as a
+    // plain black rectangle (no clip there, and no real transparency to
+    // fall back on). left/top/width/height are exactly where it's headed
+    // regardless of where the animation currently is.
+    rects.push({
+      x: parseFloat(popover.style.left) || 0,
+      y: parseFloat(popover.style.top) || 0,
+      w: POPOVER_W,
+      h: POPOVER_H,
+    });
+  }
+  return rects;
+}
+
 function syncWindowSize() {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
     if (!(window.pywebview && window.pywebview.api)) return;
     const dpr = window.devicePixelRatio || 1;
+    const stage = document.getElementById('stage');
     let cssW, cssH;
     if (CONFIG.fixed_size) {
       cssW = Math.max(120, Number(CONFIG.fixed_width) || 400);
       cssH = Math.max(90, Number(CONFIG.fixed_height) || 300);
     } else {
-      const rect = document.getElementById('stage').getBoundingClientRect();
+      const rect = stage.getBoundingClientRect();
       cssW = rect.width + 4;
       cssH = rect.height + 4;
     }
     resizeSeq += 1;
-    // Keep the window's own clip region (see resize_window in main.py) in
-    // step with the card's actual rendered corner radius, including the
-    // zoom setting - CSS zoom scales border-radius rendering the same way
-    // it scales everything else that getBoundingClientRect() picks up.
+
+    // Convert each active card's box to physical pixels for the window's
+    // clip region, matching the actual rendered corner radius (--radius-
+    // panel), zoom included - CSS zoom scales border-radius rendering the
+    // same way it scales everything else getBoundingClientRect() sees.
+    const stageRect = stage.getBoundingClientRect();
     const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
-    const radius = Math.round(28 * zoomFactor * dpr);
-    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq, radius);
+    const cssRadius = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--radius-panel')) || 28;
+    const radius = Math.round(cssRadius * zoomFactor * dpr);
+    const rects = getActiveCardRects(stageRect).map((r) => [
+      Math.round(r.x * dpr), Math.round(r.y * dpr), Math.round(r.w * dpr), Math.round(r.h * dpr), radius,
+    ]);
+
+    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq, rects);
   });
 }
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
@@ -516,7 +563,7 @@ let popoverCloseTimer = null;
 
 function openDetail(tile) {
   const tileNode = document.querySelector('.tile[data-id="' + tile.id + '"]');
-  const viewGrid = document.getElementById('view-grid');
+  const stage = document.getElementById('stage');
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
   if (!tileNode) return;
@@ -526,19 +573,23 @@ function openDetail(tile) {
   showEditMode(false);
   renderDetailBody();
 
-  const tileRect = tileNode.getBoundingClientRect();
-  const gridRect = viewGrid.getBoundingClientRect();
-  const left = Math.round(tileRect.left - gridRect.left);
-  const top = Math.round(tileRect.top - gridRect.top);
+  // Measure the grid's natural size *before* touching stage's own size
+  // below - popover/backdrop are absolutely positioned (relative to
+  // stage, a sibling of view-grid, never nested inside it), so opening
+  // this never resizes or distorts view-grid's own card.
+  const gridRect = document.getElementById('view-grid').getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  const left = Math.round(tileNode.getBoundingClientRect().left - stageRect.left);
+  const top = Math.round(tileNode.getBoundingClientRect().top - stageRect.top);
   popover.style.left = left + 'px';
   popover.style.top = top + 'px';
 
   // Absolutely positioned elements don't grow their container's own
-  // auto/shrink-to-fit size, so without forcing the grid to actually be
-  // this big, the window would never resize to fit and the popover would
-  // just get clipped at the old edge.
-  viewGrid.style.minWidth = (left + POPOVER_W + 20) + 'px';
-  viewGrid.style.minHeight = (top + POPOVER_H + 20) + 'px';
+  // auto/shrink-to-fit size, so without explicitly setting stage's size
+  // to fit both the grid and the popover, the window would never resize
+  // to show it and it'd just get clipped at the old edge.
+  stage.style.width = Math.max(gridRect.width, left + POPOVER_W) + 'px';
+  stage.style.height = Math.max(gridRect.height, top + POPOVER_H) + 'px';
 
   backdrop.hidden = false;
   popover.hidden = false;
@@ -552,7 +603,7 @@ function closeDetail() {
   currentDetailTileId = null;
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
-  const viewGrid = document.getElementById('view-grid');
+  const stage = document.getElementById('stage');
   popover.classList.remove('show');
   backdrop.hidden = true;
   if (window.pywebview && window.pywebview.api) window.pywebview.api.set_activatable(false).catch(() => {});
@@ -560,8 +611,8 @@ function closeDetail() {
     popoverCloseTimer = null;
     if (currentDetailTileId) return; // reopened (on a different tile) before the fade finished
     popover.hidden = true;
-    viewGrid.style.minWidth = '';
-    viewGrid.style.minHeight = '';
+    stage.style.width = '';
+    stage.style.height = '';
     syncWindowSize();
   }, 170);
 }
@@ -579,7 +630,10 @@ function renderDetailBody() {
 }
 
 /* ---- per-tile edit sub-panel (icon / name / category) ---- */
-const ICON_CHOICES = ['light', 'switch', 'climate', 'fan', 'cover', 'media', 'lock', 'vacuum', 'scene', 'script', 'automation', 'sensor'];
+const ICON_CHOICES = [
+  'light', 'switch', 'climate', 'fan', 'cover', 'curtain', 'media', 'monitor',
+  'lock', 'door', 'vacuum', 'scene', 'script', 'automation', 'sensor',
+];
 
 function showEditMode(show) {
   document.getElementById('detail-body').hidden = show;
@@ -619,6 +673,28 @@ function toggleRow(label, on, onClick) {
   sw.addEventListener('click', onClick);
   row.appendChild(l); row.appendChild(sw);
   return row;
+}
+
+// The big HomeKit-style glance+toggle tile: shared by every expandable
+// domain as the primary control, for one consistent look. fillPct is the
+// portion (0-100) of the tile that fills with color when on - 100 for a
+// plain switch, the live percentage for something dimmable.
+function accessoryTile(iconName, on, fillPct, color, stateText, onClick) {
+  const tile = document.createElement('button');
+  tile.className = 'accessory-tile' + (on ? ' is-on' : '');
+  tile.style.setProperty('--accessory-color', color);
+  const fill = document.createElement('div'); fill.className = 'fill';
+  fill.style.height = (on ? Math.max(6, fillPct) : 0) + '%';
+  const icon = document.createElement('div'); icon.className = 'accessory-icon';
+  icon.innerHTML = svgIcon(iconName);
+  tile.appendChild(fill);
+  tile.appendChild(icon);
+  if (stateText) {
+    const st = document.createElement('div'); st.className = 'accessory-state'; st.textContent = stateText;
+    tile.appendChild(st);
+  }
+  tile.addEventListener('click', onClick);
+  return tile;
 }
 function sliderBlock(label, value, min, max, unit, onCommit, step) {
   const wrap = document.createElement('div'); wrap.className = 'slider-block';
@@ -664,10 +740,15 @@ const DETAIL_BUILDERS = {
   light(body, tile, state) {
     const attrs = (state && state.attributes) || {};
     const on = !!state && state.state === 'on';
-    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('light', 'toggle', tile.entity); }));
+    const pct = ('brightness' in attrs && attrs.brightness != null) ? Math.round((attrs.brightness / 255) * 100) : 100;
+    const color = Array.isArray(attrs.rgb_color) ? 'rgb(' + attrs.rgb_color.join(',') + ')' : 'var(--accent-yellow)';
+    const icon = tile.icon || domainMeta('light').icon;
+    body.appendChild(accessoryTile(icon, on, pct, color, on ? (pct + '%') : '關閉', () => {
+      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
+      callService('light', 'toggle', tile.entity);
+    }));
     if (!on) return;
     if ('brightness' in attrs && attrs.brightness != null) {
-      const pct = Math.round((attrs.brightness / 255) * 100);
       body.appendChild(sliderBlock('亮度', pct, 1, 100, '%', (v) => callService('light', 'turn_on', tile.entity, { brightness_pct: Number(v) }), 1));
     }
     if (attrs.color_temp_kelvin || attrs.min_color_temp_kelvin) {
@@ -682,18 +763,31 @@ const DETAIL_BUILDERS = {
   fan(body, tile, state) {
     const attrs = (state && state.attributes) || {};
     const on = !!state && state.state === 'on';
-    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('fan', 'toggle', tile.entity); }));
+    const pct = attrs.percentage != null ? attrs.percentage : 100;
+    const icon = tile.icon || domainMeta('fan').icon;
+    body.appendChild(accessoryTile(icon, on, pct, 'var(--accent-blue)', on ? (pct + '%') : '關閉', () => {
+      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
+      callService('fan', 'toggle', tile.entity);
+    }));
     if (on && attrs.percentage != null) {
       body.appendChild(sliderBlock('風速', attrs.percentage, 0, 100, '%', (v) => callService('fan', 'set_percentage', tile.entity, { percentage: Number(v) }), 10));
     }
   },
   switch(body, tile, state) {
     const on = !!state && state.state === 'on';
-    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('switch', 'toggle', tile.entity); }));
+    const icon = tile.icon || domainMeta('switch').icon;
+    body.appendChild(accessoryTile(icon, on, 100, 'var(--accent-blue)', on ? '開啟' : '關閉', () => {
+      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
+      callService('switch', 'toggle', tile.entity);
+    }));
   },
   input_boolean(body, tile, state) {
     const on = !!state && state.state === 'on';
-    body.appendChild(toggleRow('電源', on, () => { optimisticSet(tile.entity, { state: on ? 'off' : 'on' }); callService('input_boolean', 'toggle', tile.entity); }));
+    const icon = tile.icon || domainMeta('input_boolean').icon;
+    body.appendChild(accessoryTile(icon, on, 100, 'var(--accent-blue)', on ? '開啟' : '關閉', () => {
+      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
+      callService('input_boolean', 'toggle', tile.entity);
+    }));
   },
   climate(body, tile, state) {
     const attrs = (state && state.attributes) || {};
