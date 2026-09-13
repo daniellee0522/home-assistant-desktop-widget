@@ -205,46 +205,24 @@ function applyFixedSizeConstraint() {
   }
 }
 
-// The window can show more than one rounded card at once (the grid, plus
-// a floating detail popover that's a sibling of it, not nested inside) -
-// a single rounded-rect clip for the whole window would either round the
-// *bounding box* of both (wrong shape) or force them to share one
-// footprint (which is what used to visibly distort the grid whenever a
-// popover opened). Each visible card gets its own rounded-rect region
-// instead, unioned together in Python via CombineRgn.
-function getActiveCardRects(stageRect, zoomFactor) {
-  const rects = [];
-  for (const id of ['view-grid', 'view-settings', 'view-picker']) {
-    const el = document.getElementById(id);
-    if (el.hidden) continue;
-    const r = el.getBoundingClientRect();
-    rects.push({ x: r.left - stageRect.left, y: r.top - stageRect.top, w: r.width, h: r.height });
-  }
-  const popover = document.getElementById('detail-popover');
-  if (!popover.hidden) {
-    // Deliberately *not* popover.getBoundingClientRect() for the popover's
-    // own box size: it no longer scale-transforms (only opacity/translateY,
-    // which don't change layout size), but style.left/top/POPOVER_W/H are
-    // all expressed in *un-zoomed* local CSS px, whereas every other rect
-    // above comes from getBoundingClientRect() - already in *post-zoom*
-    // (visual) px, since `zoom` is applied on <html> itself. Multiplying by
-    // zoomFactor here converts to the same post-zoom space as the rest, so
-    // the single dpr-only conversion below applies uniformly. Skipping this
-    // left the popover's clip region ~1/zoomFactor times too big (at 75%
-    // zoom, ~33% oversized) - bigger than the window itself, so it just got
-    // truncated to "whole window, rounded corners", exposing a big
-    // unpainted black rectangle everywhere the actual (correctly zoomed,
-    // much smaller) popover card didn't reach.
-    rects.push({
-      x: (parseFloat(popover.style.left) || 0) * zoomFactor,
-      y: (parseFloat(popover.style.top) || 0) * zoomFactor,
-      w: POPOVER_W * zoomFactor,
-      h: POPOVER_H * zoomFactor,
-    });
-  }
-  return rects;
-}
-
+// The window's native clip region is *one* rounded rect matching #stage's
+// own bounds - not one piece per visible card unioned together. That
+// per-card approach was tried (grid rect + popover rect, unioned via
+// CombineRgn) to avoid distorting the grid when a popover opens, but
+// without real per-pixel window transparency, any gap *between* the
+// pieces became a hole in the window's actual shape - and since nothing
+// of ours renders behind a hole, whatever real window happens to sit on
+// the desktop there (dark terminal, light Explorer window, plain
+// wallpaper) showed through, looking like a random black/white glitch
+// that came and went with no visible cause. It wasn't a sizing bug: even
+// pixel-perfect per-card rects still had a hole between them whenever
+// the popover didn't fully overlap the grid. One rect covering the whole
+// stage has no such hole - any gap between cards is real window surface,
+// filled by #stage's own opaque background (see style.css) instead of
+// whatever's on the desktop behind it. The grid-distortion problem this
+// was working around is independently solved by the popover being a
+// stage-level sibling with its own position (see openDetail) rather than
+// something view-grid has to grow to fit.
 function syncWindowSize() {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
@@ -262,19 +240,11 @@ function syncWindowSize() {
     }
     resizeSeq += 1;
 
-    // Convert each active card's box to physical pixels for the window's
-    // clip region, matching the actual rendered corner radius (--radius-
-    // panel), zoom included - CSS zoom scales border-radius rendering the
-    // same way it scales everything else getBoundingClientRect() sees.
-    const stageRect = stage.getBoundingClientRect();
     const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
     const cssRadius = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--radius-panel')) || 28;
     const radius = Math.round(cssRadius * zoomFactor * dpr);
-    const rects = getActiveCardRects(stageRect, zoomFactor).map((r) => [
-      Math.round(r.x * dpr), Math.round(r.y * dpr), Math.round(r.w * dpr), Math.round(r.h * dpr), radius,
-    ]);
 
-    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq, rects);
+    window.pywebview.api.resize_window(Math.ceil(cssW * dpr), Math.ceil(cssH * dpr), resizeSeq, radius);
   });
 }
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));

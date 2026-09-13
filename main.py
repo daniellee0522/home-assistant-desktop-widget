@@ -277,7 +277,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def resize_window(self, phys_w, phys_h, seq=None, rects=None):
+    def resize_window(self, phys_w, phys_h, seq=None, radius=0):
         # phys_w/phys_h are already-physical pixels: the JS side multiplies
         # its CSS measurement by window.devicePixelRatio itself. pywebview's
         # own resize() does that same conversion internally using Win32's
@@ -304,33 +304,55 @@ class Api:
             return
         w = max(80, int(phys_w))
         h = max(60, int(phys_h))
-        with _hwnd_lock:
-            try:
-                ctypes.windll.user32.SetWindowPos(
-                    hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                )
-            except Exception:
-                pass
-            # True per-pixel desktop transparency turned out to need the
-            # hosting framework to build its top-level window on
-            # DirectComposition from the start (how Electron/Chromium do
-            # it) - not something fixable after the fact by calling a
-            # couple of DWM APIs on a WinForms-created HWND (tried three
-            # standard ones; none stuck, one even made the window
-            # disappear, and one fought visibly with this region clip -
-            # see the removed _enable_desktop_transparency/_enable_backdrop
-            # above). Failing that, at least clip the *window itself* to
-            # the same rounded-rect shape(s) as the CSS card(s) actually
-            # on screen, so corners are a real cutout to the desktop
-            # instead of square opaque corners poking out past the
-            # rounded card underneath. More than one card can be visible
-            # at once (the grid plus a floating detail popover beside it),
-            # so this unions one rounded-rect region per card rather than
-            # using a single rect for the whole window - which would
-            # either round the wrong (bounding-box) shape or force every
-            # card to share one footprint.
-            if rects:
-                _apply_window_region(hwnd, rects)
+
+        def _apply():
+            with _hwnd_lock:
+                try:
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                except Exception:
+                    pass
+                # True per-pixel desktop transparency turned out to need the
+                # hosting framework to build its top-level window on
+                # DirectComposition from the start (how Electron/Chromium do
+                # it) - not something fixable after the fact by calling a
+                # couple of DWM APIs on a WinForms-created HWND (tried three
+                # standard ones; none stuck, one even made the window
+                # disappear, and one fought visibly with this region clip -
+                # see the removed _enable_desktop_transparency/_enable_backdrop
+                # above). Failing that, at least clip the *window itself* to
+                # one rounded rect matching its own size, so corners are a
+                # real cutout to the desktop instead of square opaque corners
+                # poking out past the rounded card underneath. This used to
+                # be a union of one rounded rect per visible card (grid +
+                # popover) instead of one rect for the whole window - looked
+                # more precise on paper, but any gap *between* the pieces
+                # became an actual hole in the window's shape, and without
+                # real transparency there's nothing of ours to show through
+                # a hole - whatever real window happens to be on the desktop
+                # underneath shows instead, which read as a random black-or-
+                # white glitch with no visible cause. One rect has no gaps to
+                # punch holes in; #stage's own opaque background (see
+                # style.css) covers whatever space isn't a card.
+                if radius:
+                    _apply_window_region(hwnd, w, h, radius)
+
+        # pywebview runs every js_api call (this one included) on a fresh,
+        # throwaway Python thread so a slow call can't block the UI (see
+        # webview.util.js_bridge_call) - it is *not* the WinForms UI thread
+        # that owns this HWND. Calling SetWindowPos/SetWindowRgn straight
+        # from there races the docked WebView2 child control's own
+        # Dock=Fill relayout and repaint, which WinForms drives on its UI
+        # thread's message loop: the region could land before WebView2's
+        # surface has actually resized to match, exposing raw unpainted
+        # canvas (black) or the bare WinForms Form background (white)
+        # until it catches up - intermittently, depending on scheduling.
+        # Marshaling onto the UI thread via Invoke (the same mechanism
+        # pywebview itself uses for every other native call - see
+        # InvokeRequired/Invoke throughout platforms/winforms.py) makes
+        # this synchronous with that relayout instead of racing it.
+        _run_on_ui_thread(self._window, _apply)
 
     def quit_app(self):
         self._quit()
@@ -474,40 +496,44 @@ def _get_hwnd(window):
         return None
 
 
-RGN_OR = 2
+def _run_on_ui_thread(window, fn):
+    """Run fn (no-arg callable) on the WinForms UI thread that owns this
+    window's HWND, blocking until it completes. Every js_api call arrives
+    on its own throwaway Python thread (see webview.util.js_bridge_call),
+    so any code that touches the HWND directly - SetWindowPos, SetWindowRgn,
+    SetWindowLongW - must be marshaled over like this or it races WinForms'
+    own UI-thread-driven layout/paint pipeline for the docked WebView2
+    control. This mirrors the InvokeRequired/Invoke pattern pywebview uses
+    internally for its own native calls (see platforms/winforms.py).
+    """
+    native = getattr(window, "native", None)
+    if native is None:
+        fn()
+        return
+    try:
+        if native.InvokeRequired:
+            from System import Func, Type
+            native.Invoke(Func[Type](fn))
+        else:
+            fn()
+    except Exception:
+        try:
+            fn()
+        except Exception:
+            pass
 
 
-def _apply_window_region(hwnd, rects):
-    # rects: iterable of (x, y, w, h, radius), all already in physical
-    # pixels relative to the window's own top-left. Builds one rounded-rect
-    # region per entry and unions them (CombineRgn/RGN_OR) into a single
-    # region for SetWindowRgn - a plain rectangular union of the boxes
-    # would put square corners back exactly where this is trying to
-    # remove them, so each piece keeps its own rounded corners in the
-    # final combined shape.
+def _apply_window_region(hwnd, w, h, radius):
+    # One rounded rect covering the *entire* window (0,0)-(w,h) - see the
+    # comment at resize_window's call site for why this isn't a union of
+    # one rect per visible card anymore.
     try:
         create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
         create_rgn.restype = ctypes.c_void_p
-        combine_rgn = ctypes.windll.gdi32.CombineRgn
-        combine_rgn.restype = ctypes.c_int
-
-        combined = None
-        for x, y, w, h, r in rects:
-            x, y, w, h, r = int(x), int(y), int(w), int(h), max(0, int(r))
-            part = create_rgn(x, y, x + w + 1, y + h + 1, r * 2, r * 2)
-            if not part:
-                continue
-            if combined is None:
-                combined = part
-                continue
-            merged = create_rgn(0, 0, 0, 0)
-            combine_rgn(merged, combined, part, RGN_OR)
-            ctypes.windll.gdi32.DeleteObject(combined)
-            ctypes.windll.gdi32.DeleteObject(part)
-            combined = merged
-
-        if combined and not ctypes.windll.user32.SetWindowRgn(hwnd, combined, True):
-            ctypes.windll.gdi32.DeleteObject(combined)
+        r = max(0, int(radius))
+        rgn = create_rgn(0, 0, int(w) + 1, int(h) + 1, r * 2, r * 2)
+        if rgn and not ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True):
+            ctypes.windll.gdi32.DeleteObject(rgn)
     except Exception:
         pass
 
@@ -516,13 +542,17 @@ def _set_noactivate(window, enable):
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
-    with _hwnd_lock:
-        try:
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = (style | WS_EX_NOACTIVATE) if enable else (style & ~WS_EX_NOACTIVATE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-        except Exception:
-            pass
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                style = (style | WS_EX_NOACTIVATE) if enable else (style & ~WS_EX_NOACTIVATE)
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
 
 
 def _hide_from_taskbar(window):
@@ -533,37 +563,49 @@ def _hide_from_taskbar(window):
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
-    with _hwnd_lock:
-        try:
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW)
-        except Exception:
-            pass
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW)
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
 
 
 def _send_to_bottom(window):
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
-    with _hwnd_lock:
-        try:
-            ctypes.windll.user32.SetWindowPos(
-                hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-        except Exception:
-            pass
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
 
 
 def _bring_to_front(window):
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
-    with _hwnd_lock:
-        try:
-            ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
 
 
 def _bottom_pin_loop(window, stop_event, pin_enabled):
