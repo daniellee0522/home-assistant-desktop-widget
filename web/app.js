@@ -755,7 +755,12 @@ function requestPopover(tile) {
   window.pywebview.api.get_window_pos().then((pos) => {
     const screenX = Math.round((pos && pos.x || 0) + r.left * dpr);
     const screenY = Math.round((pos && pos.y || 0) + r.top * dpr);
-    return window.pywebview.api.open_popover(tile.id, screenX, screenY);
+    // The tile's size goes along too: near a screen edge the popover
+    // flips to align with the tile's far edge rather than its near one,
+    // which it cannot work out from a corner alone.
+    return window.pywebview.api.open_popover(
+      tile.id, screenX, screenY, Math.round(r.width * dpr), Math.round(r.height * dpr),
+    );
   }).catch(() => {});
 }
 

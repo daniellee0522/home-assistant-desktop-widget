@@ -77,6 +77,13 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 TILE, GAP, PAD = 130, 12, 20
 
 
+# The smallest a window is ever made. Windows below roughly this size
+# stop laying their content out sensibly, and a window collapsed to it
+# is one whose page has nothing to show rather than one anybody sees.
+MIN_WINDOW_W = 80
+MIN_WINDOW_H = 60
+
+
 class Api:
     """Exposed to the page as window.pywebview.api.<method>.
 
@@ -119,6 +126,11 @@ class Api:
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
+        # The tile the popover belongs to (x, y, w, h in physical
+        # pixels) and the last real size it took, both needed to place
+        # it - see _popover_origin.
+        self._popover_anchor = None
+        self._popover_size = None
         self._popover_last_resize_seq = -1
 
         # Settings is a third window for the same reasons the popover is
@@ -356,11 +368,16 @@ class Api:
     def resize_popover_window(self, phys_w, phys_h, seq=None):
         # The detail popover is a separate OS window (see IS_POPOVER_WINDOW
         # in app.js) that resizes on its own schedule, so it needs its own
-        # sequence counter and lock - everything else is identical to the
-        # grid window's path above.
+        # sequence counter and lock. It is also the one window that is
+        # *moved* by its resize: where it goes depends on how big it is
+        # (a card that fits below its tile hangs off the bottom of the
+        # screen once it grows taller), and the size is only known here,
+        # once its page has laid the detail out. Doing both in one call
+        # also keeps it from showing at the old place for a frame.
         self._resize_native(
             self._popover_window, self._popover_resize_lock, "_popover_last_resize_seq",
             phys_w, phys_h, seq, "resize_popover_window",
+            origin=self._popover_origin,
         )
 
     def resize_settings_window(self, phys_w, phys_h, seq=None):
@@ -372,7 +389,8 @@ class Api:
             phys_w, phys_h, seq, "resize_settings_window",
         )
 
-    def _resize_native(self, window, seq_lock, seq_attr, phys_w, phys_h, seq, tag):
+    def _resize_native(self, window, seq_lock, seq_attr, phys_w, phys_h, seq, tag,
+                       origin=None):
         if not window:
             return
         if seq is not None:
@@ -387,8 +405,8 @@ class Api:
         hwnd = _get_hwnd(window)
         if not hwnd:
             return
-        w = max(80, int(phys_w))
-        h = max(60, int(phys_h))
+        w = max(MIN_WINDOW_W, int(phys_w))
+        h = max(MIN_WINDOW_H, int(phys_h))
 
         if os.environ.get("HA_WIDGET_DEBUG"):
             with open(os.path.join(BASE_DIR, "resize_trace.txt"), "a", encoding="utf-8") as f:
@@ -404,7 +422,11 @@ class Api:
         # pywebview itself uses for every other native call - see
         # InvokeRequired/Invoke throughout platforms/winforms.py) makes
         # this synchronous with the relayout instead of racing it.
-        _run_on_ui_thread(window, lambda: _set_window_size(hwnd, w, h))
+        at = origin(w, h) if origin else None
+        if at:
+            _run_on_ui_thread(window, lambda: _set_window_rect(hwnd, at[0], at[1], w, h))
+        else:
+            _run_on_ui_thread(window, lambda: _set_window_size(hwnd, w, h))
 
     def quit_app(self):
         self._quit()
@@ -425,7 +447,28 @@ class Api:
                 _send_to_bottom(self._window)
         return True
 
-    def open_popover(self, tile_id, screen_x, screen_y):
+    def _popover_origin(self, w, h):
+        """Where a w*h popover goes for the tile that opened it, or None if
+        there is nothing open to place."""
+        anchor = self._popover_anchor
+        if not anchor:
+            return None
+        x, y, tw, th = anchor
+        work = _work_area_at(x, y)
+        if not work or w <= 0 or h <= 0:
+            return None
+        # Remember what it settled at: the next open needs a size to place
+        # against before its page has had a chance to report one. Not the
+        # collapsed minimum though - that is the closing animation's
+        # parting shot, not a card anyone saw.
+        if w > MIN_WINDOW_W and h > MIN_WINDOW_H:
+            self._popover_size = (w, h)
+        return (
+            _place_against(x, w, x, tw or w, work[0], work[2]),
+            _place_against(y, h, y, th or h, work[1], work[3]),
+        )
+
+    def open_popover(self, tile_id, screen_x, screen_y, tile_w=0, tile_h=0):
         # Moves the (normally hidden) popover window to sit exactly where
         # the clicked tile is on screen, shows it, and asks its own page
         # (already running the full shared bootstrap - same config, same
@@ -434,6 +477,22 @@ class Api:
             return
         hwnd = _get_hwnd(self._popover_window)
         if hwnd:
+            # Default placement is the tile's own top-left corner, so the
+            # card appears to grow out of what was pressed. Near a screen
+            # edge that would push it off, so it flips to align with the
+            # tile's opposite edge instead - see _place_against.
+            self._popover_anchor = (int(screen_x), int(screen_y), int(tile_w), int(tile_h))
+            # This window is still collapsed to its minimum right now (it
+            # shrinks when it closes, and its page only reports a size once
+            # it has rendered the tile), so asking the OS how big it is
+            # would place a 80x60 card. The size it took last time is the
+            # best guess available; resize_popover_window corrects it a
+            # moment later with the real one.
+            guess = self._popover_size
+            if guess:
+                at = self._popover_origin(guess[0], guess[1])
+                if at:
+                    screen_x, screen_y = at
             # Deliberately not self._popover_window.move(): pywebview's
             # move() takes *logical* pixels and scales them by
             # GetDpiForWindow (see platforms/winforms.py), but screen_x/y
@@ -522,6 +581,10 @@ class Api:
         # The grid window can go back to being hidden from capture, which
         # puts its own backdrop back on the cheap path - unless Settings is
         # still up and needs to see it.
+        # Forget the tile it belonged to: the page shrinks this window
+        # back to nothing on the way out, and that resize must not drag an
+        # already-hidden window around.
+        self._popover_anchor = None
         self._overlays_open.discard("popover")
         self._apply_capture_exclusion()
 
@@ -992,6 +1055,7 @@ _user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_
 _user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 _user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.MonitorFromWindow.restype = ctypes.c_void_p
+_user32.MonitorFromPoint.restype = ctypes.c_void_p
 _user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
@@ -1342,6 +1406,18 @@ def _run_on_ui_thread(window, fn):
             pass
 
 
+def _set_window_rect(hwnd, x, y, w, h):
+    """Set position and size together, leaving z-order alone. One call so a
+    window that moves because it resized never shows up at the old place
+    for a frame. Callers must already be on the UI thread.
+    """
+    with _hwnd_lock:
+        try:
+            _user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
+
 def _set_window_pos(hwnd, x, y):
     """Set the window's top-left in physical screen pixels, leaving size
     and z-order alone. Callers must already be on the UI thread.
@@ -1413,6 +1489,47 @@ class _MONITORINFO(ctypes.Structure):
 
 
 MONITOR_DEFAULTTONEAREST = 2
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+# Declared here rather than with the others above: MonitorFromPoint takes
+# its POINT by value, so the struct has to exist first.
+_user32.MonitorFromPoint.argtypes = [_POINT, ctypes.c_uint]
+
+
+def _work_area_at(x, y):
+    """The usable screen rectangle around a point, as (l, t, r, b)."""
+    try:
+        mon = _user32.MonitorFromPoint(_POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+        if not mon:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return None
+        w = info.rcWork
+        return (w[0], w[1], w[2], w[3])
+    except Exception:
+        return None
+
+
+def _place_against(start, extent, span_start, span_extent, limit_lo, limit_hi):
+    """Where to put a `extent`-long box that wants to start at `start`.
+
+    Aligned to the near edge of the thing it belongs to by default; if
+    that would run past `limit_hi`, aligned to its far edge instead - the
+    same flip a menu does when it reaches the bottom of the screen. Only
+    if neither side fits does it give up and slide into view, because a
+    popover half off-screen is worse than one slightly off its anchor.
+    """
+    if start + extent <= limit_hi:
+        pos = start
+    else:
+        pos = span_start + span_extent - extent
+    return max(limit_lo, min(pos, limit_hi - extent))
 
 
 def _centre_on_window_monitor(anchor_window, hwnd_to_place):
@@ -1660,7 +1777,7 @@ def _initial_window_size(cfg):
         zoom = max(50, min(200, int(cfg.get("zoom", 100)))) / 100.0
     except Exception:
         zoom = 1.0
-    return max(80, int(w * zoom)), max(60, int(h * zoom))
+    return max(MIN_WINDOW_W, int(w * zoom)), max(MIN_WINDOW_H, int(h * zoom))
 
 
 def main():
