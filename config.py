@@ -27,6 +27,10 @@ DEFAULT_CONFIG = {
     "start_on_boot": False,
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
     "opacity": 85,            # percent; whole-window translucency (see main.py)
+    # Keep the frosted backdrop live cheaply by hiding the widget from
+    # screen capture - which also hides it from screenshots. See
+    # _set_capture_exclusion in main.py.
+    "fast_glass": True,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,

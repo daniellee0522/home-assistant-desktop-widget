@@ -285,8 +285,9 @@ new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 // so a frame that takes 13ms is followed by ~100ms of quiet, and a slower
 // machine thins itself out instead of pinning a core. A blurred backdrop
 // hides a low frame rate well, so this is a cheap trade.
-const BACKDROP_DUTY = 6;              // wait this many times the frame cost
-const BACKDROP_MIN_MS = 70;           // ...but never busier than this
+const BACKDROP_FADE_MS = 90;          // must match the CSS transition
+const BACKDROP_DUTY = 4;              // wait this many times the capture cost
+const BACKDROP_MIN_MS = 60;           // ...but never busier than this
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 const BACKDROP_STILL_BEFORE_IDLE = 8;
 let backdropPending = false;
@@ -295,22 +296,88 @@ let backdropHash = null;
 let backdropStill = 0;
 let backdropFrameMs = BACKDROP_MIN_MS;
 
+// The interval is derived from what a capture costs, so a single slow
+// frame must not be allowed to set the pace: capture time spikes whenever
+// this window happens to be repainting at the same moment, and taking the
+// last frame at face value let those spikes roughly halve the frame rate
+// and leave it there. Track the floor instead - drop to a cheaper reading
+// immediately, drift up to an expensive one slowly.
+function noteFrameCost(ms) {
+  if (!(ms > 0)) return;
+  backdropFrameMs = ms < backdropFrameMs ? ms : backdropFrameMs * 0.9 + ms * 0.1;
+}
+
+// Two stacked layers: the lower one always opaque and holding the frame
+// on screen, the upper one fading the next frame in over it. Only the
+// upper layer's opacity ever moves, which is the whole trick - fading
+// *between* two layers leaves the composite partly transparent for the
+// length of the fade, and since this window is not translucent what shows
+// through the hole is its own bare surface. That read as the widget
+// strobing on every frame.
+//
+// Assigning straight to one layer is no good either: the old image is
+// dropped before the new one has decoded, which flickers the same way at
+// this frame rate. So: decode first, then hand over.
+let backdropSwapTimer = null;
+
+function backdropLayers() {
+  return [document.getElementById('backdrop'), document.getElementById('backdrop-next')];
+}
+
+// Once the incoming frame is fully faded in, it becomes the frame on the
+// lower layer and the upper one is reset - instantly, with the transition
+// suppressed, so the reset itself is never visible.
+function settleBackdrop(url) {
+  const [base, top] = backdropLayers();
+  base.style.backgroundImage = 'url("' + url + '")';
+  top.style.transition = 'none';
+  top.style.opacity = '0';
+  void top.offsetWidth;                     // force the change to land
+  top.style.transition = '';
+}
+
 function refreshBackdrop() {
   if (backdropPending || !(window.pywebview && window.pywebview.api)) return Promise.resolve();
   backdropPending = true;
   const startedAt = performance.now();
+  // Ask for exactly the number of device pixels this will be drawn at, so
+  // the image lands 1:1 and is never resampled (see get_desktop_backdrop).
+  const layers = backdropLayers();
+  const box = layers[0].getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
   return window.pywebview.api
-    .get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main', backdropHash)
+    .get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main', backdropHash,
+                          Math.round(box.width * dpr), Math.round(box.height * dpr))
     .then((shot) => {
-      backdropPending = false;
-      backdropFrameMs = performance.now() - startedAt;
-      if (!shot) return;
-      if (shot.unchanged) { backdropStill += 1; return; }
+      // shot.ms is the capture's own cost; the rest of the round trip is
+      // the bridge waiting, and pacing off that throttled this to a
+      // quarter of the rate the CPU budget actually allows.
+      noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
+      if (!shot) { backdropPending = false; return; }
+      if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
       backdropStill = 0;
       backdropHash = shot.hash;
-      if (shot.url) {
-        document.getElementById('backdrop').style.backgroundImage = 'url("' + shot.url + '")';
-      }
+      if (!shot.url) { backdropPending = false; return; }
+      const img = new Image();
+      img.src = shot.url;
+      const show = () => {
+        // The card's frosted fill arrives ready-blurred (see
+        // get_desktop_backdrop); every .card-bg picks it up from this one
+        // custom property, so the visible view updates without having to
+        // know which view that is.
+        if (shot.blur_url) {
+          document.documentElement.style.setProperty('--glass-img', 'url("' + shot.blur_url + '")');
+        }
+        const top = layers[1];
+        top.style.backgroundImage = 'url("' + shot.url + '")';
+        top.style.opacity = '1';
+        clearTimeout(backdropSwapTimer);
+        backdropSwapTimer = setTimeout(() => settleBackdrop(shot.url), BACKDROP_FADE_MS + 20);
+        backdropPending = false;
+      };
+      // decode() resolves once the bitmap is ready to paint; without it the
+      // handover can land on a frame the browser has not rasterised yet.
+      (img.decode ? img.decode() : Promise.resolve()).then(show, show);
     })
     .catch(() => { backdropPending = false; });
 }
@@ -1071,6 +1138,7 @@ function openSettings() {
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   document.getElementById('zoom-select').value = String(CONFIG.zoom || 100);
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
+  document.getElementById('fast-glass-check').checked = CONFIG.fast_glass !== false;
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
   document.getElementById('fixed-size-check').checked = !!CONFIG.fixed_size;
   document.getElementById('fixed-width-input').value = String(CONFIG.fixed_width || 400);
@@ -1091,7 +1159,8 @@ async function saveHaConfig(url, token) {
 async function savePrefs() {
   try {
     await window.pywebview.api.save_prefs(CONFIG.theme, CONFIG.columns, CONFIG.lock_position,
-      CONFIG.zoom, CONFIG.fixed_size, CONFIG.fixed_width, CONFIG.fixed_height);
+      CONFIG.zoom, CONFIG.fixed_size, CONFIG.fixed_width, CONFIG.fixed_height,
+      CONFIG.opacity, CONFIG.fast_glass);
   } catch (e) { /* ignore */ }
 }
 
@@ -1308,6 +1377,14 @@ function init() {
   document.getElementById('lock-position-check').addEventListener('change', async (e) => {
     CONFIG.lock_position = !!e.target.checked;
     await savePrefs();
+  });
+  document.getElementById('fast-glass-check').addEventListener('change', async (e) => {
+    CONFIG.fast_glass = !!e.target.checked;
+    await savePrefs();
+    // The capture path changed underneath us, so the pacing estimate and
+    // the held frame are both about the old one.
+    backdropFrameMs = BACKDROP_MIN_MS;
+    refreshBackdropSoon(0);
   });
   document.getElementById('zoom-select').addEventListener('change', async (e) => {
     CONFIG.zoom = Number(e.target.value);

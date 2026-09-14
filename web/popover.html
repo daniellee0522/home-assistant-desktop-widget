@@ -11,6 +11,7 @@
      card blurs it to make frosted glass; outside the card it stays
      unblurred, so the rounded corners read as a real cutout. -->
 <div id="backdrop"></div>
+<div id="backdrop-next"></div>
 <div id="stage">
 
   <!-- ============ Grid view (the widget itself) ============ -->
@@ -135,6 +136,10 @@
         <label class="check-row">
           <input id="lock-position-check" type="checkbox">
           <span>鎖定位置 (無法拖曳移動)</span>
+        </label>
+        <label class="check-row">
+          <input id="fast-glass-check" type="checkbox">
+          <span>流暢毛玻璃 (widget 不會出現在截圖／錄影)</span>
         </label>
         <label class="check-row">
           <input id="start-on-boot-check" type="checkbox">

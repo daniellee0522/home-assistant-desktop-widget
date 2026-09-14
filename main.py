@@ -42,6 +42,7 @@ import math
 import os
 import sys
 import threading
+import time
 import zlib
 
 if sys.platform == "win32":
@@ -108,6 +109,13 @@ class Api:
         # its own window handle and its own independent resize/sequencing
         # state, since it resizes on its own schedule, unrelated to the
         # main grid window's.
+        # Whether both windows are currently hidden from screen capture,
+        # which is what makes the cheap backdrop path safe to use.
+        self._capture_excluded = False
+        # While the detail popover is up, the grid window is deliberately
+        # left capturable so the popover's backdrop can include it.
+        self._popover_open = False
+
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
         self._popover_last_resize_seq = -1
@@ -154,6 +162,7 @@ class Api:
                 "fixed_width": self._cfg.get("fixed_width", 400),
                 "fixed_height": self._cfg.get("fixed_height", 300),
                 "opacity": self._cfg.get("opacity", 100),
+                "fast_glass": bool(self._cfg.get("fast_glass", True)),
                 "tiles": tiles,
             },
             "connected": self._connected,
@@ -241,7 +250,7 @@ class Api:
 
     def save_prefs(self, theme, columns, lock_position=None,
                    zoom=None, fixed_size=None, fixed_width=None, fixed_height=None,
-                   opacity=None):
+                   opacity=None, fast_glass=None):
         self._cfg["theme"] = theme or "auto"
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
@@ -266,6 +275,9 @@ class Api:
                 self._cfg["fixed_height"] = max(90, int(fixed_height))
             except Exception:
                 pass
+        if fast_glass is not None:
+            self._cfg["fast_glass"] = bool(fast_glass)
+            self._apply_capture_exclusion()
         if opacity is not None:
             try:
                 self._cfg["opacity"] = max(0, min(100, int(opacity)))
@@ -413,6 +425,15 @@ class Api:
             self._popover_window.show()
         except Exception:
             pass
+        # Re-assert the exclusions here as well as on `shown`: that event
+        # fires during window creation, while this window is still hidden
+        # and zero-ish, and the affinity did not stick. Without it this
+        # window is not excluded from screen capture and the cheap backdrop
+        # path reads the popover into its own backdrop - an infinite
+        # mirror. Setting _popover_open first also lifts the grid window's
+        # exclusion, so the popover's backdrop can contain it.
+        self._popover_open = True
+        self._apply_capture_exclusion()
         _bring_to_front(self._popover_window)
         try:
             self._popover_window.evaluate_js(
@@ -427,6 +448,10 @@ class Api:
                 self._popover_window.hide()
             except Exception:
                 pass
+        # The grid window can go back to being hidden from capture, which
+        # puts its own backdrop back on the cheap path.
+        self._popover_open = False
+        self._apply_capture_exclusion()
 
     def set_popover_activatable(self, enabled):
         # No bottom-of-z-order pinning here (unlike set_activatable above)
@@ -439,7 +464,7 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
-    def get_desktop_backdrop(self, window_kind="main", last_hash=None):
+    def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0):
         """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
@@ -453,6 +478,16 @@ class Api:
         still image, and answering "same as before" costs only the grab,
         so the page can poll fast enough to track an animated wallpaper
         without paying the encode when there is nothing to send.
+
+        `want_w`/`want_h` are the size the page will actually draw this at,
+        in device pixels, and they are not always the window's size: at a
+        fractional devicePixelRatio WebView2's viewport rounds to a
+        slightly different number of device pixels than the HWND has (687
+        against 686, measured). Capturing the window's size and letting CSS
+        stretch it to the viewport's resampled every frame, which softened
+        the whole image and showed up as ragged edges where the card's
+        rounded corners meet the unblurred desktop. Capturing what the page
+        asks for keeps it one image pixel per device pixel.
         """
         is_popover = window_kind == "popover"
         window = self._popover_window if is_popover else self._window
@@ -461,25 +496,67 @@ class Api:
         hwnd = _get_hwnd(window)
         if not hwnd:
             return None
+        started = time.perf_counter()
         try:
             r = (ctypes.c_long * 4)()
             _user32.GetWindowRect(hwnd, ctypes.byref(r))
             x, y, w, h = r[0], r[1], r[2] - r[0], r[3] - r[1]
+            if want_w and want_h:
+                w, h = max(1, int(want_w)), max(1, int(want_h))
             # The popover opens on top of the widget, so the widget is part
-            # of what is behind it.
+            # of what is behind it. In the fast path the widget is excluded
+            # from screen capture as well, so it has to be drawn back in;
+            # in the slow path only the desktop was rendered to begin with.
             over = ()
             if is_popover and self._window:
                 main_hwnd = _get_hwnd(self._window)
                 if main_hwnd:
                     over = (main_hwnd,)
-            raw = _desktop_capture.grab(x, y, w, h, over)
+            # Reading the screen only shows what this process has not
+            # excluded from capture, so which window is excluded decides
+            # what a read is good for:
+            #
+            #   popover open  - the grid window is deliberately left
+            #     capturable (it is part of the popover's backdrop), so
+            #     the popover may read the screen, but the grid may not:
+            #     it would read itself back in, an infinite mirror. The
+            #     grid falls back to rendering the wallpaper directly for
+            #     as long as the popover is up.
+            #   otherwise     - the grid is excluded and reads the screen.
+            #
+            # Toggling the exclusion around each individual read was tried
+            # first and does not work: display affinity is applied by DWM
+            # when it next composes, so a read taken immediately after
+            # clearing it still shows the window missing.
+            can_read_screen = self._capture_excluded and (is_popover or not self._popover_open)
+            raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
+            if raw is None:
+                # Either the fast path is off or unusable here, or it
+                # failed - the slow one always works.
+                raw = _desktop_capture.grab(x, y, w, h, over)
             if not raw:
                 return None
             digest = zlib.crc32(raw) & 0xFFFFFFFF
+            cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
-                return {"unchanged": True, "hash": digest}
-            from PIL import Image
+                return {"unchanged": True, "hash": digest, "ms": cost_ms}
+            from PIL import Image, ImageFilter
             img = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
+
+            # The frosted copy is blurred here rather than by the page.
+            # backdrop-filter did it on the GPU every frame, over the whole
+            # window, and that repainting contended with this capture badly
+            # enough to double what a frame costs (19ms idle against 41ms
+            # while the page was drawing) - which is paid straight back as
+            # lag in the corners. Blurring a quarter-scale copy costs ~1ms
+            # and the browser scales it back up for free; at this blur
+            # radius the downscale is invisible, because a 20px blur throws
+            # away far more detail than a 4x downscale does.
+            small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+            small = small.filter(ImageFilter.GaussianBlur(radius=4))
+            blur_buf = io.BytesIO()
+            small.save(blur_buf, format="JPEG", quality=80)
+
             buf = io.BytesIO()
             # JPEG, not PNG: this is a photo-like backdrop that is about to
             # be blurred, and encoding it costs ~0.4ms against PNG's ~4.6ms
@@ -489,9 +566,16 @@ class Api:
             img.save(buf, format="JPEG", quality=88, subsampling=0)
             return {
                 "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
+                "blur_url": "data:image/jpeg;base64," + base64.b64encode(blur_buf.getvalue()).decode("ascii"),
                 "w": w,
                 "h": h,
                 "hash": digest,
+                # What this frame actually cost *here*. The page paces
+                # itself from this rather than from its own round-trip
+                # time: most of the round trip is the js bridge waiting,
+                # not work, and pacing off the wall clock throttled the
+                # capture to a fraction of the rate the CPU budget allows.
+                "ms": (time.perf_counter() - started) * 1000.0,
             }
         except Exception:
             return None
@@ -532,6 +616,25 @@ class Api:
     # internal
     # ---------------------------------------------------------------
 
+    def _apply_capture_exclusion(self):
+        """Turn the cheap backdrop path on or off for both windows.
+
+        Only claims it is on if the OS actually accepted it on the main
+        window - on an older build the call fails and the slower
+        PrintWindow path has to keep being used, silently rather than
+        showing the widget its own reflection.
+        """
+        wanted = bool(self._cfg.get("fast_glass", True))
+        ok = False
+        if self._window:
+            # Not while the popover is up: it needs to see this window.
+            ok = _set_capture_exclusion(self._window, wanted and not self._popover_open)
+            if self._popover_open:
+                ok = True          # the mode is still on, just suspended here
+        if self._popover_window:
+            _set_capture_exclusion(self._popover_window, wanted)
+        self._capture_excluded = wanted and ok
+
     def _push_prefs(self):
         """Send the current preferences to the popover window's page.
 
@@ -554,6 +657,7 @@ class Api:
             "fixed_height": self._cfg.get("fixed_height", 300),
             "lock_position": bool(self._cfg.get("lock_position", False)),
             "opacity": self._cfg.get("opacity", 100),
+            "fast_glass": bool(self._cfg.get("fast_glass", True)),
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
         script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
@@ -809,6 +913,8 @@ _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 _user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+_user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.SetWindowDisplayAffinity.restype = ctypes.c_int
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
@@ -816,6 +922,8 @@ _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
 
 _ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+WDA_NONE = 0x00000000
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
 PW_RENDERFULLCONTENT = 0x00000002
 SRCCOPY = 0x00CC0020
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
@@ -1008,6 +1116,61 @@ class _DesktopCapture:
 
     # -- the capture itself ----------------------------------------------
 
+    def grab_screen(self, x, y, w, h):
+        """BGRA for a screen rectangle, read straight off the composed
+        desktop instead of re-rendering the wallpaper.
+
+        Five times cheaper than the PrintWindow path (~9ms against ~45ms)
+        because nothing has to be drawn for it - the pixels are already
+        there. It only works because the caller has taken its own windows
+        out of screen capture (see _set_capture_exclusion); without that
+        this reads the widget's own backdrop back into itself.
+        """
+        if w <= 0 or h <= 0:
+            return None
+        with self._lock:
+            if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
+                return None
+            screen_dc = _user32.GetDC(None)
+            if not screen_dc:
+                return None
+            try:
+                if not _gdi32.BitBlt(self._out_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY):
+                    return None
+            finally:
+                _user32.ReleaseDC(None, screen_dc)
+            return self._read_out(w, h)
+
+    def _read_out(self, w, h):
+        hdr = _BITMAPINFOHEADER(
+            ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
+        )
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+            return None
+        return buf.raw
+
+    def draw_over(self, hwnds, x, y, w, h):
+        """Paint `hwnds` into the last grab, at their screen positions."""
+        with self._lock:
+            if not self._out_dc:
+                return None
+            for hwnd in hwnds:
+                if not hwnd:
+                    continue
+                r = (ctypes.c_long * 4)()
+                if not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                    continue
+                ow, oh = r[2] - r[0], r[3] - r[1]
+                if ow <= 0 or oh <= 0:
+                    continue
+                if not self._ensure("_ov_dc", "_ov_bmp", "_ov_size", ow, oh):
+                    continue
+                if not _user32.PrintWindow(hwnd, self._ov_dc, PW_RENDERFULLCONTENT):
+                    continue
+                _gdi32.BitBlt(self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
+            return self._read_out(w, h)
+
     def grab(self, x, y, w, h, over=()):
         """BGRA bytes for the screen rectangle (x, y, w, h), or None.
 
@@ -1127,6 +1290,37 @@ def _set_window_size(hwnd, w, h):
 
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND = 1
+
+
+def _set_capture_exclusion(window, excluded):
+    """Take this window out of (or back into) screen captures.
+
+    With it out, reading the screen where the window is gives what is
+    *behind* it, which is the cheap way to keep the frosted backdrop
+    live - no re-rendering the wallpaper, ~9ms a frame instead of ~45ms.
+    The cost is literal: while this is on, the widget is absent from
+    screenshots and screen recordings too. That is why it is a setting
+    rather than just how this works.
+
+    Only works on windows this process owns, and only on Windows 10 2004
+    and later; older builds fail the call and keep the slower path.
+    """
+    hwnd = _get_hwnd(window)
+    if not hwnd:
+        return False
+    ok = [False]
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                ok[0] = bool(_user32.SetWindowDisplayAffinity(
+                    hwnd, WDA_EXCLUDEFROMCAPTURE if excluded else WDA_NONE,
+                ))
+            except Exception:
+                ok[0] = False
+
+    _run_on_ui_thread(window, _apply)
+    return ok[0]
 
 
 def _apply_window_shape(window):
@@ -1398,6 +1592,7 @@ def main():
 
     def on_shown():
         _apply_window_shape(window)
+        api._apply_capture_exclusion()
         _set_noactivate(window, True)
         # Position it before _hide_from_taskbar, which hides and re-shows
         # the window: that way the correction happens while it is hidden
@@ -1483,6 +1678,7 @@ def main():
 
     def on_popover_shown():
         _apply_window_shape(popover_window)
+        api._apply_capture_exclusion()
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
         # .native only exists once the underlying native window has

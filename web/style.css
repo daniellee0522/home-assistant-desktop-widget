@@ -4,6 +4,14 @@
   --pad: 20px;
   --radius-tile: 20px;
 
+  /* The window is a rectangle and cannot be made transparent, so the area
+     outside this radius - the four corner wedges - is painted with a copy
+     of the desktop, and a copy is always a frame behind the live wallpaper
+     beside it. On an animated wallpaper that lag is what makes the
+     window's square outline visible, and it shows in the wedges, whose
+     area grows with the square of this (~0.86r² per corner). The "流暢毛
+     玻璃" setting is what keeps that lag small enough not to notice; with
+     it off, a smaller radius trades roundness for a less visible outline. */
   --radius-panel: 22px;
 
   /* The panel is a tint *over* the blurred desktop behind it (#backdrop
@@ -14,7 +22,6 @@
      something has to be painted there. */
   --panel: rgba(214, 228, 241, 0.55);
   --panel-solid: #d6e4f1;
-  --glass-blur: 26px;
   /* An "on" tile is always a bright white card with dark text, matching
      the iOS Home widget, regardless of the app's own light/dark theme -
      so unlike the other tokens below, these three are never redefined per
@@ -151,23 +158,56 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-panel);
-  background: var(--panel);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
-  backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
-  transition: background 0.25s ease;
+  /* Two layers in one property: the tint on top, the pre-blurred copy of
+     the desktop underneath. This used to be backdrop-filter, which
+     re-blurred the whole window on the GPU every frame - correct, but the
+     repainting competed with the desktop capture happening at the same
+     moment and roughly doubled what a capture cost, which comes straight
+     back as lag in the corners. The blur is done once, at quarter scale,
+     on the Python side instead.
+
+     --glass-img is set per frame on <html>; until the first capture lands
+     it is unset and only the tint paints, over --panel-solid on
+     #backdrop. Sizing to 100% works because .card-bg fills the view,
+     which fills the stage, which is the window - the same box the capture
+     was taken of. */
+  background-color: transparent;
+  background-image: linear-gradient(var(--panel), var(--panel)), var(--glass-img, none);
+  background-size: 100% 100%, 100% 100%;
+  background-position: 0 0, 0 0;
+  background-repeat: no-repeat, no-repeat;
+  transition: background-color 0.25s ease;
 }
 
-#backdrop {
+/* The desktop behind the window, in two layers: #backdrop always holds
+   the frame currently on screen, #backdrop-next fades the incoming one in
+   over the top of it. Only the upper layer's opacity moves - fading
+   *between* the two would leave the composite partly transparent for the
+   length of the fade, and this window has no transparency to fall back
+   on, so the hole showed as the whole widget strobing.
+
+   The capture is requested at exactly the number of device pixels these
+   are drawn at, so `100% 100%` is a 1:1 blit and not a resample - which
+   matters at the card's rounded corners, where the backdrop shows
+   unblurred against the real desktop and any softening reads as a ragged
+   edge. */
+#backdrop,
+#backdrop-next {
   position: fixed;
   inset: 0;
   z-index: 0;
-  background-color: var(--panel-solid);
   background-repeat: no-repeat;
-  /* The capture is taken at exactly this window's pixel size, so
-     stretching it to the element is 1:1 - and saying it this way avoids
-     having to undo the CSS `zoom` on <html> to work out a pixel size. */
   background-size: 100% 100%;
   background-position: 0 0;
+}
+#backdrop {
+  /* The window is not translucent, so something has to be painted here
+     before the first capture arrives. */
+  background-color: var(--panel-solid);
+}
+#backdrop-next {
+  opacity: 0;
+  transition: opacity 90ms linear;    /* keep in step with BACKDROP_FADE_MS */
 }
 
 /* ================= Grid view ================= */
