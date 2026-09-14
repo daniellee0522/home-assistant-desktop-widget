@@ -39,6 +39,7 @@
   --accent-blue: #409cff;
   --accent-cyan: #48aaff;
   --accent-green: #34c759;
+  --accent-green-soft: #6fdc9a;   /* an unlocked lock - present, not alarming */
   --accent-red: #ff5b4a;
   --btn-fill: rgba(0, 0, 0, 0.08);
   --btn-fill-strong: rgba(0, 0, 0, 0.14);

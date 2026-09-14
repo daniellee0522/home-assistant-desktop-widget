@@ -7,10 +7,21 @@ const ICON_PATHS = {
   light: '<path d="M12 2a7 7 0 00-4 12.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26A7 7 0 0012 2zm-2 18h4v1a1 1 0 01-1 1h-2a1 1 0 01-1-1v-1z"/>',
   switch: '<path d="M7 2h2v5H7zM15 2h2v5h-2zM6 7h12a1 1 0 011 1v4a7 7 0 01-6 6.93V22h-2v-3.07A7 7 0 015 12V8a1 1 0 011-1z"/>',
   climate: '<path d="M13 14.76V4a1 1 0 00-2 0v10.76a3.5 3.5 0 102 0zM12 6a1 1 0 011 1v7.17a1.5 1.5 0 11-2 0V7a1 1 0 011-1z"/>',
-  fan: '<path d="M12 12.9a1.9 1.9 0 100-3.8 1.9 1.9 0 000 3.8zM12.8 10c1-3 4.8-4.8 6.4-2.4 1.6 2.4-1.1 4.8-4 4.6zM11.2 10c-1-3-4.8-4.8-6.4-2.4-1.6 2.4 1.1 4.8 4 4.6zM11.2 12c-1 3-4.8 4.8-6.4 2.4-1.6-2.4 1.1-4.8 4-4.6zM12.8 12c1 3 4.8 4.8 6.4 2.4 1.6-2.4-1.1-4.8-4-4.6z"/>',
+  // Hub plus one blade drawn three times, 120 degrees apart - the same
+  // shape rotated rather than three hand-placed ones, so the blades
+  // cannot drift out of balance.
+  fan: '<circle cx="12" cy="12" r="2.1"/>'
+     + '<path d="M12 9.9c-.3-3.3.4-6 2.3-7 2.2-1.2 4.6.3 4.3 2.7-.3 2.5-2.9 4-6.6 4.3z"/>'
+     + '<path d="M12 9.9c-.3-3.3.4-6 2.3-7 2.2-1.2 4.6.3 4.3 2.7-.3 2.5-2.9 4-6.6 4.3z" transform="rotate(120 12 12)"/>'
+     + '<path d="M12 9.9c-.3-3.3.4-6 2.3-7 2.2-1.2 4.6.3 4.3 2.7-.3 2.5-2.9 4-6.6 4.3z" transform="rotate(240 12 12)"/>',
   cover: '<path d="M4 3h16v2H4zM4 6.5h16v2H4zM4 10h16v2H4zM6 13h4v8H6zM14 13h4v8h-4z"/>',
   media: '<path d="M15 3v10.55A4 4 0 1013 17V8h5V3z"/>',
   lock: '<path d="M12 2a4 4 0 00-4 4v3H7a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V10a1 1 0 00-1-1h-1V6a4 4 0 00-4-4zm-2 7V6a2 2 0 114 0v3zm2 4a1.5 1.5 0 011.5 1.5c0 .6-.34 1.1-.83 1.36l.33 2.14h-2l.33-2.14A1.5 1.5 0 0112 13z"/>',
+  // Same body, shackle swung clear of it - a lock that is open should look
+  // open, not just be a different colour.
+  'lock-open': '<path d="M6 10h12a1 1 0 011 1v10a1 1 0 01-1 1H6a1 1 0 01-1-1V11a1 1 0 011-1z"/>'
+             + '<path d="M14 10V6a3.5 3.5 0 117 0v2h-2V6a1.5 1.5 0 10-3 0v4z"/>'
+             + '<path d="M12 14a1.5 1.5 0 011.5 1.5c0 .6-.34 1.1-.83 1.36l.33 2.14h-2l.33-2.14A1.5 1.5 0 0112 14z" fill="var(--tile-off)"/>',
   vacuum: '<path d="M12 4a8 8 0 100 16 8 8 0 000-16zm0 2.4a5.6 5.6 0 110 11.2 5.6 5.6 0 010-11.2zm0 2.8a2.8 2.8 0 100 5.6 2.8 2.8 0 000-5.6z"/>',
   scene: '<path d="M5 19l9-9 2 2-9 9-2-2zm10-15.6l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM4 3.5l.7 1.6L6.3 5.8l-1.6.7L4 8.1l-.7-1.6L1.7 5.8l1.6-.7z"/>',
   script: '<path d="M6 3h2v2H7v14h1v2H6a1 1 0 01-1-1V4a1 1 0 011-1zm12 0a1 1 0 011 1v16a1 1 0 01-1 1h-2v-2h1V5h-1V3h2zM10 8l6 4-6 4z"/>',
@@ -65,6 +76,15 @@ const LIGHT_PALETTE = [
 
 function domainMeta(domain) { return DOMAIN_META[domain] || DOMAIN_META.default; }
 
+// A tile's icon is normally fixed by its domain (or overridden by hand),
+// but a lock's whole job is to show which way it is, so it gets a second
+// glyph rather than just a second colour. A hand-picked icon always wins.
+function iconNameFor(tile, state) {
+  if (tile.icon) return tile.icon;
+  if (tile.domain === 'lock' && state && state.state !== 'locked') return 'lock-open';
+  return domainMeta(tile.domain).icon;
+}
+
 /* ============================================================
  * Global state
  * ============================================================ */
@@ -79,19 +99,21 @@ let entityToTileIds = {};
 let currentDetailTileId = null;
 let allEntities = [];
 
-// This same page (index.html/app.js/style.css) loads in two separate OS
-// windows: the main grid widget, and - via popover.html, identical except
-// for the inline script setting this flag before app.js runs - a second,
-// independent window that shows *only* the detail popover. Two windows
-// instead of one shared shape sidesteps a real Win32 constraint: a window
-// is always one rectangle, so a floating popover beside a grid it doesn't
-// align with left real dead space in that bounding rectangle - space the
-// grid window still owned, so moving or resizing one could visibly affect
-// the other, and the pair had to be sized together as a single unit. A
-// fully separate window for the popover shares no rectangle with the grid
-// at all - each is free to be exactly its own tight rounded-rect shape,
-// sized and positioned on its own schedule.
-const IS_POPOVER_WINDOW = !!window.__IS_POPOVER_WINDOW;
+// This one page runs in three separate OS windows - the grid widget, the
+// detail popover, and Settings - told apart only by the fragment the
+// window was opened with (#popover, #settings, or nothing). pywebview
+// strips the fragment when working out where to serve from, and it never
+// reaches the server, so all three are the same request for index.html.
+//
+// Separate windows rather than views swapped inside one: a window is
+// always a rectangle, so a popover floating beside a grid it doesn't
+// align with left real dead space that the grid still owned, and Settings
+// swapped in resized the grid out from under whatever was on screen.
+// Apart from that each window wants different behaviour - the grid never
+// takes focus, Settings must, and Settings ignores the widget's zoom.
+const WINDOW_ROLE = (location.hash || '').replace('#', '') || 'grid';
+const IS_POPOVER_WINDOW = WINDOW_ROLE === 'popover';
+const IS_SETTINGS_WINDOW = WINDOW_ROLE === 'settings';
 
 function findTile(id) { return (CONFIG.tiles || []).find((t) => t.id === id); }
 function friendlyName(state) { return state && state.attributes && state.attributes.friendly_name; }
@@ -147,7 +169,14 @@ async function boot() {
   // same tile list) so findTile()/CONFIG/STATES all work normally once
   // __showPopoverForTile asks it to render a tile's detail - but the grid
   // section itself is never actually shown here (see IS_POPOVER_WINDOW).
-  if (IS_POPOVER_WINDOW) document.getElementById('view-grid').hidden = true;
+  // Each window owns one of the views; the others stay hidden for the
+  // life of that window. The markup for all of them is present in every
+  // window because they all load the same page.
+  if (IS_POPOVER_WINDOW) {
+    document.getElementById('view-grid').hidden = true;
+  } else if (IS_SETTINGS_WINDOW) {
+    openSettingsView();
+  }
   updateConnDot();
   try { await window.pywebview.api.ui_ready(); } catch (e) { /* ignore */ }
   startBackdropTicker();
@@ -165,7 +194,9 @@ async function boot() {
     }
   }).catch(() => { /* ignore */ });
 
-  if (!IS_POPOVER_WINDOW && !CONFIG.ha_token && (!CONFIG.tiles || !CONFIG.tiles.length)) {
+  // First run, from the grid window only - the other two are opened on
+  // demand and would otherwise each try to raise Settings as well.
+  if (WINDOW_ROLE === 'grid' && !CONFIG.ha_token && (!CONFIG.tiles || !CONFIG.tiles.length)) {
     setTimeout(openSettings, 150);
   }
 }
@@ -177,20 +208,11 @@ function applyTheme() {
 /* ============================================================
  * View switching + auto window sizing
  * ============================================================ */
+// Only ever swaps between the two views that share the Settings window;
+// the grid window shows the grid and nothing else.
 function showView(name) {
   for (const id of ['view-grid', 'view-settings', 'view-picker']) {
-    // view-grid never actually shows in the popover window (see
-    // IS_POPOVER_WINDOW) - Settings isn't reachable there in normal use,
-    // but guard it anyway rather than rely on that.
-    if (IS_POPOVER_WINDOW && id === 'view-grid') continue;
     document.getElementById(id).hidden = id !== name;
-  }
-  // The widget normally can't take keyboard focus (so tiles never yank it
-  // above other windows) - but Settings/the entity picker have real text
-  // inputs, so they need focus to actually be typeable.
-  const needsFocus = (name === 'view-settings' || name === 'view-picker');
-  if (window.pywebview && window.pywebview.api) {
-    window.pywebview.api.set_activatable(needsFocus).catch(() => {});
   }
 }
 
@@ -212,7 +234,13 @@ let resizeRaf = null;
 let resizeSeq = 0;
 
 function applyZoom() {
-  const z = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
+  // Settings is never scaled. The zoom setting is there to size the
+  // *widget* against the desktop; applying it here too meant that turning
+  // the widget down to 50% left the controls for turning it back up half
+  // size as well.
+  const z = IS_SETTINGS_WINDOW
+    ? 1
+    : Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
   document.documentElement.style.zoom = String(z);
 }
 
@@ -253,9 +281,10 @@ function syncWindowSize() {
     resizeSeq += 1;
 
     const physW = Math.ceil(cssW * dpr), physH = Math.ceil(cssH * dpr);
-    const done = IS_POPOVER_WINDOW
-      ? window.pywebview.api.resize_popover_window(physW, physH, resizeSeq)
-      : window.pywebview.api.resize_window(physW, physH, resizeSeq);
+    const resize = IS_POPOVER_WINDOW ? window.pywebview.api.resize_popover_window
+      : IS_SETTINGS_WINDOW ? window.pywebview.api.resize_settings_window
+      : window.pywebview.api.resize_window;
+    const done = resize(physW, physH, resizeSeq);
     // The backdrop is captured at the window's size, so it is wrong the
     // moment the window changes size - re-take it once the resize lands.
     Promise.resolve(done).then(() => refreshBackdropSoon()).catch(() => {});
@@ -346,7 +375,7 @@ function refreshBackdrop() {
   const box = layers[0].getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   return window.pywebview.api
-    .get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main', backdropHash,
+    .get_desktop_backdrop(WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr))
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
@@ -431,10 +460,12 @@ const DRAG_THRESHOLD_PX = 5;
 
 function installWindowDrag() {
   if (IS_POPOVER_WINDOW) return;   // the popover is placed by its tile, never dragged
+  const kind = IS_SETTINGS_WINDOW ? 'settings' : 'main';
   let start = null;
 
   document.addEventListener('mousedown', (e) => {
-    if (e.button !== 0 || CONFIG.lock_position) return;
+    if (e.button !== 0) return;
+    if (CONFIG.lock_position && !IS_SETTINGS_WINDOW) return;
     if (!e.target.closest('.drag-region')) return;
     // Controls sitting inside a drag region (the header's close/back
     // buttons) are for clicking, not for dragging the window by.
@@ -442,7 +473,7 @@ function installWindowDrag() {
     start = { sx: e.screenX, sy: e.screenY, origin: null, moved: false };
     // Fetched once per drag, not per move: it's a round trip into Python,
     // and the window's origin only changes because *we* move it.
-    window.pywebview.api.get_window_pos()
+    window.pywebview.api.get_window_pos(kind)
       .then((pos) => { if (start) start.origin = pos; })
       .catch(() => { start = null; });
   });
@@ -455,7 +486,7 @@ function installWindowDrag() {
     if (!start.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
     start.moved = true;
     window.pywebview.api.move_window(
-      Math.round(start.origin.x + dx), Math.round(start.origin.y + dy),
+      Math.round(start.origin.x + dx), Math.round(start.origin.y + dy), kind,
     ).catch(() => {});
     // Different part of the desktop now behind the window.
     refreshBackdropSoon(60);
@@ -493,7 +524,10 @@ function iconColorFor(domain, state, on) {
     case 'fan': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'cover': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'media_player': return on ? 'var(--accent-green)' : 'var(--text-off-1)';
-    case 'lock': return state && state.state === 'locked' ? 'var(--text-off-1)' : 'var(--accent-red)';
+    // Unlocked is a normal state for a door someone is using, not a
+    // fault, so it is a soft green rather than the red it used to be -
+    // which read as an alert every time anyone came home.
+    case 'lock': return state && state.state === 'locked' ? 'var(--text-off-1)' : 'var(--accent-green-soft)';
     case 'vacuum': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'scene': case 'script': case 'automation': return 'var(--accent-blue)';
     case 'binary_sensor': return state && state.state === 'on' ? 'var(--accent-green)' : 'var(--text-off-1)';
@@ -540,7 +574,7 @@ function tileEl(tile) {
 
   const iconWrap = document.createElement('div');
   iconWrap.className = 'tile-icon';
-  iconWrap.innerHTML = svgIcon(tile.icon || meta.icon);
+  iconWrap.innerHTML = svgIcon(iconNameFor(tile, state));
   iconWrap.style.color = ok ? iconColorFor(domain, state, on) : 'var(--text-off-1)';
   div.appendChild(iconWrap);
 
@@ -1131,7 +1165,24 @@ function updateConnDot() {
   if (label) label.textContent = CONNECTED ? '已連線 (即時同步)' : '未連線';
 }
 
+// From the grid, Settings is a different window - so this is a request to
+// Python to bring that window up, not a view swap.
 function openSettings() {
+  if (!IS_SETTINGS_WINDOW) {
+    if (window.pywebview && window.pywebview.api) {
+      window.pywebview.api.open_settings_window().catch(() => {});
+    }
+    return;
+  }
+  return openSettingsView();
+}
+
+// Pushed from Python when the Settings window is shown (Api.open_settings_window).
+window.__enterSettings = function () {
+  try { openSettingsView(); } catch (e) { /* ignore */ }
+};
+
+function openSettingsView() {
   document.getElementById('ha-url').value = CONFIG.ha_url || '';
   document.getElementById('ha-token').value = CONFIG.ha_token || '';
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
@@ -1168,7 +1219,9 @@ async function closeSettingsAndSave() {
   const url = document.getElementById('ha-url').value.trim();
   const token = document.getElementById('ha-token').value.trim();
   if (url !== CONFIG.ha_url || token !== CONFIG.ha_token) await saveHaConfig(url, token);
-  showView('view-grid');
+  if (window.pywebview && window.pywebview.api) {
+    window.pywebview.api.close_settings_window().catch(() => {});
+  }
 }
 
 async function persistTiles() {
@@ -1458,7 +1511,7 @@ function init() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!document.getElementById('view-picker').hidden) { showView('view-settings'); renderTileList(); }
-    else if (!document.getElementById('view-settings').hidden) closeSettingsAndSave();
+    else if (IS_SETTINGS_WINDOW) closeSettingsAndSave();
     else if (currentDetailTileId) closeDetail();
   });
 
@@ -1497,6 +1550,7 @@ window.__applyPrefs = function (cfg) {
 window.__openSettingsFromTray = function () {
   try { openSettings(); } catch (e) { /* ignore */ }
 };
+
 window.__setThemeFromTray = function (name) {
   CONFIG.theme = name;
   applyTheme();

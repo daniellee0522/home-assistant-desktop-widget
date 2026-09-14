@@ -112,13 +112,23 @@ class Api:
         # Whether both windows are currently hidden from screen capture,
         # which is what makes the cheap backdrop path safe to use.
         self._capture_excluded = False
-        # While the detail popover is up, the grid window is deliberately
-        # left capturable so the popover's backdrop can include it.
-        self._popover_open = False
+        # Which overlay windows are open. While any of them is, the grid
+        # window is deliberately left capturable, because it is part of
+        # what is behind them and so part of their frosted backdrop.
+        self._overlays_open = set()
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
         self._popover_last_resize_seq = -1
+
+        # Settings is a third window for the same reasons the popover is
+        # one: it needs to take keyboard focus, it must not be scaled by
+        # the widget's zoom, and it should not drag the grid's size around
+        # while it is open. Same page, same Api - only the URL fragment
+        # differs (see WINDOW_ROLE in app.js).
+        self._settings_window = None
+        self._settings_resize_lock = threading.Lock()
+        self._settings_last_resize_seq = -1
 
         self._client = HAClient(on_event=self._on_ha_event, on_status=self._on_ha_status)
         self._client.configure(
@@ -133,6 +143,15 @@ class Api:
 
     def _bind_popover_window(self, window):
         self._popover_window = window
+
+    def _bind_settings_window(self, window):
+        self._settings_window = window
+
+    def _window_for(self, kind):
+        return {
+            "popover": self._popover_window,
+            "settings": self._settings_window,
+        }.get(kind, self._window)
 
     # ---------------------------------------------------------------
     # JS-callable API (exposed as window.pywebview.api.<method>)
@@ -344,6 +363,15 @@ class Api:
             phys_w, phys_h, seq, "resize_popover_window",
         )
 
+    def resize_settings_window(self, phys_w, phys_h, seq=None):
+        # Same as the grid window's path above, with its own sequence
+        # counter - Settings resizes as its sections expand, on a schedule
+        # of its own.
+        self._resize_native(
+            self._settings_window, self._settings_resize_lock, "_settings_last_resize_seq",
+            phys_w, phys_h, seq, "resize_settings_window",
+        )
+
     def _resize_native(self, window, seq_lock, seq_attr, phys_w, phys_h, seq, tag):
         if not window:
             return
@@ -430,9 +458,9 @@ class Api:
         # and zero-ish, and the affinity did not stick. Without it this
         # window is not excluded from screen capture and the cheap backdrop
         # path reads the popover into its own backdrop - an infinite
-        # mirror. Setting _popover_open first also lifts the grid window's
-        # exclusion, so the popover's backdrop can contain it.
-        self._popover_open = True
+        # mirror. Registering the overlay first also lifts the grid
+        # window's exclusion, so the popover's backdrop can contain it.
+        self._overlays_open.add("popover")
         self._apply_capture_exclusion()
         _bring_to_front(self._popover_window)
         try:
@@ -442,6 +470,49 @@ class Api:
         except Exception:
             pass
 
+    def open_settings_window(self):
+        """Bring up Settings, centred on whichever screen the widget is on.
+
+        It is a real window rather than a view swapped into the grid: it
+        has text fields that need focus, it is shown at 100% however the
+        widget itself is scaled, and swapping it in used to resize the
+        grid window out from under whatever was on screen.
+        """
+        if not self._settings_window:
+            return
+        hwnd = _get_hwnd(self._settings_window)
+        if hwnd:
+            pos = _centre_on_window_monitor(self._window, hwnd)
+            if pos:
+                _run_on_ui_thread(
+                    self._settings_window, lambda: _set_window_pos(hwnd, pos[0], pos[1]),
+                )
+        # Same reasoning as the popover: Settings sits over the widget, so
+        # the widget is part of its backdrop and has to stay capturable
+        # while it is up.
+        self._overlays_open.add("settings")
+        self._apply_capture_exclusion()
+        try:
+            self._settings_window.show()
+        except Exception:
+            pass
+        _bring_to_front(self._settings_window)
+        try:
+            self._settings_window.evaluate_js(
+                "window.__enterSettings && window.__enterSettings()"
+            )
+        except Exception:
+            pass
+
+    def close_settings_window(self):
+        if self._settings_window:
+            try:
+                self._settings_window.hide()
+            except Exception:
+                pass
+        self._overlays_open.discard("settings")
+        self._apply_capture_exclusion()
+
     def close_popover(self):
         if self._popover_window:
             try:
@@ -449,8 +520,9 @@ class Api:
             except Exception:
                 pass
         # The grid window can go back to being hidden from capture, which
-        # puts its own backdrop back on the cheap path.
-        self._popover_open = False
+        # puts its own backdrop back on the cheap path - unless Settings is
+        # still up and needs to see it.
+        self._overlays_open.discard("popover")
         self._apply_capture_exclusion()
 
     def set_popover_activatable(self, enabled):
@@ -490,7 +562,7 @@ class Api:
         asks for keeps it one image pixel per device pixel.
         """
         is_popover = window_kind == "popover"
-        window = self._popover_window if is_popover else self._window
+        window = self._window_for(window_kind)
         if not window:
             return None
         hwnd = _get_hwnd(window)
@@ -508,7 +580,7 @@ class Api:
             # from screen capture as well, so it has to be drawn back in;
             # in the slow path only the desktop was rendered to begin with.
             over = ()
-            if is_popover and self._window:
+            if window_kind in ("popover", "settings") and self._window:
                 main_hwnd = _get_hwnd(self._window)
                 if main_hwnd:
                     over = (main_hwnd,)
@@ -528,7 +600,9 @@ class Api:
             # first and does not work: display affinity is applied by DWM
             # when it next composes, so a read taken immediately after
             # clearing it still shows the window missing.
-            can_read_screen = self._capture_excluded and (is_popover or not self._popover_open)
+            can_read_screen = self._capture_excluded and (
+                window_kind != "main" or not self._overlays_open
+            )
             raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
             if raw is None:
                 # Either the fast path is off or unusable here, or it
@@ -580,7 +654,7 @@ class Api:
         except Exception:
             return None
 
-    def move_window(self, screen_x, screen_y):
+    def move_window(self, screen_x, screen_y, window_kind="main"):
         # Absolute physical screen pixels, from the page's own drag
         # handling (see startDrag in app.js). pywebview's built-in
         # drag-region support is deliberately not used: it moves the window
@@ -590,19 +664,21 @@ class Api:
         # also feeds pywebview's move(), which takes logical pixels and
         # rescales them, so on a display where devicePixelRatio and the
         # OS scale disagree the window jumped rather than followed.
-        if not self._window:
+        window = self._window_for(window_kind)
+        if not window:
             return
-        hwnd = _get_hwnd(self._window)
+        hwnd = _get_hwnd(window)
         if not hwnd:
             return
         _run_on_ui_thread(
-            self._window, lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
+            window, lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
         )
 
-    def get_window_pos(self):
-        # Lets the main window's JS convert a tile's own on-page position
-        # into an absolute screen position for open_popover above.
-        hwnd = _get_hwnd(self._window) if self._window else None
+    def get_window_pos(self, window_kind="main"):
+        # Lets a window's JS convert an on-page position into an absolute
+        # screen position - for open_popover above, and for dragging.
+        window = self._window_for(window_kind)
+        hwnd = _get_hwnd(window) if window else None
         if not hwnd:
             return {"x": 0, "y": 0}
         try:
@@ -627,12 +703,13 @@ class Api:
         wanted = bool(self._cfg.get("fast_glass", True))
         ok = False
         if self._window:
-            # Not while the popover is up: it needs to see this window.
-            ok = _set_capture_exclusion(self._window, wanted and not self._popover_open)
-            if self._popover_open:
+            # Not while an overlay is up: it needs to see this window.
+            ok = _set_capture_exclusion(self._window, wanted and not self._overlays_open)
+            if self._overlays_open:
                 ok = True          # the mode is still on, just suspended here
-        if self._popover_window:
-            _set_capture_exclusion(self._popover_window, wanted)
+        for win in (self._popover_window, self._settings_window):
+            if win:
+                _set_capture_exclusion(win, wanted)
         self._capture_excluded = wanted and ok
 
     def _push_prefs(self):
@@ -661,7 +738,7 @@ class Api:
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
         script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
-        for win in (self._window, self._popover_window):
+        for win in (self._window, self._popover_window, self._settings_window):
             if not win:
                 continue
             try:
@@ -913,6 +990,9 @@ _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 _user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+_user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.MonitorFromWindow.restype = ctypes.c_void_p
+_user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
 _dwmapi.DwmSetWindowAttribute.argtypes = [
@@ -1323,6 +1403,46 @@ def _set_capture_exclusion(window, excluded):
     return ok[0]
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("rcMonitor", ctypes.c_long * 4),
+        ("rcWork", ctypes.c_long * 4),
+        ("dwFlags", ctypes.c_uint32),
+    ]
+
+
+MONITOR_DEFAULTTONEAREST = 2
+
+
+def _centre_on_window_monitor(anchor_window, hwnd_to_place):
+    """Top-left that centres hwnd_to_place on anchor_window's monitor.
+
+    Centred on the *widget's* screen rather than the primary one: on a
+    multi-monitor desk the widget is often parked on a secondary screen,
+    and having its Settings open somewhere else entirely is disorienting.
+    """
+    try:
+        anchor = _get_hwnd(anchor_window) if anchor_window else None
+        mon = _user32.MonitorFromWindow(anchor or hwnd_to_place, MONITOR_DEFAULTTONEAREST)
+        if not mon:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return None
+        r = (ctypes.c_long * 4)()
+        _user32.GetWindowRect(hwnd_to_place, ctypes.byref(r))
+        w, h = r[2] - r[0], r[3] - r[1]
+        work = info.rcWork
+        return (
+            work[0] + max(0, (work[2] - work[0] - w) // 2),
+            work[1] + max(0, (work[3] - work[1] - h) // 2),
+        )
+    except Exception:
+        return None
+
+
 def _apply_window_shape(window):
     """Stop DWM rounding this window, and so stop it shadowing the window.
 
@@ -1617,6 +1737,7 @@ def main():
     def on_closing():
         window.hide()
         popover_window.hide()
+        settings_window.hide()
         visible["v"] = False
         return False  # cancel the actual close; keep running in the tray
 
@@ -1630,7 +1751,7 @@ def main():
     # every time.
     popover_window = webview.create_window(
         "HA Widget Detail",
-        url=os.path.join(WEB_DIR, "popover.html"),
+        url=os.path.join(WEB_DIR, "index.html") + "#popover",
         js_api=api,
         width=260,
         height=336,
@@ -1711,10 +1832,48 @@ def main():
 
     popover_window.events.closing += on_popover_closing
 
+    # Settings: a third window on the same page (#settings). Unlike the
+    # other two it is a normal, focusable window - it is full of text
+    # fields - and it deliberately ignores the widget's zoom, so a widget
+    # shrunk to 50% still gets readable settings.
+    settings_window = webview.create_window(
+        "HA Widgets 設定",
+        url=os.path.join(WEB_DIR, "index.html") + "#settings",
+        js_api=api,
+        width=420,
+        height=640,
+        frameless=True,
+        easy_drag=False,
+        transparent=False,
+        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        shadow=False,
+        confirm_close=False,
+        hidden=True,
+        min_size=(0, 0),
+    )
+    api._bind_settings_window(settings_window)
+
+    def on_settings_shown():
+        # No _set_noactivate here, unlike the other two: this window exists
+        # to be typed into.
+        _apply_window_shape(settings_window)
+        _hide_from_taskbar(settings_window)
+        api._apply_capture_exclusion()
+
+    settings_window.events.shown += on_settings_shown
+    settings_window.events.loaded += lambda: settings_window.hide()
+
+    def on_settings_closing():
+        settings_window.hide()
+        return False        # reused, never destroyed - as with the popover
+
+    settings_window.events.closing += on_settings_closing
+
     def toggle_visibility(icon=None, item=None):
         if visible["v"]:
             window.hide()
             popover_window.hide()
+            settings_window.hide()
         else:
             window.show()
         visible["v"] = not visible["v"]
@@ -1723,10 +1882,7 @@ def main():
         if not visible["v"]:
             window.show()
             visible["v"] = True
-        try:
-            window.evaluate_js("window.__openSettingsFromTray && window.__openSettingsFromTray()")
-        except Exception:
-            pass
+        api.open_settings_window()
 
     def toggle_theme(icon=None, item=None):
         order = ["light", "dark", "auto"]
