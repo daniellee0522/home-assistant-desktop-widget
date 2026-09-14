@@ -997,11 +997,11 @@ input[type="range"]::-webkit-slider-thumb {
    about the tile is left alone, including its rim. */
 .accessory-tile.toggle-slab .slab {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
-  height: calc(50% - 15px);
-  border-radius: calc(var(--radius-tile) - 10px);
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  height: calc(50% - 12px);
+  border-radius: calc(var(--accessory-radius, var(--radius-tile)) - 8px);
   background: rgba(0, 0, 0, 0.42);
   color: #fff;
   display: flex;
@@ -1015,10 +1015,10 @@ input[type="range"]::-webkit-slider-thumb {
   height: 34px;
   fill: currentColor;
 }
-/* Off at bottom:10, on at bottom:50%+5 - the same 10px of track above it
+/* Off at bottom:8, on at bottom:50%+4 - the same 8px of track above it
    that it had below, so the two rest positions mirror each other. */
 .accessory-tile.toggle-slab.is-on .slab {
-  bottom: calc(50% + 5px);
+  bottom: calc(50% + 4px);
   background: #ffffff;
   color: #1d1d1f;
 }
@@ -1050,16 +1050,23 @@ input[type="range"]::-webkit-slider-thumb {
   top: auto;
 }
 .popover-header {
-  /* Clear of the card's own corner arc, which is wide now that it is
-     concentric with the accessory tile inside it: at 18px down, the
-     52px arc is still 14px in from the edge. */
-  padding: 18px 20px 10px 22px;
+  /* Far enough in to clear the card's corner arc, and to not read as
+     crowded against it. */
+  padding: 16px 16px 10px 18px;
 }
 .popover-header .header-title { font-size: 19.5px; }
 .popover-header .header-sub { font-size: 14.5px; }
 .popover-header .icon-btn { width: 32px; height: 32px; }
 
-.detail-popover .view-body { padding: 4px 20px 20px; }
+/* The card is one of the tiles, opened up - so it is rounded like one,
+   not like the widget panel (whose radius is wide because it has 20px of
+   padding around real tiles). Everything inside then steps down from
+   that: 14px in means 14px less radius, and the slab inside the
+   accessory tile does the same again with its own 8px. */
+.detail-popover .card-bg { border-radius: var(--radius-tile); }
+.detail-popover { --accessory-radius: calc(var(--radius-tile) - 14px); }
+.detail-popover .accessory-tile { border-radius: var(--accessory-radius); }
+.detail-popover .view-body { padding: 4px 14px 14px; }
 .detail-popover .accessory-tile .accessory-state { font-size: 17px; }
 .detail-popover .toggle-row .toggle-label { font-size: 17px; }
 .detail-popover .slider-block .slider-label { font-size: 15px; }
