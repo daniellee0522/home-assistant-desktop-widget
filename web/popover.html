@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>HA Widget Detail</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage">
+
+  <!-- ============ Grid view (the widget itself) ============ -->
+  <section id="view-grid" class="view">
+    <div class="card-bg pywebview-drag-region"></div>
+    <div id="tiles" class="tiles-grid"></div>
+    <div id="empty-hint" class="empty-hint" hidden>
+      <div class="empty-icon">⌂</div>
+      <div class="empty-title">尚未設定任何配件</div>
+      <div class="empty-sub">按這裡開始設定 Home Assistant</div>
+      <button id="empty-add-btn" class="pill-btn">開啟設定</button>
+    </div>
+  </section>
+
+  <!-- Detail popover: this whole window shows *only* this, at its own
+       native size and position (see main.py's popover_window + app.js's
+       IS_POPOVER_WINDOW) - view-grid above is never actually shown here,
+       it's just present so app.js's shared bootstrap/render code (which
+       assumes it exists) doesn't need special-casing beyond staying
+       hidden. -->
+  <div id="detail-backdrop" class="detail-backdrop" hidden></div>
+  <div id="detail-popover" class="detail-popover" hidden>
+    <div class="card-bg"></div>
+    <div class="popover-header">
+      <div class="header-titles">
+        <div id="detail-room" class="header-title"></div>
+        <div id="detail-sub" class="header-sub"></div>
+      </div>
+      <button id="detail-edit-btn" class="icon-btn" title="編輯">
+        <svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7zm9 3.5c0 .64-.07 1.26-.19 1.86l2.03 1.58a.75.75 0 01.17.96l-1.92 3.32a.75.75 0 01-.91.32l-2.39-.96c-.98.75-1.44.99-2.36 1.32l-.36 2.54a.75.75 0 01-.74.64h-3.84a.75.75 0 01-.74-.64l-.36-2.54c-.93-.33-1.38-.57-2.36-1.32l-2.39.96a.75.75 0 01-.91-.32l-1.92-3.32a.75.75 0 01.17-.96l2.03-1.58C3.07 13.26 3 12.64 3 12s.07-1.26.19-1.86L1.16 8.56a.75.75 0 01-.17-.96l1.92-3.32a.75.75 0 01.91-.32l2.39.96c.98-.75 1.44-.99 2.36-1.32l.36-2.54A.75.75 0 019.67 0h3.84c.37 0 .68.27.74.64l.36 2.54c.93.33 1.38.57 2.36 1.32l2.39-.96a.75.75 0 01.91.32l1.92 3.32a.75.75 0 01-.17.96l-2.03 1.58c.12.6.19 1.22.19 1.86z" transform="scale(0.8) translate(3,3)"/></svg>
+      </button>
+    </div>
+    <div id="detail-body" class="view-body"></div>
+
+    <!-- Edit sub-panel: icon / name / category, shown instead of
+         detail-body when the gear above is clicked. -->
+    <div id="detail-edit-body" class="view-body" hidden>
+      <div class="section-title">圖示</div>
+      <div id="icon-picker" class="icon-picker"></div>
+      <label class="field">
+        <span>名稱</span>
+        <input id="edit-room-input" type="text" maxlength="40">
+      </label>
+      <label class="field">
+        <span>類別名稱</span>
+        <input id="edit-label-input" type="text" maxlength="40">
+      </label>
+      <div class="row gap end">
+        <button id="edit-done-btn" class="pill-btn small">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Settings view ============ -->
+  <section id="view-settings" class="view" hidden>
+    <div class="card-bg"></div>
+    <div class="view-header pywebview-drag-region">
+      <div class="header-titles">
+        <div class="header-title">設定</div>
+        <div class="header-sub"><span id="conn-dot" class="conn-dot"></span><span id="conn-label">未連線</span></div>
+      </div>
+      <button class="icon-btn" data-action="close-settings">✕</button>
+    </div>
+    <div class="view-body settings-body">
+
+      <div class="section">
+        <div class="section-title">Home Assistant 連線</div>
+        <label class="field">
+          <span>網址</span>
+          <input id="ha-url" type="text" placeholder="http://homeassistant.local:8123" spellcheck="false">
+        </label>
+        <label class="field">
+          <span>長效存取權杖 (Long-Lived Access Token)</span>
+          <input id="ha-token" type="password" placeholder="貼上你的 token" spellcheck="false">
+        </label>
+        <div class="row gap">
+          <button id="test-conn-btn" class="pill-btn ghost">測試連線</button>
+          <span id="test-conn-result" class="hint"></span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">外觀</div>
+        <div class="row gap">
+          <label class="chip-select">
+            <span>主題</span>
+            <select id="theme-select">
+              <option value="auto">跟隨系統</option>
+              <option value="light">淺色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+          <label class="chip-select">
+            <span>每列數量</span>
+            <select id="columns-select">
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+            </select>
+          </label>
+          <label class="chip-select">
+            <span>縮放比例</span>
+            <select id="zoom-select">
+              <option value="50">50%</option>
+              <option value="65">65%</option>
+              <option value="75">75%</option>
+              <option value="90">90%</option>
+              <option value="100">100%</option>
+              <option value="110">110%</option>
+              <option value="125">125%</option>
+              <option value="150">150%</option>
+              <option value="175">175%</option>
+              <option value="200">200%</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">行為</div>
+        <label class="check-row">
+          <input id="lock-position-check" type="checkbox">
+          <span>鎖定位置 (無法拖曳移動)</span>
+        </label>
+        <label class="check-row">
+          <input id="start-on-boot-check" type="checkbox">
+          <span>開機時自動啟動</span>
+        </label>
+        <label class="check-row">
+          <input id="fixed-size-check" type="checkbox">
+          <span>固定視窗大小 (內容超出時可捲動)</span>
+        </label>
+        <div class="row gap" id="fixed-size-fields" hidden>
+          <label class="chip-select">
+            <span>寬度 (px)</span>
+            <input id="fixed-width-input" type="number" min="120" max="2400" step="40" style="width:76px">
+          </label>
+          <label class="chip-select">
+            <span>高度 (px)</span>
+            <input id="fixed-height-input" type="number" min="90" max="1800" step="40" style="width:76px">
+          </label>
+        </div>
+      </div>
+
+      <div class="section grow">
+        <div class="section-title row-between">
+          <span>配件 (<span id="tile-count">0</span>)</span>
+          <button id="add-tile-btn" class="pill-btn small">+ 新增配件</button>
+        </div>
+        <div id="tile-list" class="tile-list"></div>
+      </div>
+
+      <div class="row gap end">
+        <button id="quit-btn" class="pill-btn ghost danger">結束程式</button>
+        <button id="close-settings-btn" class="pill-btn">完成</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Add/edit tile picker (sub-view over settings) ============ -->
+  <section id="view-picker" class="view" hidden>
+    <div class="card-bg"></div>
+    <div class="view-header pywebview-drag-region">
+      <button class="icon-btn back-btn" data-action="close-picker">‹</button>
+      <div class="header-titles">
+        <div class="header-title">新增配件</div>
+        <div class="header-sub" id="picker-sub">選擇一個實體</div>
+      </div>
+      <div class="conn-dot"></div>
+    </div>
+    <div class="view-body">
+      <input id="picker-search" class="search-input" type="text" placeholder="搜尋實體 / 名稱...">
+      <div id="picker-list" class="picker-list"></div>
+    </div>
+  </section>
+
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script>window.__IS_POPOVER_WINDOW = true;</script>
+<script src="app.js"></script>
+</body>
+</html>

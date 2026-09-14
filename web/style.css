@@ -7,9 +7,6 @@
 
   --panel: rgba(210, 226, 240, 0.78);
   --panel-border: rgba(255, 255, 255, 0.55);
-  /* Solid (no alpha) backing for #stage itself - see the comment on
-     #stage below for why this needs to be opaque. */
-  --stage-bg: #dbe6f0;
   /* An "on" tile is always a bright white card with dark text, matching
      the iOS Home widget, regardless of the app's own light/dark theme -
      so unlike the other tokens below, these three are never redefined per
@@ -40,7 +37,6 @@
 html[data-theme="dark"] {
   --panel: rgba(36, 40, 46, 0.78);
   --panel-border: rgba(255, 255, 255, 0.10);
-  --stage-bg: #202226;
   --tile-off: rgba(30, 32, 38, 0.6);
   --tile-off-hover: rgba(40, 42, 48, 0.7);
   --text-on-1: #f5f5f7;
@@ -60,7 +56,6 @@ html[data-theme="dark"] {
   html[data-theme="auto"] {
     --panel: rgba(36, 40, 46, 0.78);
     --panel-border: rgba(255, 255, 255, 0.10);
-    --stage-bg: #202226;
     --tile-off: rgba(30, 32, 38, 0.6);
     --tile-off-hover: rgba(40, 42, 48, 0.7);
     --text-on-1: #f5f5f7;
@@ -112,18 +107,6 @@ html, body {
 #stage {
   position: relative;
   display: inline-block;
-  /* Opaque, theme-matched backing for the *whole* window shape (see the
-     comment on the window's single clip rect in app.js's syncWindowSize
-     and main.py's resize_window for why this needs to be solid): without
-     real per-pixel window transparency, any part of the window that
-     isn't covered by a more specific card (the gap around a popover that
-     doesn't fully overlap the grid, say) would otherwise be raw
-     unpainted canvas - rendered inconsistently, and revealing whatever
-     real window happens to be behind us on the desktop once the clip
-     region was made to exclude gaps. This makes that space a deliberate,
-     always-the-same-color part of the design instead. */
-  background: var(--stage-bg);
-  border-radius: var(--radius-panel);
 }
 
 .view {

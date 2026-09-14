@@ -95,6 +95,16 @@ class Api:
         self._pin_enabled = threading.Event()
         self._pin_enabled.set()
 
+        # The detail popover lives in its own separate OS window (see the
+        # IS_POPOVER_WINDOW comment in app.js for why) - it shares this
+        # same Api instance (same config, same HA connection) but needs
+        # its own window handle and its own independent resize/sequencing
+        # state, since it resizes on its own schedule, unrelated to the
+        # main grid window's.
+        self._popover_window = None
+        self._popover_resize_lock = threading.Lock()
+        self._popover_last_resize_seq = -1
+
         self._client = HAClient(on_event=self._on_ha_event, on_status=self._on_ha_status)
         self._client.configure(
             self._cfg.get("ha_url", ""), self._cfg.get("ha_token", ""),
@@ -105,6 +115,9 @@ class Api:
 
     def _bind_window(self, window):
         self._window = window
+
+    def _bind_popover_window(self, window):
+        self._popover_window = window
 
     # ---------------------------------------------------------------
     # JS-callable API (exposed as window.pywebview.api.<method>)
@@ -277,7 +290,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def resize_window(self, phys_w, phys_h, seq=None, radius=0):
+    def resize_window(self, phys_w, phys_h, seq=None, rects=None):
         # phys_w/phys_h are already-physical pixels: the JS side multiplies
         # its CSS measurement by window.devicePixelRatio itself. pywebview's
         # own resize() does that same conversion internally using Win32's
@@ -322,21 +335,22 @@ class Api:
                 # disappear, and one fought visibly with this region clip -
                 # see the removed _enable_desktop_transparency/_enable_backdrop
                 # above). Failing that, at least clip the *window itself* to
-                # one rounded rect matching its own size, so corners are a
-                # real cutout to the desktop instead of square opaque corners
-                # poking out past the rounded card underneath. This used to
-                # be a union of one rounded rect per visible card (grid +
-                # popover) instead of one rect for the whole window - looked
-                # more precise on paper, but any gap *between* the pieces
-                # became an actual hole in the window's shape, and without
-                # real transparency there's nothing of ours to show through
-                # a hole - whatever real window happens to be on the desktop
-                # underneath shows instead, which read as a random black-or-
-                # white glitch with no visible cause. One rect has no gaps to
-                # punch holes in; #stage's own opaque background (see
-                # style.css) covers whatever space isn't a card.
-                if radius:
-                    _apply_window_region(hwnd, w, h, radius)
+                # the same rounded-rect shape(s) as the CSS card(s) actually
+                # on screen, so corners are a real cutout to the desktop
+                # instead of square opaque corners poking out past the
+                # rounded card underneath. More than one card can be visible
+                # at once (the grid plus a floating detail popover beside it),
+                # so this unions one rounded-rect region per card rather than
+                # using a single rect for the whole window - a single rect
+                # was tried instead (simpler, and avoided the gap between
+                # pieces ever being a real hole in the window's shape) but it
+                # meant painting that gap with a filler color whenever the
+                # popover didn't line up with the grid, which looked like an
+                # unwanted solid block stuck onto the widget - explicitly not
+                # what was wanted here. Any gap between the grid and popover
+                # is a real hole again, showing the desktop through it.
+                if rects:
+                    _apply_window_region(hwnd, rects)
 
         # pywebview runs every js_api call (this one included) on a fresh,
         # throwaway Python thread so a slow call can't block the UI (see
@@ -373,6 +387,92 @@ class Api:
                 _send_to_bottom(self._window)
         return True
 
+    def resize_popover_window(self, phys_w, phys_h, seq=None, rects=None):
+        # Same logic/reasoning as resize_window above (DPI-safe sizing,
+        # UI-thread marshaling, per-card rounded-rect region) but for the
+        # separate popover window - see IS_POPOVER_WINDOW in app.js for
+        # why the detail popover has its own window at all rather than
+        # sharing the grid's.
+        if not self._popover_window:
+            return
+        if seq is not None:
+            with self._popover_resize_lock:
+                if seq <= self._popover_last_resize_seq:
+                    return
+                self._popover_last_resize_seq = seq
+        hwnd = _get_hwnd(self._popover_window)
+        if not hwnd:
+            return
+        w = max(80, int(phys_w))
+        h = max(60, int(phys_h))
+
+        def _apply():
+            with _hwnd_lock:
+                try:
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                except Exception:
+                    pass
+                if rects:
+                    _apply_window_region(hwnd, rects)
+
+        _run_on_ui_thread(self._popover_window, _apply)
+
+    def open_popover(self, tile_id, screen_x, screen_y):
+        # Moves the (normally hidden) popover window to sit exactly where
+        # the clicked tile is on screen, shows it, and asks its own page
+        # (already running the full shared bootstrap - same config, same
+        # tile list) to render that one tile's detail view.
+        if not self._popover_window:
+            return
+        try:
+            self._popover_window.move(int(screen_x), int(screen_y))
+        except Exception:
+            pass
+        try:
+            self._popover_window.show()
+        except Exception:
+            pass
+        _bring_to_front(self._popover_window)
+        try:
+            self._popover_window.evaluate_js(
+                "window.__showPopoverForTile && window.__showPopoverForTile(%s)" % json.dumps(tile_id)
+            )
+        except Exception:
+            pass
+
+    def close_popover(self):
+        if self._popover_window:
+            try:
+                self._popover_window.hide()
+            except Exception:
+                pass
+
+    def set_popover_activatable(self, enabled):
+        # No bottom-of-z-order pinning here (unlike set_activatable above)
+        # - the popover window is only ever shown for an active
+        # interaction, so it should simply come to the front, not be
+        # pushed back down once that interaction ends (it just hides).
+        if self._popover_window:
+            _set_noactivate(self._popover_window, not enabled)
+            if enabled:
+                _bring_to_front(self._popover_window)
+        return True
+
+    def get_window_pos(self):
+        # Lets the main window's JS convert a tile's own on-page position
+        # into an absolute screen position for open_popover above.
+        hwnd = _get_hwnd(self._window) if self._window else None
+        if not hwnd:
+            return {"x": 0, "y": 0}
+        try:
+            r = (ctypes.c_long * 4)()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+            return {"x": r[0], "y": r[1]}
+        except Exception:
+            return {"x": 0, "y": 0}
+
     # ---------------------------------------------------------------
     # internal
     # ---------------------------------------------------------------
@@ -385,6 +485,18 @@ class Api:
             self._window.evaluate_js("window.__haPushBatch(%s)" % payload)
         except Exception:
             pass
+        # The popover window keeps its own STATES copy from its own
+        # bootstrap/fetch_initial_states call, but has no live websocket of
+        # its own (it shares this Api/HAClient instance, whose push
+        # callbacks otherwise only ever target the main window) - without
+        # this it would go stale the moment something changes elsewhere
+        # while it's open. Only worth reaching if it's actually showing
+        # something.
+        if self._popover_window:
+            try:
+                self._popover_window.evaluate_js("window.__haPushBatch(%s)" % payload)
+            except Exception:
+                pass
 
     def _on_ha_event(self, entity_id, new_state):
         if not self._ui_ready or not self._window:
@@ -523,17 +635,45 @@ def _run_on_ui_thread(window, fn):
             pass
 
 
-def _apply_window_region(hwnd, w, h, radius):
-    # One rounded rect covering the *entire* window (0,0)-(w,h) - see the
-    # comment at resize_window's call site for why this isn't a union of
-    # one rect per visible card anymore.
+RGN_OR = 2
+
+
+def _apply_window_region(hwnd, rects):
+    # rects: iterable of (x, y, w, h, radius), all already in physical
+    # pixels relative to the window's own top-left. Builds one rounded-rect
+    # region per entry and unions them (CombineRgn/RGN_OR) into a single
+    # region for SetWindowRgn - a plain rectangular union of the boxes
+    # would put square corners back exactly where this is trying to
+    # remove them, so each piece keeps its own rounded corners in the
+    # final combined shape.
     try:
         create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
         create_rgn.restype = ctypes.c_void_p
-        r = max(0, int(radius))
-        rgn = create_rgn(0, 0, int(w) + 1, int(h) + 1, r * 2, r * 2)
-        if rgn and not ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True):
-            ctypes.windll.gdi32.DeleteObject(rgn)
+        combine_rgn = ctypes.windll.gdi32.CombineRgn
+        combine_rgn.restype = ctypes.c_int
+
+        combined = None
+        for x, y, w, h, r in rects:
+            x, y, w, h, r = int(x), int(y), int(w), int(h), max(0, int(r))
+            part = create_rgn(x, y, x + w + 1, y + h + 1, r * 2, r * 2)
+            if not part:
+                continue
+            if combined is None:
+                combined = part
+                continue
+            # A zero-size placeholder region as CombineRgn's destination:
+            # CombineRgn fully overwrites whatever hDest previously held,
+            # so its initial shape doesn't matter - only that it's a valid
+            # region handle. CreateRoundRectRgn needs all 6 args or ctypes
+            # (no argtypes declared) passes garbage for the missing ones.
+            merged = create_rgn(0, 0, 1, 1, 0, 0)
+            combine_rgn(merged, combined, part, RGN_OR)
+            ctypes.windll.gdi32.DeleteObject(combined)
+            ctypes.windll.gdi32.DeleteObject(part)
+            combined = merged
+
+        if combined and not ctypes.windll.user32.SetWindowRgn(hwnd, combined, True):
+            ctypes.windll.gdi32.DeleteObject(combined)
     except Exception:
         pass
 
@@ -673,14 +813,103 @@ def main():
 
     def on_closing():
         window.hide()
+        popover_window.hide()
         visible["v"] = False
         return False  # cancel the actual close; keep running in the tray
 
     window.events.closing += on_closing
 
+    # The detail popover is a second, independent top-level window (see
+    # IS_POPOVER_WINDOW in app.js) rather than sharing the main widget's -
+    # starts hidden, gets moved to sit over whatever tile was clicked and
+    # shown on demand (Api.open_popover), then hidden again on close
+    # rather than destroyed, so reopening it doesn't pay page-load cost
+    # every time.
+    popover_window = webview.create_window(
+        "HA Widget Detail",
+        url=os.path.join(WEB_DIR, "popover.html"),
+        js_api=api,
+        width=260,
+        height=336,
+        x=api._cfg.get("window_x", 200),
+        y=api._cfg.get("window_y", 200),
+        frameless=True,
+        easy_drag=False,
+        transparent=True,
+        shadow=False,
+        confirm_close=False,
+        hidden=True,
+        min_size=(50, 50),
+    )
+    api._bind_popover_window(popover_window)
+
+    def on_popover_deactivate(sender, args):
+        # In the old shared-window design, the popover floated over a
+        # visible backdrop that covered whatever of the window *wasn't*
+        # the popover card - clicking that empty space closed it. Now
+        # that the popover is its own window sized exactly to its own
+        # card, there is no such empty space left inside it to click. The
+        # native "click anywhere else" dismissal a real popup/context
+        # menu gets for free comes from losing activation - Form.Deactivate
+        # is a plain WinForms/.NET event, not one of pywebview's own, so
+        # it's wired directly on .native rather than through window.events.
+        #
+        # Deactivate fires *synchronously* on the UI thread as part of
+        # Windows' own WM_ACTIVATE handling. evaluate_js needs that same
+        # thread's message loop to keep pumping to get its result back
+        # (it's a round trip into the WebView2 control and back) - calling
+        # it directly from here blocks the UI thread on a result that can
+        # only ever arrive by that same thread continuing to run,
+        # deadlocking the whole app (reproduced: the window became
+        # permanently unresponsive the moment this fired). Dispatching to
+        # a throwaway thread breaks that cycle, matching how pywebview
+        # dispatches every js-to-Python call for exactly this reason (see
+        # webview.util.js_bridge_call).
+        def _close():
+            try:
+                popover_window.evaluate_js("window.closeDetail && window.closeDetail()")
+            except Exception:
+                pass
+
+        threading.Thread(target=_close, daemon=True).start()
+
+    def on_popover_shown():
+        _set_noactivate(popover_window, True)
+        _hide_from_taskbar(popover_window)
+        # .native only exists once the underlying native window has
+        # actually been created, which happens right before this event
+        # fires - not yet at the point create_window() above returns.
+        try:
+            popover_window.native.Deactivate += on_popover_deactivate
+        except Exception:
+            pass
+
+    popover_window.events.shown += on_popover_shown
+
+    # pywebview has a hardcoded workaround for transparent windows: on
+    # *every* navigation start, it force-shows (and activates!) the form
+    # regardless of the `hidden` the window was created with (see
+    # on_navigation_start in platforms/edgechromium.py - its own comment
+    # calls it "no idea why this works"). That's fine for the main window
+    # (meant to be visible anyway) but defeats starting the popover window
+    # hidden - it briefly, then persistently, shows up at whatever
+    # transient size the page happened to be mid-layout at. `loaded` fires
+    # once navigation actually finishes, after that forced show - hiding
+    # it there puts it back the way it was asked to start. Only needed
+    # once: this window navigates exactly one time (it's reused via
+    # show/hide, never re-created or re-navigated).
+    popover_window.events.loaded += lambda: popover_window.hide()
+
+    def on_popover_closing():
+        popover_window.hide()
+        return False  # never actually destroy it - see the comment above
+
+    popover_window.events.closing += on_popover_closing
+
     def toggle_visibility(icon=None, item=None):
         if visible["v"]:
             window.hide()
+            popover_window.hide()
         else:
             window.show()
         visible["v"] = not visible["v"]
