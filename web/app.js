@@ -1264,7 +1264,7 @@ function openSettingsView() {
   document.getElementById('ha-token').value = CONFIG.ha_token || '';
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
-  document.getElementById('zoom-select').value = String(CONFIG.zoom || 100);
+  setZoomSlider(CONFIG.zoom || 100);
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
   document.getElementById('fast-glass-check').checked = CONFIG.fast_glass !== false;
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
@@ -1276,6 +1276,12 @@ function openSettingsView() {
   renderTileList();
   updateConnDot();
   showView('view-settings');
+}
+
+function setZoomSlider(pct) {
+  const v = Math.max(50, Math.min(200, Number(pct) || 100));
+  document.getElementById('zoom-range').value = String(v);
+  document.getElementById('zoom-value').textContent = v + '%';
 }
 
 async function saveHaConfig(url, token) {
@@ -1516,8 +1522,17 @@ function init() {
     backdropFrameMs = BACKDROP_MIN_MS;
     refreshBackdropSoon(0);
   });
-  document.getElementById('zoom-select').addEventListener('change', async (e) => {
+  // The number follows the thumb while it is being dragged, but the
+  // widget is only re-laid-out on release: every step in between would
+  // save the config and put the grid window through a relayout and a
+  // fresh desktop capture, which is a lot of work to throw away 5% later.
+  const zoomRange = document.getElementById('zoom-range');
+  zoomRange.addEventListener('input', (e) => {
+    document.getElementById('zoom-value').textContent = e.target.value + '%';
+  });
+  zoomRange.addEventListener('change', async (e) => {
     CONFIG.zoom = Number(e.target.value);
+    setZoomSlider(CONFIG.zoom);
     applyZoom();
     await savePrefs();
     syncWindowSize();
