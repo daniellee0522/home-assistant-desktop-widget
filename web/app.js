@@ -1033,6 +1033,22 @@ function accessoryTile(iconName, on, fillPct, color, stateText, onClick) {
   tile.addEventListener('click', onClick);
   return tile;
 }
+// A switch or a lock has one thing to say - it is on or it is off - and
+// a fill creeping up from the bottom says it badly. This is the physical
+// version: a slab that sits in the bottom half of the tile, dark, and
+// rides up to the top half and turns white when it is on. The icon
+// travels with it, so a lock's shackle opens where the eye already is.
+function toggleSlabTile(iconName, on, onClick) {
+  const tile = document.createElement('button');
+  tile.className = 'accessory-tile toggle-slab' + (on ? ' is-on' : '');
+  const slab = document.createElement('div');
+  slab.className = 'slab';
+  slab.innerHTML = svgIcon(iconName);
+  tile.appendChild(slab);
+  tile.addEventListener('click', onClick);
+  return tile;
+}
+
 function sliderBlock(label, value, min, max, unit, onCommit, step) {
   const wrap = document.createElement('div'); wrap.className = 'slider-block';
   const lab = document.createElement('div'); lab.className = 'slider-label';
@@ -1130,18 +1146,25 @@ const DETAIL_BUILDERS = {
   },
   switch(body, tile, state) {
     const on = !!state && state.state === 'on';
-    const icon = tile.icon || domainMeta('switch').icon;
-    body.appendChild(accessoryTile(icon, on, 100, 'var(--accent-blue)', on ? '開啟' : '關閉', () => {
+    body.appendChild(toggleSlabTile(iconNameFor(tile, state), on, () => {
       optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
       callService('switch', 'toggle', tile.entity);
     }));
   },
   input_boolean(body, tile, state) {
     const on = !!state && state.state === 'on';
-    const icon = tile.icon || domainMeta('input_boolean').icon;
-    body.appendChild(accessoryTile(icon, on, 100, 'var(--accent-blue)', on ? '開啟' : '關閉', () => {
+    body.appendChild(toggleSlabTile(iconNameFor(tile, state), on, () => {
       optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
       callService('input_boolean', 'toggle', tile.entity);
+    }));
+  },
+  lock(body, tile, state) {
+    // Up and white is open, the same way round as every other accessory
+    // here - which for a lock means unlocked.
+    const open = !!state && state.state !== 'locked';
+    body.appendChild(toggleSlabTile(iconNameFor(tile, state), open, () => {
+      optimisticSet(tile.entity, { state: open ? 'locked' : 'unlocked' });
+      callService('lock', open ? 'lock' : 'unlock', tile.entity);
     }));
   },
   climate(body, tile, state) {

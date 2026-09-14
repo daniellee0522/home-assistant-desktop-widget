@@ -975,6 +975,39 @@ input[type="range"]::-webkit-slider-thumb {
 .toast.show { opacity: 1; }
 
 
+/* ---- the on/off slab (switches and locks) ----
+   The tile is the track and keeps the size and glass it always had; the
+   slab inside is half its height, sits in the lower half when off, and
+   rides to the upper half - turning white - when on. Everything else
+   about the tile is left alone, including its rim. */
+.accessory-tile.toggle-slab .slab {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  height: calc(50% - 15px);
+  border-radius: calc(var(--radius-tile) - 10px);
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: bottom 0.28s cubic-bezier(0.3, 0.9, 0.3, 1),
+              background 0.28s ease, color 0.28s ease;
+}
+.accessory-tile.toggle-slab .slab svg {
+  width: 34px;
+  height: 34px;
+  fill: currentColor;
+}
+/* Off at bottom:10, on at bottom:50%+5 - the same 10px of track above it
+   that it had below, so the two rest positions mirror each other. */
+.accessory-tile.toggle-slab.is-on .slab {
+  bottom: calc(50% + 5px);
+  background: #ffffff;
+  color: #1d1d1f;
+}
+
 /* ================= Detail popover: its own scale =================
 
    The popover is a small card glanced at from wherever the widget sits,
