@@ -7,10 +7,15 @@
   --tile-h: 146px;
   --gap: 12px;
   --pad: 20px;
-  /* One radius for everything with a card edge - the widget panel,
-     Settings, the detail popover and the tiles - so nothing looks
-     like it belongs to a different set. */
-  --radius-tile: var(--radius-panel);
+  /* Nested corners are concentric, not equal. A box sitting --pad inside
+     another needs (outer - pad) for the gap between the two arcs to stay
+     the same width the whole way round; give both the same radius and
+     the gap pinches at every corner, which is what "the inner and outer
+     radii don't match" looks like. So this is the radius that is chosen -
+     tiles in the grid, the accessory tile in the popover - and the card
+     around them derives its own from it. The slab inside a tile does the
+     same arithmetic again with its own 10px inset. */
+  --radius-tile: 32px;
 
   /* The window is a rectangle and cannot be made transparent, so the area
      outside this radius - the four corner wedges - is painted with a copy
@@ -19,8 +24,10 @@
      window's square outline visible, and it shows in the wedges, whose
      area grows with the square of this (~0.86r² per corner). The "流暢毛
      玻璃" setting is what keeps that lag small enough not to notice; with
-     it off, a smaller radius trades roundness for a less visible outline. */
-  --radius-panel: 32px;
+     it off, a smaller radius trades roundness for a less visible outline.
+     It follows --radius-tile rather than being set here, for the
+     concentric reason above. */
+  --radius-panel: calc(var(--radius-tile) + var(--pad));
 
   /* The panel is a tint *over* the blurred desktop behind it (#backdrop
      plus .card-bg's backdrop-filter), so this is deliberately
@@ -482,6 +489,14 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   flex-direction: column;
   overflow: hidden;
 }
+/* Settings takes its radius from what is actually nested inside it - the
+   input fields, 10px rounded and 16px in from the edge - not from the
+   grid's tiles, which are in another window entirely. Inheriting the
+   widget panel's 52px put the title inside the corner's arc. */
+#view-settings .card-bg,
+#view-picker .card-bg {
+  border-radius: 26px;
+}
 
 /* ================= Detail popover (anchored to its tile) ================= */
 
@@ -554,7 +569,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 12px 8px 8px;
+  padding: 14px 14px 10px 16px;
   cursor: default;
 }
 .header-titles { flex: 1; min-width: 0; }
@@ -1035,7 +1050,10 @@ input[type="range"]::-webkit-slider-thumb {
   top: auto;
 }
 .popover-header {
-  padding: 16px 16px 10px 20px;
+  /* Clear of the card's own corner arc, which is wide now that it is
+     concentric with the accessory tile inside it: at 18px down, the
+     52px arc is still 14px in from the edge. */
+  padding: 18px 20px 10px 22px;
 }
 .popover-header .header-title { font-size: 19.5px; }
 .popover-header .header-sub { font-size: 14.5px; }
