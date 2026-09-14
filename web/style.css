@@ -4,24 +4,26 @@
   --pad: 20px;
   --radius-tile: 20px;
 
-  /* Opaque, and it has to be. This window cannot be translucent (see
-     the note in main.py: measured, not assumed), so a half-transparent panel
-     doesn't blend with the desktop - it blends with whatever the window's
-     own surface happens to hold, which is flat light grey where the host
-     framework painted and raw black where it never did. Naming the colour
-     outright is the difference between "the widget looks like this" and
-     "the widget looks like this wherever the window was last the same
-     size". */
-  --panel: #d2e2f0;
+  --radius-panel: 22px;
+
+  /* The panel is a tint *over* the blurred desktop behind it (#backdrop
+     plus .card-bg's backdrop-filter), so this is deliberately
+     see-through. --panel-solid is the same colour opaque, used for the
+     moment before the first desktop capture arrives and as the fallback
+     if capturing ever fails - the window itself is not translucent, so
+     something has to be painted there. */
+  --panel: rgba(214, 228, 241, 0.55);
+  --panel-solid: #d6e4f1;
+  --glass-blur: 26px;
   /* An "on" tile is always a bright white card with dark text, matching
      the iOS Home widget, regardless of the app's own light/dark theme -
      so unlike the other tokens below, these three are never redefined per
      theme. */
-  --tile-on: rgba(255, 255, 255, 0.92);
+  --tile-on: #ffffff;
   --tile-on-text-1: #1d1d1f;
   --tile-on-text-2: #6e6e73;
-  --tile-off: rgba(90, 96, 108, 0.55);
-  --tile-off-hover: rgba(100, 106, 118, 0.65);
+  --tile-off: #6b7280;
+  --tile-off-hover: #78808f;
   --text-on-1: #1d1d1f;
   --text-on-2: #6e6e73;
   --text-off-1: #ffffff;
@@ -40,9 +42,10 @@
 }
 
 html[data-theme="dark"] {
-  --panel: #24282e;
-  --tile-off: rgba(30, 32, 38, 0.6);
-  --tile-off-hover: rgba(40, 42, 48, 0.7);
+  --panel: rgba(28, 31, 37, 0.58);
+  --panel-solid: #1c1f25;
+  --tile-off: #2b2f36;
+  --tile-off-hover: #353a43;
   --text-on-1: #f5f5f7;
   --text-on-2: #b6b6bb;
   --text-off-1: #f5f5f7;
@@ -57,9 +60,10 @@ html[data-theme="dark"] {
 
 @media (prefers-color-scheme: dark) {
   html[data-theme="auto"] {
-    --panel: #24282e;
-    --tile-off: rgba(30, 32, 38, 0.6);
-    --tile-off-hover: rgba(40, 42, 48, 0.7);
+    --panel: rgba(28, 31, 37, 0.58);
+    --panel-solid: #1c1f25;
+    --tile-off: #2b2f36;
+    --tile-off-hover: #353a43;
     --text-on-1: #f5f5f7;
     --text-on-2: #b6b6bb;
     --text-off-1: #f5f5f7;
@@ -91,14 +95,12 @@ html, body {
   padding: 0;
   width: 100%;
   height: 100%;
-  /* Every pixel of the window has to be painted by the page: anything
-     left transparent shows the window's own surface, which is flat grey
-     where the host framework painted and raw black where it never did -
-     that black frame around the card is what this widget was reported
-     for. Painting the same opaque colour here and on .card-bg is safe
-     precisely because it is opaque: two opaque layers composite to the
-     same colour, where two translucent ones would have stacked. */
-  background: var(--panel);
+  /* #backdrop paints every pixel of the window; nothing may be left
+     transparent, because what shows through is the window's own surface -
+     flat grey where the host framework painted it and raw black where it
+     never did, which is where the black frame around the card came
+     from. */
+  background: transparent;
   overflow: hidden;
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei", -apple-system, sans-serif;
   -ms-overflow-style: none;
@@ -114,6 +116,7 @@ html, body {
 
 #stage {
   position: relative;
+  z-index: 1;
   /* Sized to its own content, explicitly - *not* an inline-block, whose
      width an ancestor can still clamp. The window is sized *from* this
      element's measured bounding rect (syncWindowSize -> SetWindowPos),
@@ -137,19 +140,34 @@ html, body {
   position: relative;
 }
 
-/* The widget's outer shape is the OS window itself, not this element.
-   A border-radius here would round the card against the window's own
-   square edge, and whatever filled the corners outside it - bare
-   backdrop, or (before the window had a real one) raw black - would read
-   as a square frame around the rounded card, which is exactly the bug
-   this widget was reported for. So the card fills the window edge to
-   edge and the rounded corners come from the compositor instead (see
-   _apply_window_material in main.py). */
+/* The frosted card. backdrop-filter blurs whatever is painted behind
+   it, which here is #backdrop's copy of the real desktop - so this is a
+   genuine blur of what is behind the window, not a picture of one. The
+   rounded corners work because the desktop copy continues *unblurred*
+   outside this element: the corners show the same pixels the desktop
+   would, which is what a real cutout would look like. Nothing here relies
+   on the window being translucent, because it cannot be (see main.py). */
 .card-bg {
   position: absolute;
   inset: 0;
+  border-radius: var(--radius-panel);
   background: var(--panel);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
   transition: background 0.25s ease;
+}
+
+#backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-color: var(--panel-solid);
+  background-repeat: no-repeat;
+  /* The capture is taken at exactly this window's pixel size, so
+     stretching it to the element is 1:1 - and saying it this way avoids
+     having to undo the CSS `zoom` on <html> to work out a pixel size. */
+  background-size: 100% 100%;
+  background-position: 0 0;
 }
 
 /* ================= Grid view ================= */

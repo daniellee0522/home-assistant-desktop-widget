@@ -33,12 +33,15 @@ pywebview pystray Pillow websocket-client). On Windows these pull in
 pythonnet automatically to drive the EdgeWebView2 control.
 """
 
+import base64
 import ctypes
+import io
 import json
 import math
 import os
 import sys
 import threading
+import zlib
 
 if sys.platform == "win32":
     # Must happen before pywebview creates any window / calls its own
@@ -149,6 +152,7 @@ class Api:
                 "fixed_size": bool(self._cfg.get("fixed_size", False)),
                 "fixed_width": self._cfg.get("fixed_width", 400),
                 "fixed_height": self._cfg.get("fixed_height", 300),
+                "opacity": self._cfg.get("opacity", 100),
                 "tiles": tiles,
             },
             "connected": self._connected,
@@ -235,7 +239,8 @@ class Api:
         return True
 
     def save_prefs(self, theme, columns, lock_position=None,
-                   zoom=None, fixed_size=None, fixed_width=None, fixed_height=None):
+                   zoom=None, fixed_size=None, fixed_width=None, fixed_height=None,
+                   opacity=None):
         self._cfg["theme"] = theme or "auto"
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
@@ -258,6 +263,11 @@ class Api:
         if fixed_height is not None:
             try:
                 self._cfg["fixed_height"] = max(90, int(fixed_height))
+            except Exception:
+                pass
+        if opacity is not None:
+            try:
+                self._cfg["opacity"] = max(0, min(100, int(opacity)))
             except Exception:
                 pass
         cfgmod.save_config(self._cfg)
@@ -428,6 +438,54 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
+    def get_desktop_backdrop(self, window_kind="main", last_hash=None):
+        """A PNG of the desktop directly behind this window, base64'd.
+
+        The page draws it edge to edge and blurs it behind the card (see
+        .glass-bg in style.css), which is how this widget gets a frosted
+        backdrop at all - the window itself cannot be translucent (see the
+        note further down). Returned at the window's exact physical pixel
+        size, so the page can lay it out 1:1 and the unblurred margin
+        around the card lines up with the real desktop behind it.
+        """
+        window = self._popover_window if window_kind == "popover" else self._window
+        if not window:
+            return None
+        hwnd = _get_hwnd(window)
+        if not hwnd:
+            return None
+        try:
+            r = (ctypes.c_long * 4)()
+            _user32.GetWindowRect(hwnd, ctypes.byref(r))
+            x, y, w, h = r[0], r[1], r[2] - r[0], r[3] - r[1]
+            raw = _desktop_capture.grab(x, y, w, h)
+            if not raw:
+                return None
+            # Most desktops are a still image. Hashing the capture lets the
+            # caller find that out for the price of the grab alone, skip the
+            # PNG encode, and back its polling off - see refreshBackdrop in
+            # app.js. Only an animated wallpaper then keeps paying full
+            # price, which is the only case that needs to.
+            digest = zlib.crc32(raw) & 0xFFFFFFFF
+            if last_hash is not None and int(last_hash) == digest:
+                return {"unchanged": True, "hash": digest}
+            from PIL import Image
+            img = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
+            buf = io.BytesIO()
+            # PNG rather than JPEG: this is a backdrop that gets blurred and
+            # tinted, so JPEG's ringing around the desktop's hard edges would
+            # smear into the blur, and at widget size the file is small either
+            # way.
+            img.save(buf, format="PNG", compress_level=1)
+            return {
+                "url": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
+                "w": w,
+                "h": h,
+                "hash": digest,
+            }
+        except Exception:
+            return None
+
     def move_window(self, screen_x, screen_y):
         # Absolute physical screen pixels, from the page's own drag
         # handling (see startDrag in app.js). pywebview's built-in
@@ -467,15 +525,16 @@ class Api:
     def _push_prefs(self):
         """Send the current preferences to the popover window's page.
 
-        It is a separate window running its own copy of app.js with its own
-        CONFIG, populated once at startup, so anything changed in Settings
-        afterwards (zoom especially) never reached it and the detail card
-        kept rendering at whatever scale it booted with. The Settings page
-        itself is skipped on purpose - it is the one that made the change,
-        and pushing it back mid-edit would fight whatever is being typed.
+        Both windows run their own copy of app.js with their own CONFIG,
+        each populated once at startup, and either can be the one that
+        changes something: Settings changes zoom and the tile list, the
+        detail card's edit panel changes a tile's name and icon. Without
+        this the other window never hears about it - the detail card kept
+        rendering at whatever zoom it booted with, and a tile renamed from
+        the detail card kept its old name in the grid and in Settings.
+        __applyPrefs compares before it acts, so the window that made the
+        change is not disturbed by getting its own change back.
         """
-        if not self._popover_window:
-            return
         payload = json.dumps({
             "theme": self._cfg.get("theme", "auto"),
             "columns": self._cfg.get("columns", 4),
@@ -484,12 +543,17 @@ class Api:
             "fixed_width": self._cfg.get("fixed_width", 400),
             "fixed_height": self._cfg.get("fixed_height", 300),
             "lock_position": bool(self._cfg.get("lock_position", False)),
+            "opacity": self._cfg.get("opacity", 100),
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
-        try:
-            self._popover_window.evaluate_js("window.__applyPrefs && window.__applyPrefs(%s)" % payload)
-        except Exception:
-            pass
+        script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
+        for win in (self._window, self._popover_window):
+            if not win:
+                continue
+            try:
+                win.evaluate_js(script)
+            except Exception:
+                pass
 
     def _push_batch(self, items):
         if not self._window:
@@ -607,59 +671,57 @@ SWP_NOACTIVATE = 0x0010
 _hwnd_lock = threading.Lock()
 
 
-# Window shape, and the translucency that is not achievable here.
+# Window shape and the frosted-glass backdrop.
 #
-# The widget is meant to sit on the desktop like a Rainmeter skin. Two
-# parts of that are done natively, because the page cannot do them:
+# The widget is meant to sit on the desktop like a Rainmeter skin:
+# frosted, softly rounded, no drop shadow, no taskbar button. Only the
+# last two of those are done natively:
 #
-#   No drop shadow. DWMWA_WINDOW_CORNER_PREFERENCE is set to
-#   DWMWCP_DONOTROUND, which is a deliberate choice of square corners over
-#   rounded ones: on Windows 11 the two come as a package, and asking DWM
-#   for *any* rounding also gets the standard window drop shadow - which
-#   is what makes something read as an application floating above the
-#   desktop rather than a widget stuck to it. Measured on a flat grey
-#   backdrop, capturing with the window shown and hidden: rounding of
-#   either size puts a ~20px darkening ramp under the window, DONOTROUND
-#   leaves it perfectly flat. Nothing separates the two - not
-#   DWMWA_NCRENDERING_POLICY, not DWMWA_ALLOW_NCPAINT, not dropping the
-#   extended frame, not a SetWindowRgn clip. Note also that once DWM has
-#   granted the shadow it does not take it back when the preference is
-#   changed at runtime, so anything measuring this has to compare separate
-#   runs or it will read its own leftovers.
+#   No shadow: DWMWA_WINDOW_CORNER_PREFERENCE is pinned to
+#   DWMWCP_DONOTROUND. That is not about shape - the rounded outline is
+#   the page's - but about what DWM attaches to rounding. On Windows 11
+#   asking for *any* corner rounding also gets the standard window drop
+#   shadow, and a shadow is what makes something read as an application
+#   floating above the desktop rather than a widget stuck to it. Measured
+#   on a flat grey backdrop, capturing with the window shown and hidden:
+#   rounding of either size puts a ~20px darkening ramp under the window,
+#   DONOTROUND leaves it perfectly flat. Nothing separates the two, and
+#   once DWM has granted the shadow it does not take it back when the
+#   preference changes at runtime - so anything measuring this has to
+#   compare separate runs or it will read its own leftovers.
 #
-#   No taskbar button. See _hide_from_taskbar.
+#   No taskbar button: see _hide_from_taskbar.
 #
-# What is *not* achievable in this hosting stack, having been measured
-# rather than assumed: a translucent background. Every route ends at the
-# same wall - the WinForms form underneath always paints an opaque
-# surface, and it sits above whatever DWM draws behind the window:
+# Everything visual is the page's, drawn over a live picture of the
+# desktop that _DesktopCapture takes from behind the window. That
+# indirection is not a shortcut - it is the only thing that works here.
+# This window cannot be see-through at all, which was established by
+# measurement rather than assumption: the panel's colour came out
+# identical with the widget over a dark purple region of the wallpaper
+# and over a pink one, for every one of these:
 #
-#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic), with the extended frame it
-#     requires. Renders as a flat colour: the panel measured identically
-#     with the widget over a dark purple region of the wallpaper and over
-#     a pink one, at every position tried. Transparency effects are on,
-#     composition is on, battery saver is off.
-#   - SetWindowCompositionAttribute with ACCENT_ENABLE_ACRYLICBLURBEHIND.
-#     Changes the tint but samples nothing; same flat result.
-#   - pywebview's transparent=True on its own. A minimal window built that
-#     way composites everything its page leaves transparent against the
-#     form's background, with the desktop visible only outside the window.
-#   - WS_EX_LAYERED with a colour key, on either the page's background or
-#     the form's. The key never matches what reaches the screen.
-#   - SetWindowRgn. It clips, but the excluded area composites to opaque
-#     black rather than revealing the desktop (a plain WinForms form with
-#     the same region *does* reveal it - it is the WebView2 child that
-#     breaks it). A region also caps the size of the surface WebView2 will
-#     present, which is what used to leave a black block over the grid
-#     after switching back from the narrower Settings panel.
+#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic) with its extended frame.
+#   - SetWindowCompositionAttribute, both ACCENT_ENABLE_ACRYLICBLURBEHIND
+#     and ACCENT_ENABLE_BLURBEHIND.
+#   - pywebview's transparent=True, which composites the page's
+#     transparent pixels against the WinForms form's opaque background.
+#   - WS_EX_LAYERED colour-keyed on the page's background or the form's;
+#     the key never matches what Chromium actually paints.
 #
-# Real per-pixel transparency needs the top-level window to be created
-# with WS_EX_NOREDIRECTIONBITMAP and composed through DirectComposition,
-# which is a property of how the host framework creates its window -
-# Electron, Tauri and WinUI do it, WinForms does not, and it cannot be
-# retrofitted onto an existing HWND. So the page paints every pixel of the
-# window opaquely and deterministically instead (see style.css), which is
-# the one thing that is always right whatever the backdrop does.
+# Two near misses worth recording, because they look like solutions:
+# WS_EX_LAYERED with LWA_ALPHA *does* make the window genuinely
+# translucent, but only under --disable-gpu-compositing, and only
+# uniformly - tiles and text go translucent with it. And SetWindowRgn does
+# clip the window's shape, but the area it excludes composites to opaque
+# black instead of revealing the desktop (a plain WinForms form with the
+# same region reveals it fine - it is the WebView2 child that breaks it),
+# which is where the black frame around the card came from.
+#
+# Painting the backdrop ourselves sidesteps all of it: the page draws the
+# captured desktop edge to edge, blurs it behind the card with
+# backdrop-filter, and leaves it unblurred outside the card's rounded
+# corners so those corners read as a real cutout. Tiles stay fully opaque,
+# because nothing about the window is translucent.
 
 
 # Declared signatures for every native call below that takes an HWND. A
@@ -691,10 +753,147 @@ _user32.SetWindowLongW.restype = ctypes.c_long
 _user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
 _user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+_user32.GetDC.argtypes = [ctypes.c_void_p]
+_user32.GetDC.restype = ctypes.c_void_p
+_user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+_user32.FindWindowW.restype = ctypes.c_void_p
+_user32.PrintWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+_user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+
+_gdi32 = ctypes.WinDLL("gdi32")
+_gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+_gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+_gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+_gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+_gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_gdi32.SelectObject.restype = ctypes.c_void_p
+_gdi32.BitBlt.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+]
+_gdi32.GetDIBits.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+]
+_gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+_gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
 _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+
+PW_RENDERFULLCONTENT = 0x00000002
+SRCCOPY = 0x00CC0020
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+class _DesktopCapture:
+    """A live picture of the desktop, for the page to use as its backdrop.
+
+    Taken with PrintWindow(PW_RENDERFULLCONTENT) against Progman rather
+    than by reading the wallpaper file, because the wallpaper file is
+    often not what is on screen: with an animated wallpaper tool running,
+    SPI_GETDESKWALLPAPER returns a small placeholder image while the real,
+    moving wallpaper is drawn into the desktop window. PrintWindow gets
+    what is actually being drawn, animation included - and unlike a screen
+    grab it renders the desktop window alone, so the widget sitting on top
+    of it never ends up inside its own backdrop.
+
+    The desktop-sized bitmap is built once and reused; each capture
+    re-renders into it and copies out only the rectangle the widget
+    covers.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._dc = None
+        self._bmp = None
+        self._size = (0, 0)
+
+    def _ensure(self, w, h):
+        if self._dc and self._size == (w, h):
+            return True
+        self._release()
+        screen_dc = _user32.GetDC(None)
+        if not screen_dc:
+            return False
+        try:
+            self._dc = _gdi32.CreateCompatibleDC(screen_dc)
+            self._bmp = _gdi32.CreateCompatibleBitmap(screen_dc, w, h)
+            if not self._dc or not self._bmp:
+                self._release()
+                return False
+            _gdi32.SelectObject(self._dc, self._bmp)
+            self._size = (w, h)
+            return True
+        finally:
+            _user32.ReleaseDC(None, screen_dc)
+
+    def _release(self):
+        if self._bmp:
+            _gdi32.DeleteObject(self._bmp)
+        if self._dc:
+            _gdi32.DeleteDC(self._dc)
+        self._dc = self._bmp = None
+        self._size = (0, 0)
+
+    def grab(self, x, y, w, h):
+        """BGRA bytes for the screen rectangle (x, y, w, h), or None."""
+        if w <= 0 or h <= 0:
+            return None
+        vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        progman = _user32.FindWindowW("Progman", None)
+        if not progman:
+            return None
+        with self._lock:
+            if not self._ensure(vw, vh):
+                return None
+            if not _user32.PrintWindow(progman, self._dc, PW_RENDERFULLCONTENT):
+                return None
+            screen_dc = _user32.GetDC(None)
+            crop_dc = _gdi32.CreateCompatibleDC(self._dc)
+            crop_bmp = _gdi32.CreateCompatibleBitmap(screen_dc, w, h) if screen_dc else None
+            if screen_dc:
+                _user32.ReleaseDC(None, screen_dc)
+            if not crop_dc or not crop_bmp:
+                if crop_dc:
+                    _gdi32.DeleteDC(crop_dc)
+                if crop_bmp:
+                    _gdi32.DeleteObject(crop_bmp)
+                return None
+            try:
+                _gdi32.SelectObject(crop_dc, crop_bmp)
+                _gdi32.BitBlt(crop_dc, 0, 0, w, h, self._dc, x - vx, y - vy, SRCCOPY)
+                hdr = _BITMAPINFOHEADER(
+                    ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
+                )
+                buf = ctypes.create_string_buffer(w * h * 4)
+                if not _gdi32.GetDIBits(crop_dc, crop_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+                    return None
+                return buf.raw
+            finally:
+                _gdi32.DeleteObject(crop_bmp)
+                _gdi32.DeleteDC(crop_dc)
+
+
+_desktop_capture = _DesktopCapture()
 
 
 def _get_hwnd(window):
@@ -763,18 +962,13 @@ DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND = 1
 
 
-def _set_dwm_attr(hwnd, attr, value):
-    v = ctypes.c_int(int(value))
-    try:
-        return _dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0
-    except Exception:
-        return False
-
-
 def _apply_window_shape(window):
-    """Keep DWM from rounding this window, and so from shadowing it (see
-    the note above). Windows 10 doesn't know the attribute and fails the
-    call harmlessly - its windows are square anyway.
+    """Stop DWM rounding this window, and so stop it shadowing the window.
+
+    The visible rounded outline is the page's, not the window's (see the
+    note above) - this is purely about the shadow that comes attached to
+    any DWM rounding. Windows 10 doesn't know the attribute and fails the
+    call harmlessly; its windows are square anyway.
     """
     hwnd = _get_hwnd(window)
     if not hwnd:
@@ -782,7 +976,13 @@ def _apply_window_shape(window):
 
     def _apply():
         with _hwnd_lock:
-            _set_dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND)
+            v = ctypes.c_int(DWMWCP_DONOTROUND)
+            try:
+                _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(v), ctypes.sizeof(v),
+                )
+            except Exception:
+                pass
 
     _run_on_ui_thread(window, _apply)
 
@@ -1009,8 +1209,7 @@ def main():
         # part of the window the page hasn't painted shows raw,
         # never-initialised surface as black. An opaque background makes
         # the worst case a frame of flat panel colour instead.
-        transparent=False,
-        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        transparent=True,
         shadow=False,
         confirm_close=False,
         # pywebview's default minimum (200x100 logical) is bigger than
@@ -1063,8 +1262,7 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
-        transparent=False,                      # see the main window above
-        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        transparent=True,
         shadow=False,
         confirm_close=False,
         hidden=True,

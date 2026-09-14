@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "lock_position": False,
     "start_on_boot": False,
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
+    "opacity": 85,            # percent; whole-window translucency (see main.py)
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,

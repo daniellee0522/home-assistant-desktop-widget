@@ -150,6 +150,7 @@ async function boot() {
   if (IS_POPOVER_WINDOW) document.getElementById('view-grid').hidden = true;
   updateConnDot();
   try { await window.pywebview.api.ui_ready(); } catch (e) { /* ignore */ }
+  startBackdropTicker();
 
   // Fetched separately from - and after - the first render: this is a
   // real network round-trip, and bootstrap() above deliberately avoids
@@ -252,14 +253,60 @@ function syncWindowSize() {
     resizeSeq += 1;
 
     const physW = Math.ceil(cssW * dpr), physH = Math.ceil(cssH * dpr);
-    if (IS_POPOVER_WINDOW) {
-      window.pywebview.api.resize_popover_window(physW, physH, resizeSeq);
-    } else {
-      window.pywebview.api.resize_window(physW, physH, resizeSeq);
-    }
+    const done = IS_POPOVER_WINDOW
+      ? window.pywebview.api.resize_popover_window(physW, physH, resizeSeq)
+      : window.pywebview.api.resize_window(physW, physH, resizeSeq);
+    // The backdrop is captured at the window's size, so it is wrong the
+    // moment the window changes size - re-take it once the resize lands.
+    Promise.resolve(done).then(() => refreshBackdropSoon()).catch(() => {});
   });
 }
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
+
+/* ============================================================
+ * Frosted backdrop
+ * ============================================================ */
+// The window cannot be translucent (see the note in main.py), so the
+// frosted look is built the other way round: Python hands over a picture
+// of the desktop from directly behind this window, the page paints it
+// full-bleed, and .card-bg blurs it with backdrop-filter. Outside the
+// card it stays unblurred, which is what makes the rounded corners read
+// as a cutout rather than as a shape drawn on top of something.
+//
+// It has to be re-taken whenever the window moves or resizes, and on a
+// slow tick as well, because an animated wallpaper keeps changing under a
+// window that has not moved at all.
+const BACKDROP_TICK_MS = 2000;
+let backdropPending = false;
+let backdropTimer = null;
+
+function refreshBackdrop() {
+  if (backdropPending || !(window.pywebview && window.pywebview.api)) return;
+  backdropPending = true;
+  window.pywebview.api.get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main')
+    .then((shot) => {
+      backdropPending = false;
+      if (!shot || !shot.url) return;
+      document.getElementById('backdrop').style.backgroundImage = 'url("' + shot.url + '")';
+    })
+    .catch(() => { backdropPending = false; });
+}
+
+// Coalesced: a resize or a drag produces a burst of these, and each one is
+// a full desktop render on the Python side.
+let backdropSoonTimer = null;
+function refreshBackdropSoon(delay) {
+  clearTimeout(backdropSoonTimer);
+  backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 120 : delay);
+}
+
+function startBackdropTicker() {
+  if (backdropTimer) return;
+  refreshBackdrop();
+  backdropTimer = setInterval(() => {
+    if (!document.hidden) refreshBackdrop();
+  }, BACKDROP_TICK_MS);
+}
 
 /* ============================================================
  * Dragging the widget around the desktop
@@ -304,6 +351,8 @@ function installWindowDrag() {
     window.pywebview.api.move_window(
       Math.round(start.origin.x + dx), Math.round(start.origin.y + dy),
     ).catch(() => {});
+    // Different part of the desktop now behind the window.
+    refreshBackdropSoon(60);
   });
 
   const end = () => { start = null; };
@@ -651,6 +700,9 @@ function openDetail(tile) {
   popover.hidden = false;
   requestAnimationFrame(() => popover.classList.add('show'));
   syncWindowSize();
+  // This window was just moved over the tile that asked for it, so
+  // whatever backdrop it last captured is of somewhere else entirely.
+  refreshBackdropSoon(60);
   if (window.pywebview && window.pywebview.api) {
     window.pywebview.api.set_popover_activatable(true).catch(() => {});
   }
@@ -1257,12 +1309,27 @@ function init() {
 // zoom and theme it booted with, so changing either in Settings left the
 // detail card rendering at the old scale until the app was restarted.
 window.__applyPrefs = function (cfg) {
-  CONFIG = Object.assign({}, CONFIG, cfg || {});
-  applyTheme();
-  applyZoom();
-  applyFixedSizeConstraint();
+  if (!cfg) return;
+  // The window that made the change gets this back too, so compare before
+  // acting: re-rendering the grid or the tile list underneath someone who
+  // is mid-edit is worse than doing nothing.
+  const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
+  const themeChanged = cfg.theme !== CONFIG.theme;
+  const layoutChanged = cfg.zoom !== CONFIG.zoom || cfg.columns !== CONFIG.columns ||
+    cfg.fixed_size !== CONFIG.fixed_size || cfg.fixed_width !== CONFIG.fixed_width ||
+    cfg.fixed_height !== CONFIG.fixed_height;
+  if (!tilesChanged && !themeChanged && !layoutChanged) {
+    CONFIG = Object.assign({}, CONFIG, cfg);
+    return;
+  }
+  CONFIG = Object.assign({}, CONFIG, cfg);
+  if (themeChanged) applyTheme();
+  if (layoutChanged) { applyZoom(); applyFixedSizeConstraint(); }
+  if (tilesChanged && !IS_POPOVER_WINDOW) renderGrid();
+  if (tilesChanged && !document.getElementById('view-settings').hidden) renderTileList();
   if (currentDetailTileId) renderDetailBody();
   syncWindowSize();
+  refreshBackdropSoon();
 };
 
 window.__openSettingsFromTray = function () {
