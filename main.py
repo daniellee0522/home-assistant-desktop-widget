@@ -231,12 +231,12 @@ class Api:
         self._cfg["tiles"] = clean
         cfgmod.save_config(self._cfg)
         self._client.set_entities([t["entity"] for t in clean])
+        self._push_prefs()
         return True
 
     def save_prefs(self, theme, columns, lock_position=None,
                    zoom=None, fixed_size=None, fixed_width=None, fixed_height=None):
         self._cfg["theme"] = theme or "auto"
-        self._apply_theme_to_windows()
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
         except Exception:
@@ -261,6 +261,7 @@ class Api:
             except Exception:
                 pass
         cfgmod.save_config(self._cfg)
+        self._push_prefs()
         return True
 
     def set_start_on_boot(self, enabled):
@@ -427,6 +428,25 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
+    def move_window(self, screen_x, screen_y):
+        # Absolute physical screen pixels, from the page's own drag
+        # handling (see startDrag in app.js). pywebview's built-in
+        # drag-region support is deliberately not used: it moves the window
+        # on the first mousemove after *any* mousedown on the region, with
+        # no threshold, so a plain click - the way the detail popover is
+        # dismissed - dragged the widget out from under the pointer. It
+        # also feeds pywebview's move(), which takes logical pixels and
+        # rescales them, so on a display where devicePixelRatio and the
+        # OS scale disagree the window jumped rather than followed.
+        if not self._window:
+            return
+        hwnd = _get_hwnd(self._window)
+        if not hwnd:
+            return
+        _run_on_ui_thread(
+            self._window, lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
+        )
+
     def get_window_pos(self):
         # Lets the main window's JS convert a tile's own on-page position
         # into an absolute screen position for open_popover above.
@@ -444,15 +464,32 @@ class Api:
     # internal
     # ---------------------------------------------------------------
 
-    def _apply_theme_to_windows(self):
-        # The acrylic backdrop the page sits on is drawn by DWM, not by the
-        # page, so switching the widget between light and dark has to reach
-        # both windows natively as well as through CSS - otherwise a dark
-        # page ends up floating on a light material.
-        dark = _theme_is_dark(self._cfg.get("theme", "auto"))
-        for win in (self._window, self._popover_window):
-            if win:
-                _apply_window_material(win, dark)
+    def _push_prefs(self):
+        """Send the current preferences to the popover window's page.
+
+        It is a separate window running its own copy of app.js with its own
+        CONFIG, populated once at startup, so anything changed in Settings
+        afterwards (zoom especially) never reached it and the detail card
+        kept rendering at whatever scale it booted with. The Settings page
+        itself is skipped on purpose - it is the one that made the change,
+        and pushing it back mid-edit would fight whatever is being typed.
+        """
+        if not self._popover_window:
+            return
+        payload = json.dumps({
+            "theme": self._cfg.get("theme", "auto"),
+            "columns": self._cfg.get("columns", 4),
+            "zoom": self._cfg.get("zoom", 100),
+            "fixed_size": bool(self._cfg.get("fixed_size", False)),
+            "fixed_width": self._cfg.get("fixed_width", 400),
+            "fixed_height": self._cfg.get("fixed_height", 300),
+            "lock_position": bool(self._cfg.get("lock_position", False)),
+            "tiles": self._cfg.get("tiles", []),
+        }, ensure_ascii=False)
+        try:
+            self._popover_window.evaluate_js("window.__applyPrefs && window.__applyPrefs(%s)" % payload)
+        except Exception:
+            pass
 
     def _push_batch(self, items):
         if not self._window:
@@ -570,62 +607,59 @@ SWP_NOACTIVATE = 0x0010
 _hwnd_lock = threading.Lock()
 
 
-# Window shape and material, and why both are DWM's job rather than this
-# app's.
+# Window shape, and the translucency that is not achievable here.
 #
-# The widget is meant to sit on the desktop like a Rainmeter skin: a
-# translucent panel, softly rounded, no drop shadow, no taskbar button.
-# Everything below exists because this hosting stack cannot draw any of
-# that itself.
+# The widget is meant to sit on the desktop like a Rainmeter skin. Two
+# parts of that are done natively, because the page cannot do them:
 #
-# It has no per-pixel window transparency of its own. That was verified
-# directly, not assumed: a minimal pywebview window created with
-# transparent=True, showing nothing but a rounded card, composites
-# everything the page leaves transparent against the WinForms form's own
-# opaque background (measured as a flat #F0F0F0 right up to the window
-# edge, with the desktop visible only *outside* the window).
+#   No drop shadow. DWMWA_WINDOW_CORNER_PREFERENCE is set to
+#   DWMWCP_DONOTROUND, which is a deliberate choice of square corners over
+#   rounded ones: on Windows 11 the two come as a package, and asking DWM
+#   for *any* rounding also gets the standard window drop shadow - which
+#   is what makes something read as an application floating above the
+#   desktop rather than a widget stuck to it. Measured on a flat grey
+#   backdrop, capturing with the window shown and hidden: rounding of
+#   either size puts a ~20px darkening ramp under the window, DONOTROUND
+#   leaves it perfectly flat. Nothing separates the two - not
+#   DWMWA_NCRENDERING_POLICY, not DWMWA_ALLOW_NCPAINT, not dropping the
+#   extended frame, not a SetWindowRgn clip. Note also that once DWM has
+#   granted the shadow it does not take it back when the preference is
+#   changed at runtime, so anything measuring this has to compare separate
+#   runs or it will read its own leftovers.
 #
-# What does work is handing the whole job to the compositor:
+#   No taskbar button. See _hide_from_taskbar.
 #
-#   DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW draws a real
-#   acrylic material behind the window - blurred desktop, live, no work
-#   from us - and the page's transparent pixels do reach it. It needs
-#   DwmExtendFrameIntoClientArea(-1,-1,-1,-1) first, which is what tells
-#   DWM the frame covers the whole window.
+# What is *not* achievable in this hosting stack, having been measured
+# rather than assumed: a translucent background. Every route ends at the
+# same wall - the WinForms form underneath always paints an opaque
+# surface, and it sits above whatever DWM draws behind the window:
 #
-#   DWMWA_USE_IMMERSIVE_DARK_MODE picks whether that material is the light
-#   or dark variant, so it can follow the widget's own theme setting
-#   rather than the OS's.
+#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic), with the extended frame it
+#     requires. Renders as a flat colour: the panel measured identically
+#     with the widget over a dark purple region of the wallpaper and over
+#     a pink one, at every position tried. Transparency effects are on,
+#     composition is on, battery saver is off.
+#   - SetWindowCompositionAttribute with ACCENT_ENABLE_ACRYLICBLURBEHIND.
+#     Changes the tint but samples nothing; same flat result.
+#   - pywebview's transparent=True on its own. A minimal window built that
+#     way composites everything its page leaves transparent against the
+#     form's background, with the desktop visible only outside the window.
+#   - WS_EX_LAYERED with a colour key, on either the page's background or
+#     the form's. The key never matches what reaches the screen.
+#   - SetWindowRgn. It clips, but the excluded area composites to opaque
+#     black rather than revealing the desktop (a plain WinForms form with
+#     the same region *does* reveal it - it is the WebView2 child that
+#     breaks it). A region also caps the size of the surface WebView2 will
+#     present, which is what used to leave a black block over the grid
+#     after switching back from the narrower Settings panel.
 #
-#   DWMWA_WINDOW_CORNER_PREFERENCE rounds the corners, genuinely
-#   see-through and antialiased. DWMWCP_ROUNDSMALL rather than
-#   DWMWCP_ROUND on purpose: ROUND also gets the standard Windows 11
-#   window shadow, which is what made this look like an application window
-#   floating above the desktop instead of a widget stuck to it (measured:
-#   a ~20px darkening ramp around the window with ROUND, ~2px of corner
-#   antialiasing with ROUNDSMALL). The radii differ too - ROUNDSMALL is
-#   the tooltip/flyout corner - but the shadow is the reason.
-#
-# What was tried and does not work, so it doesn't come back:
-#   - SetWindowRgn with a rounded-rect region. It clips, but the excluded
-#     area composites to opaque black instead of revealing the desktop
-#     (a plain WinForms form with the same region *does* reveal it - it is
-#     the WebView2 child that breaks it). That black square framing the
-#     rounded card was this widget's most visible bug. Worse, a region
-#     also caps the size of the surface WebView2 will present, so growing
-#     the window while a smaller region was attached left everything past
-#     the old edge permanently unpainted - the black block that appeared
-#     when switching from Settings back to the wider tile grid.
-#   - WS_EX_LAYERED with SetLayeredWindowAttributes, colour-keyed on
-#     either the page's own background or the form's. The key never
-#     matches: Chromium colour-manages what it paints, and the form's
-#     background isn't what ends up on screen under the WebView2 child.
-#   - DwmEnableBlurBehindWindow with an empty blur region, the usual
-#     "enable per-pixel alpha" trick. No effect here.
-#   - SetWindowCompositionAttribute/ACCENT_ENABLE_ACRYLICBLURBEHIND. This
-#     one *does* work and lets the tint colour be chosen directly, but
-#     it's undocumented; DWMWA_SYSTEMBACKDROP_TYPE reaches the same place
-#     through a supported API, with the tint done in CSS instead.
+# Real per-pixel transparency needs the top-level window to be created
+# with WS_EX_NOREDIRECTIONBITMAP and composed through DirectComposition,
+# which is a property of how the host framework creates its window -
+# Electron, Tauri and WinUI do it, WinForms does not, and it cannot be
+# retrofitted onto an existing HWND. So the page paints every pixel of the
+# window opaquely and deterministically instead (see style.css), which is
+# the one thing that is always right whatever the backdrop does.
 
 
 # Declared signatures for every native call below that takes an HWND. A
@@ -661,8 +695,6 @@ _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
 _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
-_dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-_dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
 
 
 def _get_hwnd(window):
@@ -727,20 +759,8 @@ def _set_window_size(hwnd, w, h):
             pass
 
 
-DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-DWMWA_SYSTEMBACKDROP_TYPE = 38
-DWMWCP_ROUNDSMALL = 3
-DWMSBT_TRANSIENTWINDOW = 3
-
-
-class _MARGINS(ctypes.Structure):
-    _fields_ = [
-        ("cxLeftWidth", ctypes.c_int),
-        ("cxRightWidth", ctypes.c_int),
-        ("cyTopHeight", ctypes.c_int),
-        ("cyBottomHeight", ctypes.c_int),
-    ]
+DWMWCP_DONOTROUND = 1
 
 
 def _set_dwm_attr(hwnd, attr, value):
@@ -751,14 +771,10 @@ def _set_dwm_attr(hwnd, attr, value):
         return False
 
 
-def _apply_window_material(window, dark):
-    """Give this window its acrylic backdrop and rounded, shadowless
-    corners (see the note above for why each piece is here).
-
-    Safe to call repeatedly - the theme switcher re-runs it to flip the
-    backdrop between its light and dark variants. Windows 10 doesn't know
-    these attributes and fails each call harmlessly, leaving a plain
-    square opaque window, which is the honest fallback.
+def _apply_window_shape(window):
+    """Keep DWM from rounding this window, and so from shadowing it (see
+    the note above). Windows 10 doesn't know the attribute and fails the
+    call harmlessly - its windows are square anyway.
     """
     hwnd = _get_hwnd(window)
     if not hwnd:
@@ -766,17 +782,7 @@ def _apply_window_material(window, dark):
 
     def _apply():
         with _hwnd_lock:
-            try:
-                # Extending the frame across the whole client area is what
-                # makes DWM treat the window as frame all the way out, and
-                # is a precondition for the backdrop below showing at all.
-                m = _MARGINS(-1, -1, -1, -1)
-                _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
-            except Exception:
-                pass
-            _set_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if dark else 0)
-            _set_dwm_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
-            _set_dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL)
+            _set_dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND)
 
     _run_on_ui_thread(window, _apply)
 
@@ -918,18 +924,19 @@ def _hide_own_console():
         pass
 
 
-def _theme_is_dark(theme):
-    """Resolve the widget's theme setting to the light/dark choice the
-    window material needs, so the acrylic backdrop matches the page drawn
-    on top of it rather than whatever the OS happens to be set to.
-    """
-    if theme == "dark":
-        return True
-    if theme == "light":
-        return False
-    # "auto" follows the OS, the same way the page's own
-    # prefers-color-scheme rule does.
-    return not _os_prefers_light()
+# Keep in step with --panel in web/style.css. The page paints over all of
+# this within a frame or two of starting, so these only ever show during
+# that first frame - but they are what it looks like, so it should be the
+# right colour rather than an arbitrary default.
+PANEL_COLOR = {"light": "#D2E2F0", "dark": "#24282E"}
+
+
+def _startup_background(theme):
+    if theme not in PANEL_COLOR:
+        # "auto" follows the OS, the same way the page's own
+        # prefers-color-scheme rule does.
+        theme = "light" if _os_prefers_light() else "dark"
+    return PANEL_COLOR[theme]
 
 
 def _os_prefers_light():
@@ -996,12 +1003,14 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
-        # transparent=True is what makes WebView2 hand pywebview a
-        # transparent default background, which is how the page's
-        # unpainted pixels reach the acrylic backdrop underneath (see the
-        # material note above). On its own it does *not* make the window
-        # see-through - that part is DWM's.
-        transparent=True,
+        # Not transparent=True. It cannot make this window see-through
+        # (see the note above) - all it does is leave the form's
+        # background unset and hand WebView2 a transparent default, so any
+        # part of the window the page hasn't painted shows raw,
+        # never-initialised surface as black. An opaque background makes
+        # the worst case a frame of flat panel colour instead.
+        transparent=False,
+        background_color=_startup_background(api._cfg.get("theme", "auto")),
         shadow=False,
         confirm_close=False,
         # pywebview's default minimum (200x100 logical) is bigger than
@@ -1018,7 +1027,7 @@ def main():
     bottom_pin_stop = threading.Event()
 
     def on_shown():
-        _apply_window_material(window, _theme_is_dark(api._cfg.get("theme", "auto")))
+        _apply_window_shape(window)
         _set_noactivate(window, True)
         _hide_from_taskbar(window)
         _send_to_bottom(window)
@@ -1054,7 +1063,8 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
-        transparent=True,                       # see the main window above
+        transparent=False,                      # see the main window above
+        background_color=_startup_background(api._cfg.get("theme", "auto")),
         shadow=False,
         confirm_close=False,
         hidden=True,
@@ -1093,7 +1103,7 @@ def main():
         threading.Thread(target=_close, daemon=True).start()
 
     def on_popover_shown():
-        _apply_window_material(popover_window, _theme_is_dark(api._cfg.get("theme", "auto")))
+        _apply_window_shape(popover_window)
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
         # .native only exists once the underlying native window has
@@ -1149,7 +1159,7 @@ def main():
         nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "light"
         api._cfg["theme"] = nxt
         cfgmod.save_config(api._cfg)
-        api._apply_theme_to_windows()
+        api._push_prefs()
         try:
             window.evaluate_js("window.__setThemeFromTray && window.__setThemeFromTray(%s)" % json.dumps(nxt))
         except Exception:

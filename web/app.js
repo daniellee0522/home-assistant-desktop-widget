@@ -262,6 +262,56 @@ function syncWindowSize() {
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 
 /* ============================================================
+ * Dragging the widget around the desktop
+ * ============================================================ */
+// Done here rather than through pywebview's own drag-region support,
+// which moves the window on the first mousemove after any mousedown on
+// the region - no threshold at all. The detail popover is dismissed by
+// clicking away from it, and that click lands on the grid's background,
+// so dismissing it dragged the widget out from under the pointer. Its
+// move() also takes logical pixels and rescales them, which on a display
+// whose devicePixelRatio disagrees with the OS scale (this project's dev
+// machine, via Windows text scaling) made the window jump instead of
+// follow. Screen deltas converted with the page's own dpr, sent as
+// absolute physical pixels, track the pointer exactly.
+const DRAG_THRESHOLD_PX = 5;
+
+function installWindowDrag() {
+  if (IS_POPOVER_WINDOW) return;   // the popover is placed by its tile, never dragged
+  let start = null;
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || CONFIG.lock_position) return;
+    if (!e.target.closest('.drag-region')) return;
+    // Controls sitting inside a drag region (the header's close/back
+    // buttons) are for clicking, not for dragging the window by.
+    if (e.target.closest('button, input, select, textarea, a, [data-action]')) return;
+    start = { sx: e.screenX, sy: e.screenY, origin: null, moved: false };
+    // Fetched once per drag, not per move: it's a round trip into Python,
+    // and the window's origin only changes because *we* move it.
+    window.pywebview.api.get_window_pos()
+      .then((pos) => { if (start) start.origin = pos; })
+      .catch(() => { start = null; });
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!start || !start.origin) return;
+    const dpr = window.devicePixelRatio || 1;
+    const dx = (e.screenX - start.sx) * dpr;
+    const dy = (e.screenY - start.sy) * dpr;
+    if (!start.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    start.moved = true;
+    window.pywebview.api.move_window(
+      Math.round(start.origin.x + dx), Math.round(start.origin.y + dy),
+    ).catch(() => {});
+  });
+
+  const end = () => { start = null; };
+  document.addEventListener('mouseup', end);
+  window.addEventListener('blur', end);
+}
+
+/* ============================================================
  * Grid rendering
  * ============================================================ */
 function isOnState(domain, state) {
@@ -1198,15 +1248,22 @@ function init() {
     else if (currentDetailTileId) closeDetail();
   });
 
-  // Keep header/back buttons from also starting a window-drag (they live
-  // inside a .pywebview-drag-region header bar), and honor the "lock
-  // position" setting by stopping the drag before pywebview's own
-  // body-level mousedown listener ever sees it (capture phase runs first).
-  document.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.icon-btn')) { e.stopPropagation(); return; }
-    if (CONFIG.lock_position && e.target.closest('.pywebview-drag-region')) e.stopPropagation();
-  }, true);
+  installWindowDrag();
 }
+
+// Pushed from Python whenever preferences change (Api._push_prefs).
+// The popover lives in a second window with its own copy of this script
+// and its own CONFIG, loaded once at startup - without this it kept the
+// zoom and theme it booted with, so changing either in Settings left the
+// detail card rendering at the old scale until the app was restarted.
+window.__applyPrefs = function (cfg) {
+  CONFIG = Object.assign({}, CONFIG, cfg || {});
+  applyTheme();
+  applyZoom();
+  applyFixedSizeConstraint();
+  if (currentDetailTileId) renderDetailBody();
+  syncWindowSize();
+};
 
 window.__openSettingsFromTray = function () {
   try { openSettings(); } catch (e) { /* ignore */ }
