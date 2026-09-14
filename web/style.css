@@ -3,7 +3,7 @@
      not down, so the extra width goes further than the same pixels would
      as height. Keep in step with TILE_W/TILE_H in main.py, which sizes
      the window before the page has measured itself. */
-  --tile-w: 162px;
+  --tile-w: 152px;
   --tile-h: 146px;
   --gap: 12px;
   --pad: 20px;
@@ -301,19 +301,25 @@ html, body {
    glyph (see climateBadge in app.js). */
 .tile .tile-icon.is-badge {
   border-radius: 50%;
-  font-size: 16px;
+  font-size: 17.5px;
   font-weight: 700;
   letter-spacing: -0.3px;
   line-height: 1;
 }
 
 .tile .tile-room {
-  font-size: 17.5px;
+  font-size: 19.5px;
+  /* Tighter than the font's own leading: at this size the default puts
+     several unused pixels above and below each line, which the tile
+     cannot spare now that the type has grown. It crops leading, not ink
+     (the face's ascender-to-descender is about 1.1em). */
+  line-height: 1.2;
   font-weight: 600;
   color: var(--text-off-1);
 }
 .tile .tile-label {
-  font-size: 15px;
+  font-size: 16.5px;
+  line-height: 1.2;
   color: var(--text-off-2);
   margin-top: 1px;
 }
@@ -339,11 +345,11 @@ html, body {
   position: absolute;
   /* Just below the icon (14 + 40), and tight enough that the larger type
      still clears the name block at the bottom of the tile. */
-  top: 58px;
+  top: 56px;
   left: 14px;
   right: 14px;
-  font-size: 23px;
-  line-height: 1.15;
+  font-size: 25.5px;
+  line-height: 1.1;
   font-weight: 700;
   color: var(--text-off-1);
 }
@@ -376,7 +382,7 @@ html, body {
   margin-bottom: 1px;
 }
 .tile.is-readonly .tile-room {
-  font-size: 15px;
+  font-size: 16.5px;
   font-weight: 500;
   color: var(--text-off-2);
 }
@@ -998,18 +1004,21 @@ input[type="range"]::-webkit-slider-thumb {
 .popover-header {
   padding: 16px 16px 10px 20px;
 }
-.popover-header .header-title { font-size: 17.5px; }
-.popover-header .header-sub { font-size: 13px; }
+.popover-header .header-title { font-size: 19.5px; }
+.popover-header .header-sub { font-size: 14.5px; }
 .popover-header .icon-btn { width: 32px; height: 32px; }
 
 .detail-popover .view-body { padding: 4px 20px 20px; }
-.detail-popover .accessory-tile .accessory-state { font-size: 15.5px; }
-.detail-popover .toggle-row .toggle-label { font-size: 15.5px; }
-.detail-popover .slider-block .slider-label { font-size: 13.5px; }
-.detail-popover .btn-row .seg-btn { font-size: 14px; padding: 10px 4px; }
+.detail-popover .accessory-tile .accessory-state { font-size: 17px; }
+.detail-popover .toggle-row .toggle-label { font-size: 17px; }
+.detail-popover .slider-block .slider-label { font-size: 15px; }
+.detail-popover .btn-row .seg-btn { font-size: 15.5px; padding: 10px 4px; }
+/* The one thing that did not grow with the rest: this is the entity id,
+   a long unbroken string that wraps mid-word the moment it no longer
+   fits on one line. */
 .detail-popover .detail-readout-sub { font-size: 13px; }
-.detail-popover .section-title { font-size: 13px; }
-.detail-popover .field { font-size: 13px; }
+.detail-popover .section-title { font-size: 14.5px; }
+.detail-popover .field { font-size: 14.5px; }
 .detail-popover .field input,
-.detail-popover select { font-size: 14px; }
-.detail-popover .pill-btn { font-size: 13.5px; }
+.detail-popover select { font-size: 15.5px; }
+.detail-popover .pill-btn { font-size: 15px; }
