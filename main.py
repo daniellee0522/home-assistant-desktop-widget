@@ -631,6 +631,16 @@ class Api:
         hwnd = _get_hwnd(window)
         if not hwnd:
             return None
+        # Nothing to paint for a window that is not on screen. Both of
+        # these are cheap enough to run before every frame, and they are
+        # the whole of this program's idle cost: measured, the capture
+        # loop is ~100% of what it burns, and two of the three windows are
+        # hidden almost all of the time (the detail popover and Settings)
+        # while the third is usually behind something.
+        if not _user32.IsWindowVisible(hwnd):
+            return {"skip": True, "retry_ms": 1000}
+        if _nothing_visible_of(hwnd, self._own_hwnds()):
+            return {"skip": True, "retry_ms": 400}
         started = time.perf_counter()
         try:
             r = (ctypes.c_long * 4)()
@@ -716,6 +726,15 @@ class Api:
             }
         except Exception:
             return None
+
+    def _own_hwnds(self):
+        out = set()
+        for win in (self._window, self._popover_window, self._settings_window):
+            if win:
+                h = _get_hwnd(win)
+                if h:
+                    out.add(h)
+        return out
 
     def move_window(self, screen_x, screen_y, window_kind="main"):
         # Absolute physical screen pixels, from the page's own drag
@@ -1059,6 +1078,8 @@ _user32.MonitorFromPoint.restype = ctypes.c_void_p
 _user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
+_user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.GetAncestor.restype = ctypes.c_void_p
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
@@ -1495,9 +1516,48 @@ class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
-# Declared here rather than with the others above: MonitorFromPoint takes
-# its POINT by value, so the struct has to exist first.
+# Declared here rather than with the others above: these take their POINT
+# by value, so the struct has to exist first.
 _user32.MonitorFromPoint.argtypes = [_POINT, ctypes.c_uint]
+_user32.WindowFromPoint.argtypes = [_POINT]
+_user32.WindowFromPoint.restype = ctypes.c_void_p
+
+
+GA_ROOT = 2
+
+
+def _nothing_visible_of(hwnd, ours):
+    """True when every part of this window is behind some other window.
+
+    Sampled rather than computed: the exact answer means unioning the
+    rectangles of every window above this one in z-order, and the question
+    being asked is only "is there any point in painting this". A point
+    counts as ours if a click there would land on one of our own windows,
+    which is what WindowFromPoint answers.
+
+    It matters because this widget is pinned to the bottom of the z-order,
+    so it spends most of its life completely covered - and every frame
+    captured while it is covered is a frame nobody can see.
+    """
+    try:
+        r = (ctypes.c_long * 4)()
+        if not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return False
+        w, h = r[2] - r[0], r[3] - r[1]
+        if w <= 0 or h <= 0:
+            return False
+        for fy in (0.08, 0.35, 0.65, 0.92):
+            for fx in (0.04, 0.3, 0.55, 0.8, 0.96):
+                pt = _POINT(int(r[0] + w * fx), int(r[1] + h * fy))
+                top = _user32.WindowFromPoint(pt)
+                if not top:
+                    continue
+                root = _user32.GetAncestor(top, GA_ROOT) or top
+                if root in ours:
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def _work_area_at(x, y):

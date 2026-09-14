@@ -366,6 +366,10 @@ let backdropPending = false;
 let backdropTimer = null;
 let backdropHash = null;
 let backdropStill = 0;
+// Set from Python's answer when there is nothing worth capturing (window
+// hidden, or completely covered); it replaces the pacing below for as
+// long as that lasts - see refreshBackdrop.
+let backdropSkipMs = 0;
 let backdropFrameMs = BACKDROP_MIN_MS;
 
 // The interval is derived from what a capture costs, so a single slow
@@ -424,6 +428,15 @@ function refreshBackdrop() {
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a
       // quarter of the rate the CPU budget actually allows.
+      // Python declined to capture: this window is hidden, or every
+      // pixel of it is behind something else. Nothing to draw, and no
+      // frame cost to pace from - just wait as long as it asked.
+      if (shot && shot.skip) {
+        backdropSkipMs = shot.retry_ms || 500;
+        backdropPending = false;
+        return;
+      }
+      backdropSkipMs = 0;
       noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
       if (!shot) { backdropPending = false; return; }
       if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
@@ -476,9 +489,10 @@ function startBackdropTicker() {
   // to come back, so a slow machine thins the rate out instead of queueing
   // work it cannot keep up with.
   const tick = () => {
-    const wait = backdropStill >= BACKDROP_STILL_BEFORE_IDLE
-      ? BACKDROP_IDLE_MS
-      : Math.max(BACKDROP_MIN_MS, Math.round(backdropFrameMs * BACKDROP_DUTY));
+    const wait = backdropSkipMs
+      || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
+        ? BACKDROP_IDLE_MS
+        : Math.max(BACKDROP_MIN_MS, Math.round(backdropFrameMs * BACKDROP_DUTY)));
     backdropTimer = setTimeout(() => {
       (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
     }, wait);
