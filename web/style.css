@@ -2,7 +2,10 @@
   --tile: 130px;
   --gap: 12px;
   --pad: 20px;
-  --radius-tile: 20px;
+  /* One radius for everything with a card edge - the widget panel,
+     Settings, the detail popover and the tiles - so nothing looks
+     like it belongs to a different set. */
+  --radius-tile: var(--radius-panel);
 
   /* The window is a rectangle and cannot be made transparent, so the area
      outside this radius - the four corner wedges - is painted with a copy
@@ -12,7 +15,7 @@
      area grows with the square of this (~0.86r² per corner). The "流暢毛
      玻璃" setting is what keeps that lag small enough not to notice; with
      it off, a smaller radius trades roundness for a less visible outline. */
-  --radius-panel: 22px;
+  --radius-panel: 26px;
 
   /* The panel is a tint *over* the blurred desktop behind it (#backdrop
      plus .card-bg's backdrop-filter), so this is deliberately
@@ -264,6 +267,16 @@ html, body {
   justify-content: center;
 }
 .tile .tile-icon svg { width: 100%; height: 100%; fill: currentColor; }
+
+/* Climate tiles put the set temperature in the icon slot instead of a
+   glyph (see climateBadge in app.js). */
+.tile .tile-icon.is-badge {
+  border-radius: 50%;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1;
+}
 
 .tile .tile-room {
   font-size: 14.5px;
@@ -612,7 +625,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   display: block;
   width: 100%;
   height: 150px;
-  border-radius: 22px;
+  border-radius: var(--radius-tile);
   border: none;
   padding: 0;
   margin: 8px 0 16px;

@@ -27,6 +27,9 @@ const ICON_PATHS = {
   script: '<path d="M6 3h2v2H7v14h1v2H6a1 1 0 01-1-1V4a1 1 0 011-1zm12 0a1 1 0 011 1v16a1 1 0 01-1 1h-2v-2h1V5h-1V3h2zM10 8l6 4-6 4z"/>',
   automation: '<path d="M13 2L4 14h6l-1 8 9-12h-6z"/>',
   sensor: '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 3a1.6 1.6 0 110 3.2A1.6 1.6 0 0112 5zm-2 6h4v8h-4z"/>',
+  thermometer: '<path d="M12 2a3.2 3.2 0 00-3.2 3.2v7.9a5 5 0 106.4 0V5.2A3.2 3.2 0 0012 2zm0 1.9a1.3 1.3 0 011.3 1.3v8.8l.4.3a3.1 3.1 0 11-3.4 0l.4-.3V5.2A1.3 1.3 0 0112 3.9z"/>'
+             + '<path d="M12 6.6a.9.9 0 01.9.9v7.2a2.1 2.1 0 11-1.8 0V7.5a.9.9 0 01.9-.9z"/>',
+  humidity: '<path d="M12 2.8c3.4 4 6 7.1 6 10.1a6 6 0 11-12 0c0-3 2.6-6.1 6-10.1z"/>',
   monitor: '<path d="M4 4h16a1 1 0 011 1v11a1 1 0 01-1 1h-5l1 3H9l1-3H5a1 1 0 01-1-1V5a1 1 0 011-1zm1 2v9h14V6H5z"/>',
   door: '<path d="M6 2h12v20H6V2zm2 2v16h8V4H8zm5.5 7a1.25 1.25 0 110 2.5 1.25 1.25 0 010-2.5z"/>',
   curtain: '<path d="M4 3h16v2H4V3zm2 2.5c1.8 3-1.8 4-.4 7s-1.4 4 .4 7H5v-14h1zm12 0c-1.8 3 1.8 4 .4 7s1.4 4-.4 7h1v-14h-1zM10.5 5.5h3V19h-3V5.5z"/>',
@@ -82,7 +85,41 @@ function domainMeta(domain) { return DOMAIN_META[domain] || DOMAIN_META.default;
 function iconNameFor(tile, state) {
   if (tile.icon) return tile.icon;
   if (tile.domain === 'lock' && state && state.state !== 'locked') return 'lock-open';
+  // A sensor's generic dot says nothing; Home Assistant already tells us
+  // what it measures, so use it rather than making people pick by hand.
+  if (tile.domain === 'sensor') {
+    const attrs = (state && state.attributes) || {};
+    const unit = attrs.unit_of_measurement || '';
+    if (attrs.device_class === 'temperature' || unit.indexOf('°') === 0) return 'thermometer';
+    if (attrs.device_class === 'humidity' || unit === '%') return 'humidity';
+  }
   return domainMeta(tile.domain).icon;
+}
+
+// --- climate: the icon *is* the reading -------------------------------------
+// A thermostat's one interesting number is the temperature it is set to,
+// so the icon slot shows it directly instead of a glyph that says
+// "this is an air conditioner" next to the same number written again.
+const HVAC_COLORS = {
+  cool: '#3fa9f5',
+  heat: '#ff7a45',
+  heat_cool: '#34c759',
+  auto: '#34c759',
+  dry: '#f0b429',
+  fan_only: '#8e9aaf',
+};
+
+function climateBadge(state, on) {
+  const attrs = (state && state.attributes) || {};
+  const temp = attrs.temperature != null ? attrs.temperature : attrs.current_temperature;
+  if (temp == null) return null;
+  return {
+    text: String(Math.round(Number(temp) * 10) / 10) + '°',
+    // Off is a plain white chip with dark text - it reads as "not doing
+    // anything". Running, it takes the colour of what it is doing.
+    background: on ? (HVAC_COLORS[state.state] || 'var(--accent-cyan)') : '#ffffff',
+    color: on ? '#ffffff' : '#1d1d1f',
+  };
 }
 
 /* ============================================================
@@ -574,11 +611,21 @@ function tileEl(tile) {
 
   const iconWrap = document.createElement('div');
   iconWrap.className = 'tile-icon';
-  iconWrap.innerHTML = svgIcon(iconNameFor(tile, state));
-  iconWrap.style.color = ok ? iconColorFor(domain, state, on) : 'var(--text-off-1)';
+  const badge = (domain === 'climate' && ok && !tile.icon) ? climateBadge(state, on) : null;
+  if (badge) {
+    iconWrap.classList.add('is-badge');
+    iconWrap.textContent = badge.text;
+    iconWrap.style.background = badge.background;
+    iconWrap.style.color = badge.color;
+  } else {
+    iconWrap.innerHTML = svgIcon(iconNameFor(tile, state));
+    iconWrap.style.color = ok ? iconColorFor(domain, state, on) : 'var(--text-off-1)';
+  }
   div.appendChild(iconWrap);
 
-  const valueText = ok ? valueTextFor(domain, state) : '';
+  // The badge above already is the temperature; printing it again as the
+  // tile's headline would just be the same number twice.
+  const valueText = (ok && !badge) ? valueTextFor(domain, state) : '';
   if (valueText) {
     const v = document.createElement('div');
     v.className = 'tile-value';
@@ -915,7 +962,8 @@ function renderDetailBody() {
 /* ---- per-tile edit sub-panel (icon / name / category) ---- */
 const ICON_CHOICES = [
   'light', 'switch', 'climate', 'fan', 'cover', 'curtain', 'media', 'monitor',
-  'lock', 'door', 'vacuum', 'scene', 'script', 'automation', 'sensor',
+  'lock', 'door', 'vacuum', 'scene', 'script', 'automation',
+  'thermometer', 'humidity', 'sensor',
 ];
 
 function showEditMode(show) {
