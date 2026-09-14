@@ -393,7 +393,45 @@ function noteFrameCost(ms) {
 // what the old pair of cross-fading layers existed to fake.
 let backdropCtx = null;
 
-function paintBackdrop(sharp, blurred, w, h) {
+// Where the visible card sits, in the canvas's device pixels, plus its
+// corner radius. Everything the backdrop does is expressed against this:
+// the blurred copy is clipped to it, and the sharp copy is only needed
+// where it does not reach - the four wedges outside its rounded corners.
+// `fills` says the card is the window, give or take the pixel or two by
+// which the two roundings disagree (the window is sized from the card's
+// measured box, and WebView2's viewport does not always land on the same
+// device pixel). When it does, the box is snapped out to the canvas so
+// that the clip's rounded corners sit exactly where the sharp corner
+// wedges are drawn. When it does not - fixed-size mode can leave a real
+// margin - the whole frame has to come back sharp.
+const CARD_SNAP_PX = 4;
+
+function cardGeometry() {
+  const cv = document.getElementById('backdrop');
+  if (!cv) return null;
+  const dpr = window.devicePixelRatio || 1;
+  for (const card of document.querySelectorAll('.card-bg')) {
+    const r = card.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;        // a view that is not showing
+    const radius = (parseFloat(getComputedStyle(card).borderTopLeftRadius) || 0)
+      * currentZoom * dpr;
+    const box = { x: r.left * dpr, y: r.top * dpr, w: r.width * dpr, h: r.height * dpr,
+                  radius: radius, fills: false };
+    if (box.x <= CARD_SNAP_PX && box.y <= CARD_SNAP_PX
+        && box.x + box.w >= cv.width - CARD_SNAP_PX
+        && box.y + box.h >= cv.height - CARD_SNAP_PX) {
+      box.x = 0;
+      box.y = 0;
+      box.w = cv.width;
+      box.h = cv.height;
+      box.fills = true;
+    }
+    return box;
+  }
+  return null;
+}
+
+function paintBackdrop(sharp, blurred, w, h, corner) {
   const cv = document.getElementById('backdrop');
   if (!cv) return;
   if (!backdropCtx) backdropCtx = cv.getContext('2d', { alpha: false });
@@ -404,24 +442,30 @@ function paintBackdrop(sharp, blurred, w, h) {
     cv.width = w;
     cv.height = h;
   }
-  ctx.drawImage(sharp, 0, 0, w, h);
-  if (!blurred) return;
-  // The frosted fill of each card. Clipped to the card's own rounded
-  // rectangle here rather than set as its CSS background, so the frame
-  // never becomes an image resource of its own.
-  const scale = currentZoom * (window.devicePixelRatio || 1);
-  for (const card of document.querySelectorAll('.card-bg')) {
-    const r = card.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) continue;      // a view that is not showing
-    const dpr = window.devicePixelRatio || 1;
-    const radius = (parseFloat(getComputedStyle(card).borderTopLeftRadius) || 0) * scale;
-    ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(r.left * dpr, r.top * dpr, r.width * dpr, r.height * dpr, radius);
-    ctx.clip();
-    ctx.drawImage(blurred, 0, 0, w, h);
-    ctx.restore();
+  if (corner) {
+    // The sharp copy arrived as the four corner wedges packed into one
+    // square (see get_desktop_backdrop); put each back where it came
+    // from. Everything between them is about to be covered by the card.
+    const c = corner;
+    ctx.drawImage(sharp, 0, 0, c, c, 0, 0, c, c);
+    ctx.drawImage(sharp, c, 0, c, c, w - c, 0, c, c);
+    ctx.drawImage(sharp, 0, c, c, c, 0, h - c, c, c);
+    ctx.drawImage(sharp, c, c, c, c, w - c, h - c, c, c);
+  } else {
+    ctx.drawImage(sharp, 0, 0, w, h);
   }
+  if (!blurred) return;
+  // The frosted fill of the card, clipped to its own rounded rectangle
+  // here rather than set as its CSS background, so the frame never
+  // becomes an image resource of its own.
+  const card = cardGeometry();
+  if (!card) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
+  ctx.clip();
+  ctx.drawImage(blurred, 0, 0, w, h);
+  ctx.restore();
 }
 
 // Decoded off the main thread, drawn, then closed - the bitmap's lifetime
@@ -439,9 +483,14 @@ function refreshBackdrop() {
   // the image lands 1:1 and is never resampled (see get_desktop_backdrop).
   const box = document.getElementById('backdrop').getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
+  // Only the wedges outside the card's corners are ever seen sharp, so
+  // that is all that has to come back at full size - as long as the card
+  // really does cover the window.
+  const card = cardGeometry();
+  const corner = (card && card.fills) ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE, backdropHash,
-                          Math.round(box.width * dpr), Math.round(box.height * dpr))
+                          Math.round(box.width * dpr), Math.round(box.height * dpr), corner)
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a
@@ -467,7 +516,7 @@ function refreshBackdrop() {
         decodeShot(shot.url),
         shot.blur_url ? decodeShot(shot.blur_url) : null,
       ]).then(([sharp, blurred]) => {
-        paintBackdrop(sharp, blurred, shot.w, shot.h);
+        paintBackdrop(sharp, blurred, shot.w, shot.h, shot.corner || 0);
         sharp.close();
         if (blurred) blurred.close();
         backdropPending = false;

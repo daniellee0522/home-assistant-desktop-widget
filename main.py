@@ -73,12 +73,6 @@ if sys.platform == "win32":
 #   process-per-site       - the three windows are three pages of one
 #                            origin, and without this each gets its own
 #                            renderer process, with its own baseline.
-#   low-end-device-mode    - tells Chromium to size its caches for a
-#                            small machine. This is a widget sitting on
-#                            someone's desktop all day, not a browser
-#                            tab; the decoded-image cache in particular
-#                            was growing ~14MB a minute off the backdrop
-#                            frames and had no reason to hold any of them.
 #   disable-gpu            - this page is a card and one image blit; it
 #                            has nothing a GPU is for. The GPU process
 #                            was holding 300MB of private memory and 100MB
@@ -87,7 +81,6 @@ if sys.platform == "win32":
 #                            (17% of a core against 19%).
 _BROWSER_ARGS = (
     "--process-per-site "
-    "--enable-low-end-device-mode "
     "--disable-gpu"
 )
 os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
@@ -628,7 +621,8 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
-    def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0):
+    def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
+                             want_corner=0):
         """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
@@ -642,6 +636,16 @@ class Api:
         still image, and answering "same as before" costs only the grab,
         so the page can poll fast enough to track an animated wallpaper
         without paying the encode when there is nothing to send.
+
+        `want_corner` says the page only needs the desktop *sharp* in the
+        four corner wedges outside its card, and how big (in device
+        pixels) each of those wedges is. The card covers the whole window
+        and everything under it is drawn from the blurred copy, so the
+        full-size sharp frame was ~250KB of JPEG per frame - all but a few
+        hundred pixels of it painted over immediately. The four corners
+        pack into one small square instead. Zero means send the whole
+        thing, which is what happens if the card ever stops filling the
+        window.
 
         `want_w`/`want_h` are the size the page will actually draw this at,
         in device pixels, and they are not always the window's size: at a
@@ -733,6 +737,18 @@ class Api:
             blur_buf = io.BytesIO()
             small.save(blur_buf, format="JPEG", quality=80)
 
+            # The sharp copy, cut down to the only part of it anyone ever
+            # sees: the four wedges outside the card's rounded corners.
+            # Packed clockwise from the top left into one 2r square.
+            corner = max(0, min(int(want_corner or 0), w // 2, h // 2))
+            if corner:
+                atlas = Image.new("RGB", (corner * 2, corner * 2))
+                atlas.paste(img.crop((0, 0, corner, corner)), (0, 0))
+                atlas.paste(img.crop((w - corner, 0, w, corner)), (corner, 0))
+                atlas.paste(img.crop((0, h - corner, corner, h)), (0, corner))
+                atlas.paste(img.crop((w - corner, h - corner, w, h)), (corner, corner))
+                img = atlas
+
             buf = io.BytesIO()
             # JPEG, not PNG: this is a photo-like backdrop that is about to
             # be blurred, and encoding it costs ~0.4ms against PNG's ~4.6ms
@@ -745,6 +761,7 @@ class Api:
                 "blur_url": "data:image/jpeg;base64," + base64.b64encode(blur_buf.getvalue()).decode("ascii"),
                 "w": w,
                 "h": h,
+                "corner": corner,
                 "hash": digest,
                 # What this frame actually cost *here*. The page paces
                 # itself from this rather than from its own round-trip
