@@ -23,7 +23,7 @@
      moment before the first desktop capture arrives and as the fallback
      if capturing ever fails - the window itself is not translucent, so
      something has to be painted there. */
-  --panel: rgba(214, 228, 241, 0.55);
+  --panel: rgba(214, 228, 241, 0.4);
   --panel-solid: #d6e4f1;
   /* An "on" tile is always a bright white card with dark text, matching
      the iOS Home widget, regardless of the app's own light/dark theme -
@@ -32,8 +32,12 @@
   --tile-on: #ffffff;
   --tile-on-text-1: #1d1d1f;
   --tile-on-text-2: #6e6e73;
-  --tile-off: #6b7280;
-  --tile-off-hover: #78808f;
+  /* An off tile is a darker pane of the same glass, not a solid card:
+     the blurred desktop under the panel carries on through it. The alpha
+     is as low as it goes while white text on top still reads over a
+     bright wallpaper - much below this and the light ones wash it out. */
+  --tile-off: rgba(58, 66, 80, 0.52);
+  --tile-off-hover: rgba(72, 81, 97, 0.6);
   --text-on-1: #1d1d1f;
   --text-on-2: #6e6e73;
   --text-off-1: #ffffff;
@@ -50,13 +54,22 @@
   --input-bg: rgba(255, 255, 255, 0.6);
   --input-border: rgba(0, 0, 0, 0.12);
   --scrollbar: rgba(0, 0, 0, 0.18);
+  /* Glass has an edge where the pane catches the light. Drawn as an inset
+     shadow rather than a border, because every window here is sized from
+     what its page measures (syncWindowSize) and a real 1px border on the
+     outermost card would grow that measurement by 2px each way. The top
+     edge is the brighter one, as it would be if lit from above. */
+  --glass-edge: rgba(255, 255, 255, 0.38);
+  --glass-edge-top: rgba(255, 255, 255, 0.55);
+  /* An "on" tile is white, so its rim has to be the shadow side. */
+  --glass-edge-on: rgba(0, 0, 0, 0.07);
 }
 
 html[data-theme="dark"] {
-  --panel: rgba(28, 31, 37, 0.58);
+  --panel: rgba(28, 31, 37, 0.44);
   --panel-solid: #1c1f25;
-  --tile-off: #2b2f36;
-  --tile-off-hover: #353a43;
+  --tile-off: rgba(30, 34, 41, 0.55);
+  --tile-off-hover: rgba(46, 51, 60, 0.62);
   --text-on-1: #f5f5f7;
   --text-on-2: #b6b6bb;
   --text-off-1: #f5f5f7;
@@ -67,14 +80,17 @@ html[data-theme="dark"] {
   --input-bg: rgba(0, 0, 0, 0.25);
   --input-border: rgba(255, 255, 255, 0.14);
   --scrollbar: rgba(255, 255, 255, 0.2);
+  --glass-edge: rgba(255, 255, 255, 0.14);
+  --glass-edge-top: rgba(255, 255, 255, 0.22);
+  --glass-edge-on: rgba(0, 0, 0, 0.1);
 }
 
 @media (prefers-color-scheme: dark) {
   html[data-theme="auto"] {
-    --panel: rgba(28, 31, 37, 0.58);
+    --panel: rgba(28, 31, 37, 0.44);
     --panel-solid: #1c1f25;
-    --tile-off: #2b2f36;
-    --tile-off-hover: #353a43;
+    --tile-off: rgba(30, 34, 41, 0.55);
+    --tile-off-hover: rgba(46, 51, 60, 0.62);
     --text-on-1: #f5f5f7;
     --text-on-2: #b6b6bb;
     --text-off-1: #f5f5f7;
@@ -85,6 +101,9 @@ html[data-theme="dark"] {
     --input-bg: rgba(0, 0, 0, 0.25);
     --input-border: rgba(255, 255, 255, 0.14);
     --scrollbar: rgba(255, 255, 255, 0.2);
+    --glass-edge: rgba(255, 255, 255, 0.14);
+    --glass-edge-top: rgba(255, 255, 255, 0.22);
+    --glass-edge-on: rgba(0, 0, 0, 0.1);
   }
 }
 
@@ -180,6 +199,7 @@ html, body {
   background-size: 100% 100%, 100% 100%;
   background-position: 0 0, 0 0;
   background-repeat: no-repeat, no-repeat;
+  box-shadow: inset 0 0 0 1px var(--glass-edge), inset 0 1px 0 var(--glass-edge-top);
   transition: background-color 0.25s ease;
 }
 
@@ -244,6 +264,7 @@ html, body {
   cursor: pointer;
   pointer-events: auto;
   overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--glass-edge), inset 0 1px 0 var(--glass-edge-top);
   transition: background 0.2s ease, transform 0.12s ease;
   padding: 14px;
   display: flex;
@@ -252,7 +273,10 @@ html, body {
 }
 
 .tile:active { transform: scale(0.96); }
-.tile.is-on { background: var(--tile-on); }
+.tile.is-on {
+  background: var(--tile-on);
+  box-shadow: inset 0 0 0 1px var(--glass-edge-on);
+}
 .tile.is-readonly { cursor: default; }
 .tile.is-pressing { transform: scale(0.95); }
 
@@ -316,6 +340,20 @@ html, body {
   color: var(--text-off-1);
 }
 .tile.is-on .tile-value { color: var(--tile-on-text-1); }
+
+/* White on glass sits over whatever the wallpaper happens to be doing,
+   which on a bright one is close to white itself. A soft shadow holds it
+   readable without making the tile any less see-through. */
+.tile:not(.is-on) .tile-room,
+.tile:not(.is-on) .tile-label,
+.tile:not(.is-on) .tile-value,
+.accessory-tile .accessory-state {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.38);
+}
+.tile:not(.is-on) .tile-icon,
+.accessory-tile .accessory-icon {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+}
 
 /* A read-only accessory is a readout, so the reading is the headline and
    the name is the caption underneath it - the reverse of a switch tile,
@@ -631,6 +669,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   margin: 8px 0 16px;
   overflow: hidden;
   background: var(--tile-off);
+  box-shadow: inset 0 0 0 1px var(--glass-edge), inset 0 1px 0 var(--glass-edge-top);
   cursor: pointer;
   pointer-events: auto;
 }
