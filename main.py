@@ -79,10 +79,6 @@ if sys.platform == "win32":
 #                            tab; the decoded-image cache in particular
 #                            was growing ~14MB a minute off the backdrop
 #                            frames and had no reason to hold any of them.
-#   max-old-space-size     - a ceiling for V8, which otherwise lets a
-#                            heap of dead backdrop strings drift past
-#                            100MB before it collects, because the
-#                            default limit is sized off system RAM.
 #   disable-gpu            - this page is a card and one image blit; it
 #                            has nothing a GPU is for. The GPU process
 #                            was holding 300MB of private memory and 100MB
@@ -92,8 +88,7 @@ if sys.platform == "win32":
 _BROWSER_ARGS = (
     "--process-per-site "
     "--enable-low-end-device-mode "
-    "--disable-gpu "
-    "--js-flags=--max-old-space-size=64"
+    "--disable-gpu"
 )
 os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
     os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "") + " " + _BROWSER_ARGS
