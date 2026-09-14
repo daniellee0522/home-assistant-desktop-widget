@@ -1,5 +1,10 @@
 :root {
-  --tile: 130px;
+  /* Tiles are wider than they are tall: a name and a room read across,
+     not down, so the extra width goes further than the same pixels would
+     as height. Keep in step with TILE_W/TILE_H in main.py, which sizes
+     the window before the page has measured itself. */
+  --tile-w: 154px;
+  --tile-h: 138px;
   --gap: 12px;
   --pad: 20px;
   /* One radius for everything with a card edge - the widget panel,
@@ -15,7 +20,7 @@
      area grows with the square of this (~0.86r² per corner). The "流暢毛
      玻璃" setting is what keeps that lag small enough not to notice; with
      it off, a smaller radius trades roundness for a less visible outline. */
-  --radius-panel: 26px;
+  --radius-panel: 32px;
 
   /* The panel is a tint *over* the blurred desktop behind it (#backdrop
      plus .card-bg's backdrop-filter), so this is deliberately
@@ -36,8 +41,8 @@
      the blurred desktop under the panel carries on through it. The alpha
      is as low as it goes while white text on top still reads over a
      bright wallpaper - much below this and the light ones wash it out. */
-  --tile-off: rgba(58, 66, 80, 0.52);
-  --tile-off-hover: rgba(72, 81, 97, 0.6);
+  --tile-off: rgba(58, 66, 80, 0.42);
+  --tile-off-hover: rgba(72, 81, 97, 0.5);
   --text-on-1: #1d1d1f;
   --text-on-2: #6e6e73;
   --text-off-1: #ffffff;
@@ -68,8 +73,8 @@
 html[data-theme="dark"] {
   --panel: rgba(28, 31, 37, 0.44);
   --panel-solid: #1c1f25;
-  --tile-off: rgba(30, 34, 41, 0.55);
-  --tile-off-hover: rgba(46, 51, 60, 0.62);
+  --tile-off: rgba(30, 34, 41, 0.45);
+  --tile-off-hover: rgba(46, 51, 60, 0.52);
   --text-on-1: #f5f5f7;
   --text-on-2: #b6b6bb;
   --text-off-1: #f5f5f7;
@@ -89,8 +94,8 @@ html[data-theme="dark"] {
   html[data-theme="auto"] {
     --panel: rgba(28, 31, 37, 0.44);
     --panel-solid: #1c1f25;
-    --tile-off: rgba(30, 34, 41, 0.55);
-    --tile-off-hover: rgba(46, 51, 60, 0.62);
+    --tile-off: rgba(30, 34, 41, 0.45);
+    --tile-off-hover: rgba(46, 51, 60, 0.52);
     --text-on-1: #f5f5f7;
     --text-on-2: #b6b6bb;
     --text-off-1: #f5f5f7;
@@ -244,7 +249,7 @@ html, body {
 .tiles-grid {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(var(--cols, 4), var(--tile));
+  grid-template-columns: repeat(var(--cols, 4), var(--tile-w));
   gap: var(--gap);
   pointer-events: none;
 }
@@ -257,8 +262,8 @@ html, body {
 
 .tile {
   position: relative;
-  width: var(--tile);
-  height: var(--tile);
+  width: var(--tile-w);
+  height: var(--tile-h);
   border-radius: var(--radius-tile);
   background: var(--tile-off);
   cursor: pointer;
@@ -303,12 +308,12 @@ html, body {
 }
 
 .tile .tile-room {
-  font-size: 14.5px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-off-1);
 }
 .tile .tile-label {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--text-off-2);
   margin-top: 1px;
 }
@@ -332,10 +337,13 @@ html, body {
 
 .tile .tile-value {
   position: absolute;
-  top: 56px;
+  /* Just below the icon (14 + 34), and tight enough that the larger type
+     still clears the name block at the bottom of the tile. */
+  top: 52px;
   left: 14px;
   right: 14px;
-  font-size: 18.5px;
+  font-size: 21px;
+  line-height: 1.15;
   font-weight: 700;
   color: var(--text-off-1);
 }
@@ -348,7 +356,7 @@ html, body {
 .tile:not(.is-on) .tile-label,
 .tile:not(.is-on) .tile-value,
 .accessory-tile .accessory-state {
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.38);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }
 .tile:not(.is-on) .tile-icon,
 .accessory-tile .accessory-icon {
@@ -368,7 +376,7 @@ html, body {
   margin-bottom: 1px;
 }
 .tile.is-readonly .tile-room {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 500;
   color: var(--text-off-2);
 }

@@ -74,7 +74,7 @@ from tray import build_tray_icon
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
-TILE, GAP, PAD = 130, 12, 20
+TILE_W, TILE_H, GAP, PAD = 154, 138, 12, 20
 
 
 # The smallest a window is ever made. Windows below roughly this size
@@ -1766,13 +1766,13 @@ def _initial_window_size(cfg):
         # own resize corrects it.
         cols = max(1, min(cfg.get("columns", 4), n))
         rows = math.ceil(n / cols)
-        w = PAD * 2 + cols * TILE + (cols - 1) * GAP
-        h = PAD * 2 + rows * TILE + (rows - 1) * GAP
+        w = PAD * 2 + cols * TILE_W + (cols - 1) * GAP
+        h = PAD * 2 + rows * TILE_H + (rows - 1) * GAP
 
-    # The page renders inside a CSS `zoom`, so its tiles are not TILE px on
-    # screen - they are TILE * zoom. Leaving this out opened the window at
-    # double its real size on a 50% zoom, which then visibly snapped down
-    # as soon as the page measured itself.
+    # The page renders inside a CSS `zoom`, so its tiles are not TILE_W px
+    # across on screen - they are TILE_W * zoom. Leaving this out opened
+    # the window at double its real size on a 50% zoom, which then visibly
+    # snapped down as soon as the page measured itself.
     try:
         zoom = max(50, min(200, int(cfg.get("zoom", 100)))) / 100.0
     except Exception:
