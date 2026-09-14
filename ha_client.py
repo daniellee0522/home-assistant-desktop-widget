@@ -21,6 +21,7 @@ class HAClient:
         self.poll_interval = 30
 
         self._entity_ids = []
+        self._entity_set = frozenset()
         self._ws = None
         self._stop = threading.Event()
         self._ws_thread = None
@@ -38,7 +39,11 @@ class HAClient:
         self._kick()
 
     def set_entities(self, entity_ids):
-        self._entity_ids = list(dict.fromkeys(entity_ids))
+        ids = list(dict.fromkeys(entity_ids))
+        # Rebound as a pair so the ws loop, which reads both without a
+        # lock, can never see a list and set that disagree.
+        self._entity_ids = ids
+        self._entity_set = frozenset(ids)
 
     def _kick(self):
         """Force the ws loop to drop its current connection and reconnect
@@ -163,7 +168,18 @@ class HAClient:
                         data = event.get("data") or {}
                         new_state = data.get("new_state")
                         entity_id = data.get("entity_id")
-                        if entity_id and new_state and self.on_event:
+                        # state_changed is a firehose - Home Assistant
+                        # pushes one for *every* entity it knows about, and
+                        # the subscribe_events API has no server-side
+                        # entity filter. Dropping the ones no tile shows
+                        # here rather than in the callback matters: each
+                        # one that gets through costs a Python->JS
+                        # evaluate_js round trip marshaled onto the UI
+                        # thread, for a tile update that would then be a
+                        # no-op.
+                        if entity_id not in self._entity_set:
+                            continue
+                        if new_state and self.on_event:
                             self.on_event(entity_id, new_state)
                 finally:
                     try:
@@ -189,12 +205,23 @@ class HAClient:
                 time.sleep(1)
             if not self.url or not self.token:
                 continue
-            for eid in list(self._entity_ids):
+            wanted = self._entity_set
+            if not wanted:
+                continue
+            # One /api/states for the whole set, not one request per
+            # entity: this runs on a timer forever, and per-entity requests
+            # meant the cost of the safety net grew with the number of
+            # tiles for no benefit (the response carries them all anyway).
+            try:
+                states = self.get_states()
+            except Exception:
+                continue
+            for state in states:
                 if self._stop.is_set():
                     return
-                try:
-                    state = self.get_state(eid)
-                    if state and self.on_event:
+                eid = state.get("entity_id")
+                if eid in wanted and self.on_event:
+                    try:
                         self.on_event(eid, state)
-                except Exception:
-                    pass
+                    except Exception:
+                        pass

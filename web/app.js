@@ -83,17 +83,14 @@ let allEntities = [];
 // windows: the main grid widget, and - via popover.html, identical except
 // for the inline script setting this flag before app.js runs - a second,
 // independent window that shows *only* the detail popover. Two windows
-// instead of one shared shape sidesteps a real Win32 constraint: a
-// window's clip region can be any shape, but the window itself is always
-// one rectangle, so a floating popover beside a grid it doesn't align
-// with always left real dead space in that bounding rectangle - and
-// without true per-pixel transparency, that space had to be either
-// painted (looked like an unwanted solid block) or excluded as a hole
-// (which is fine on its own, but still shares one taskbar-invisible
-// window with the grid, so moving/sizing one could visibly affect the
-// other). A fully separate window for the popover has no shared
-// rectangle with the grid at all - each is free to be exactly its own
-// tight rounded-rect shape.
+// instead of one shared shape sidesteps a real Win32 constraint: a window
+// is always one rectangle, so a floating popover beside a grid it doesn't
+// align with left real dead space in that bounding rectangle - space the
+// grid window still owned, so moving or resizing one could visibly affect
+// the other, and the pair had to be sized together as a single unit. A
+// fully separate window for the popover shares no rectangle with the grid
+// at all - each is free to be exactly its own tight rounded-rect shape,
+// sized and positioned on its own schedule.
 const IS_POPOVER_WINDOW = !!window.__IS_POPOVER_WINDOW;
 
 function findTile(id) { return (CONFIG.tiles || []).find((t) => t.id === id); }
@@ -231,48 +228,6 @@ function applyFixedSizeConstraint() {
   }
 }
 
-// The window can show more than one rounded card at once (the grid, plus
-// a floating detail popover that's a sibling of it, not nested inside) -
-// a single rounded-rect clip for the whole window would either round the
-// *bounding box* of both (wrong shape) or force them to share one
-// footprint (which is what used to visibly distort the grid whenever a
-// popover opened). Each visible card gets its own rounded-rect region
-// instead, unioned together in Python via CombineRgn - any gap between
-// them is a real hole in the window's shape (not painted with a filler
-// color), so the widget's own outline always matches its actual cards.
-function getActiveCardRects(stageRect, zoomFactor) {
-  const rects = [];
-  for (const id of ['view-grid', 'view-settings', 'view-picker']) {
-    const el = document.getElementById(id);
-    if (el.hidden) continue;
-    const r = el.getBoundingClientRect();
-    rects.push({ x: r.left - stageRect.left, y: r.top - stageRect.top, w: r.width, h: r.height });
-  }
-  const popover = document.getElementById('detail-popover');
-  if (!popover.hidden) {
-    // Deliberately *not* popover.getBoundingClientRect() for the popover's
-    // own box size: it no longer scale-transforms (only opacity/translateY,
-    // which don't change layout size), but style.left/top/POPOVER_W/H are
-    // all expressed in *un-zoomed* local CSS px, whereas every other rect
-    // above comes from getBoundingClientRect() - already in *post-zoom*
-    // (visual) px, since `zoom` is applied on <html> itself. Multiplying by
-    // zoomFactor here converts to the same post-zoom space as the rest, so
-    // the single dpr-only conversion below applies uniformly. Skipping this
-    // left the popover's clip region ~1/zoomFactor times too big (at 75%
-    // zoom, ~33% oversized) - bigger than the window itself, so it just got
-    // truncated to "whole window, rounded corners", exposing a big
-    // unpainted black rectangle everywhere the actual (correctly zoomed,
-    // much smaller) popover card didn't reach.
-    rects.push({
-      x: (parseFloat(popover.style.left) || 0) * zoomFactor,
-      y: (parseFloat(popover.style.top) || 0) * zoomFactor,
-      w: POPOVER_W * zoomFactor,
-      h: POPOVER_H * zoomFactor,
-    });
-  }
-  return rects;
-}
-
 function syncWindowSize() {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
@@ -285,39 +240,22 @@ function syncWindowSize() {
       cssH = Math.max(90, Number(CONFIG.fixed_height) || 300);
     } else {
       const rect = stage.getBoundingClientRect();
-      // No safety margin here on purpose: the window's native clip region
-      // (built from each card's own getBoundingClientRect below) already
-      // hugs the cards exactly, with no allowance for anything like
-      // box-shadow bleed - so padding *only* the outer window a few px
-      // bigger than that region bought nothing (shadows were clipped by
-      // the region regardless) while leaving a thin gap between the
-      // window's true edge and the region's, on the sides SetWindowPos
-      // grows from (right/bottom, since top-left stays anchored). Without
-      // real transparency that gap either has to be painted (a visible
-      // seam) or left as a hole (revealing the desktop) - matching the
-      // window's size to the region's own bounds exactly needs neither.
+      // The window hugs the stage exactly, with no margin: the card is
+      // anchored at the window's top-left, which is what lets the saved
+      // window position *be* the card's on-screen position and lets
+      // requestPopover() turn a tile's client rect straight into screen
+      // coordinates. The cost is that .card-bg's box-shadow, which bleeds
+      // outside the card, gets cut off at the window edge.
       cssW = rect.width;
       cssH = rect.height;
     }
     resizeSeq += 1;
 
-    // Convert each active card's box to physical pixels for the window's
-    // clip region, matching the actual rendered corner radius (--radius-
-    // panel), zoom included - CSS zoom scales border-radius rendering the
-    // same way it scales everything else getBoundingClientRect() sees.
-    const stageRect = stage.getBoundingClientRect();
-    const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
-    const cssRadius = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--radius-panel')) || 28;
-    const radius = Math.round(cssRadius * zoomFactor * dpr);
-    const rects = getActiveCardRects(stageRect, zoomFactor).map((r) => [
-      Math.round(r.x * dpr), Math.round(r.y * dpr), Math.round(r.w * dpr), Math.round(r.h * dpr), radius,
-    ]);
-
     const physW = Math.ceil(cssW * dpr), physH = Math.ceil(cssH * dpr);
     if (IS_POPOVER_WINDOW) {
-      window.pywebview.api.resize_popover_window(physW, physH, resizeSeq, rects);
+      window.pywebview.api.resize_popover_window(physW, physH, resizeSeq);
     } else {
-      window.pywebview.api.resize_window(physW, physH, resizeSeq, rects);
+      window.pywebview.api.resize_window(physW, physH, resizeSeq);
     }
   });
 }
@@ -633,7 +571,13 @@ function climateStep(tile, delta) {
 const POPOVER_W = 260, POPOVER_H = 336;
 let popoverCloseTimer = null;
 
+// Detail cards only ever open in the popover window. The grid window
+// hands off to it instead of rendering one itself (requestPopover ->
+// Api.open_popover -> __showPopoverForTile), so this whole path is a
+// no-op there - guarded rather than assumed, since both windows run this
+// same script.
 function openDetail(tile) {
+  if (!IS_POPOVER_WINDOW) return;
   const stage = document.getElementById('stage');
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
@@ -643,64 +587,27 @@ function openDetail(tile) {
   showEditMode(false);
   renderDetailBody();
 
-  if (IS_POPOVER_WINDOW) {
-    // This whole window shows nothing but the popover (view-grid here is
-    // permanently hidden - see IS_POPOVER_WINDOW/boot), positioned at its
-    // own native window's origin instead of anchored to a tile - there's
-    // no visible, laid-out tile in this window's grid to anchor to.
-    popover.style.left = '0px';
-    popover.style.top = '0px';
-    stage.style.width = POPOVER_W + 'px';
-    stage.style.height = POPOVER_H + 'px';
-  } else {
-    const tileNode = document.querySelector('.tile[data-id="' + tile.id + '"]');
-    if (!tileNode) return;
-
-    // Measure the grid's natural size *before* touching stage's own size
-    // below - popover/backdrop are absolutely positioned (relative to
-    // stage, a sibling of view-grid, never nested inside it), so opening
-    // this never resizes or distorts view-grid's own card.
-    //
-    // getBoundingClientRect() always reports *post-zoom* (visual) px,
-    // since `zoom` is applied on <html> itself (see applyZoom) - but any
-    // px value *assigned* to .style.left/top/width/height is read back by
-    // the zoom engine as a *local, pre-zoom* length and scaled again at
-    // render time. Feeding a getBoundingClientRect() delta straight into
-    // .style.left therefore renders at left*zoomFactor, not at left -
-    // dividing by zoomFactor here converts it back to the local units
-    // .style expects.
-    const zoomFactor = Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
-    const gridRect = document.getElementById('view-grid').getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    const left = Math.round((tileNode.getBoundingClientRect().left - stageRect.left) / zoomFactor);
-    const top = Math.round((tileNode.getBoundingClientRect().top - stageRect.top) / zoomFactor);
-    popover.style.left = left + 'px';
-    popover.style.top = top + 'px';
-
-    // Absolutely positioned elements don't grow their container's own
-    // auto/shrink-to-fit size, so without explicitly setting stage's size
-    // to fit both the grid and the popover, the window would never resize
-    // to show it and it'd just get clipped at the old edge. gridRect.width/
-    // height need the same local-units conversion as left/top above so
-    // they combine correctly with POPOVER_W/H (already local/un-zoomed).
-    stage.style.width = Math.max(gridRect.width / zoomFactor, left + POPOVER_W) + 'px';
-    stage.style.height = Math.max(gridRect.height / zoomFactor, top + POPOVER_H) + 'px';
-  }
+  // This window shows nothing but the popover (view-grid is permanently
+  // hidden here - see IS_POPOVER_WINDOW/boot), so the card sits at the
+  // window's own origin: there is no laid-out tile in this window to
+  // anchor it to, and the window itself was already moved over the tile
+  // that asked for it.
+  popover.style.left = '0px';
+  popover.style.top = '0px';
+  stage.style.width = POPOVER_W + 'px';
+  stage.style.height = POPOVER_H + 'px';
 
   backdrop.hidden = false;
   popover.hidden = false;
   requestAnimationFrame(() => popover.classList.add('show'));
   syncWindowSize();
   if (window.pywebview && window.pywebview.api) {
-    const call = IS_POPOVER_WINDOW
-      ? window.pywebview.api.set_popover_activatable(true)
-      : window.pywebview.api.set_activatable(true);
-    call.catch(() => {});
+    window.pywebview.api.set_popover_activatable(true).catch(() => {});
   }
 }
 
 function closeDetail() {
-  if (!currentDetailTileId) return;
+  if (!IS_POPOVER_WINDOW || !currentDetailTileId) return;
   currentDetailTileId = null;
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
@@ -708,10 +615,7 @@ function closeDetail() {
   popover.classList.remove('show');
   backdrop.hidden = true;
   if (window.pywebview && window.pywebview.api) {
-    const call = IS_POPOVER_WINDOW
-      ? window.pywebview.api.set_popover_activatable(false)
-      : window.pywebview.api.set_activatable(false);
-    call.catch(() => {});
+    window.pywebview.api.set_popover_activatable(false).catch(() => {});
   }
   popoverCloseTimer = setTimeout(() => {
     popoverCloseTimer = null;
@@ -719,14 +623,10 @@ function closeDetail() {
     popover.hidden = true;
     stage.style.width = '';
     stage.style.height = '';
-    if (IS_POPOVER_WINDOW) {
-      // Nothing else is ever shown in this window - hide the whole OS
-      // window instead of shrinking it down to 0x0 and leaving it sitting
-      // there invisible-but-present.
-      if (window.pywebview && window.pywebview.api) window.pywebview.api.close_popover().catch(() => {});
-    } else {
-      syncWindowSize();
-    }
+    // Nothing else is ever shown in this window - hide the whole OS
+    // window instead of shrinking it down to 0x0 and leaving it sitting
+    // there invisible-but-present.
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.close_popover().catch(() => {});
   }, 170);
 }
 

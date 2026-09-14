@@ -46,7 +46,10 @@ if sys.platform == "win32":
     # keeps Win32's own DPI queries (which pywebview's resize() math relies
     # on) consistent with reality on a multi-monitor, mixed-scale setup.
     try:
-        _set_ctx = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        # A private WinDLL instance, not ctypes.windll.user32, for the same
+        # reason as the one further down: argtypes set on the shared handle
+        # would apply to pywebview's calls through it too.
+        _set_ctx = ctypes.WinDLL("user32").SetProcessDpiAwarenessContext
         _set_ctx.argtypes = [ctypes.c_void_p]
         _set_ctx.restype = ctypes.c_int
         if not _set_ctx(ctypes.c_void_p(-4)):  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
@@ -233,6 +236,7 @@ class Api:
     def save_prefs(self, theme, columns, lock_position=None,
                    zoom=None, fixed_size=None, fixed_width=None, fixed_height=None):
         self._cfg["theme"] = theme or "auto"
+        self._apply_theme_to_windows()
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
         except Exception:
@@ -290,7 +294,7 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def resize_window(self, phys_w, phys_h, seq=None, rects=None):
+    def resize_window(self, phys_w, phys_h, seq=None):
         # phys_w/phys_h are already-physical pixels: the JS side multiplies
         # its CSS measurement by window.devicePixelRatio itself. pywebview's
         # own resize() does that same conversion internally using Win32's
@@ -301,72 +305,54 @@ class Api:
         # physical pixel count and real content clipped at its edge with no
         # scrollbar to reveal it. Bypassing resize() and setting the raw
         # physical size directly removes that whole translation step.
-        if not self._window:
+        self._resize_native(
+            self._window, self._resize_lock, "_last_resize_seq",
+            phys_w, phys_h, seq, "resize_window",
+        )
+
+    def resize_popover_window(self, phys_w, phys_h, seq=None):
+        # The detail popover is a separate OS window (see IS_POPOVER_WINDOW
+        # in app.js) that resizes on its own schedule, so it needs its own
+        # sequence counter and lock - everything else is identical to the
+        # grid window's path above.
+        self._resize_native(
+            self._popover_window, self._popover_resize_lock, "_popover_last_resize_seq",
+            phys_w, phys_h, seq, "resize_popover_window",
+        )
+
+    def _resize_native(self, window, seq_lock, seq_attr, phys_w, phys_h, seq, tag):
+        if not window:
             return
         if seq is not None:
-            with self._resize_lock:
-                if seq <= self._last_resize_seq:
+            with seq_lock:
+                if seq <= getattr(self, seq_attr):
                     # A resize call issued later by JS finished executing
                     # (on its own thread) before this older one got here -
                     # applying this stale, likely-smaller size would clip
                     # content that's already on screen. Drop it.
                     return
-                self._last_resize_seq = seq
-        hwnd = _get_hwnd(self._window)
+                setattr(self, seq_attr, seq)
+        hwnd = _get_hwnd(window)
         if not hwnd:
             return
         w = max(80, int(phys_w))
         h = max(60, int(phys_h))
 
-        def _apply():
-            with _hwnd_lock:
-                try:
-                    ctypes.windll.user32.SetWindowPos(
-                        hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    )
-                except Exception:
-                    pass
-                # True per-pixel desktop transparency turned out to need the
-                # hosting framework to build its top-level window on
-                # DirectComposition from the start (how Electron/Chromium do
-                # it) - not something fixable after the fact by calling a
-                # couple of DWM APIs on a WinForms-created HWND (tried three
-                # standard ones; none stuck, one even made the window
-                # disappear, and one fought visibly with this region clip -
-                # see the removed _enable_desktop_transparency/_enable_backdrop
-                # above). Failing that, at least clip the *window itself* to
-                # the same rounded-rect shape(s) as the CSS card(s) actually
-                # on screen, so corners are a real cutout to the desktop
-                # instead of square opaque corners poking out past the
-                # rounded card underneath. More than one card can be visible
-                # at once (the grid plus a floating detail popover beside it),
-                # so this unions one rounded-rect region per card rather than
-                # using a single rect for the whole window - a single rect
-                # was tried instead (simpler, and avoided the gap between
-                # pieces ever being a real hole in the window's shape) but it
-                # meant painting that gap with a filler color whenever the
-                # popover didn't line up with the grid, which looked like an
-                # unwanted solid block stuck onto the widget - explicitly not
-                # what was wanted here. Any gap between the grid and popover
-                # is a real hole again, showing the desktop through it.
-                if rects:
-                    _apply_window_region(hwnd, rects)
+        if os.environ.get("HA_WIDGET_DEBUG"):
+            with open(os.path.join(BASE_DIR, "resize_trace.txt"), "a", encoding="utf-8") as f:
+                f.write("%s w=%r h=%r seq=%r\n" % (tag, w, h, seq))
 
         # pywebview runs every js_api call (this one included) on a fresh,
         # throwaway Python thread so a slow call can't block the UI (see
         # webview.util.js_bridge_call) - it is *not* the WinForms UI thread
-        # that owns this HWND. Calling SetWindowPos/SetWindowRgn straight
-        # from there races the docked WebView2 child control's own
-        # Dock=Fill relayout and repaint, which WinForms drives on its UI
-        # thread's message loop: the region could land before WebView2's
-        # surface has actually resized to match, exposing raw unpainted
-        # canvas (black) or the bare WinForms Form background (white)
-        # until it catches up - intermittently, depending on scheduling.
-        # Marshaling onto the UI thread via Invoke (the same mechanism
+        # that owns this HWND. Calling SetWindowPos straight from there
+        # races the docked WebView2 child control's own Dock=Fill relayout
+        # and repaint, which WinForms drives on its UI thread's message
+        # loop. Marshaling onto that thread via Invoke (the same mechanism
         # pywebview itself uses for every other native call - see
         # InvokeRequired/Invoke throughout platforms/winforms.py) makes
-        # this synchronous with that relayout instead of racing it.
-        _run_on_ui_thread(self._window, _apply)
+        # this synchronous with the relayout instead of racing it.
+        _run_on_ui_thread(window, lambda: _set_window_size(hwnd, w, h))
 
     def quit_app(self):
         self._quit()
@@ -387,38 +373,6 @@ class Api:
                 _send_to_bottom(self._window)
         return True
 
-    def resize_popover_window(self, phys_w, phys_h, seq=None, rects=None):
-        # Same logic/reasoning as resize_window above (DPI-safe sizing,
-        # UI-thread marshaling, per-card rounded-rect region) but for the
-        # separate popover window - see IS_POPOVER_WINDOW in app.js for
-        # why the detail popover has its own window at all rather than
-        # sharing the grid's.
-        if not self._popover_window:
-            return
-        if seq is not None:
-            with self._popover_resize_lock:
-                if seq <= self._popover_last_resize_seq:
-                    return
-                self._popover_last_resize_seq = seq
-        hwnd = _get_hwnd(self._popover_window)
-        if not hwnd:
-            return
-        w = max(80, int(phys_w))
-        h = max(60, int(phys_h))
-
-        def _apply():
-            with _hwnd_lock:
-                try:
-                    ctypes.windll.user32.SetWindowPos(
-                        hwnd, 0, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    )
-                except Exception:
-                    pass
-                if rects:
-                    _apply_window_region(hwnd, rects)
-
-        _run_on_ui_thread(self._popover_window, _apply)
-
     def open_popover(self, tile_id, screen_x, screen_y):
         # Moves the (normally hidden) popover window to sit exactly where
         # the clicked tile is on screen, shows it, and asks its own page
@@ -426,10 +380,23 @@ class Api:
         # tile list) to render that one tile's detail view.
         if not self._popover_window:
             return
-        try:
-            self._popover_window.move(int(screen_x), int(screen_y))
-        except Exception:
-            pass
+        hwnd = _get_hwnd(self._popover_window)
+        if hwnd:
+            # Deliberately not self._popover_window.move(): pywebview's
+            # move() takes *logical* pixels and scales them by
+            # GetDpiForWindow (see platforms/winforms.py), but screen_x/y
+            # arrive here already in physical pixels - the page builds them
+            # from get_window_pos (a raw GetWindowRect) plus a client rect
+            # multiplied by its own devicePixelRatio. Handing physical
+            # pixels to move() scaled them a second time, landing the
+            # popover hundreds of pixels away from the tile that opened it
+            # (far enough off-screen to be unreachable on this machine's
+            # 125% display). Setting the position raw skips that
+            # conversion, the same way resize_window does for size.
+            _run_on_ui_thread(
+                self._popover_window,
+                lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
+            )
         try:
             self._popover_window.show()
         except Exception:
@@ -468,7 +435,7 @@ class Api:
             return {"x": 0, "y": 0}
         try:
             r = (ctypes.c_long * 4)()
-            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
+            _user32.GetWindowRect(hwnd, ctypes.byref(r))
             return {"x": r[0], "y": r[1]}
         except Exception:
             return {"x": 0, "y": 0}
@@ -476,6 +443,16 @@ class Api:
     # ---------------------------------------------------------------
     # internal
     # ---------------------------------------------------------------
+
+    def _apply_theme_to_windows(self):
+        # The acrylic backdrop the page sits on is drawn by DWM, not by the
+        # page, so switching the widget between light and dark has to reach
+        # both windows natively as well as through CSS - otherwise a dark
+        # page ends up floating on a light material.
+        dark = _theme_is_dark(self._cfg.get("theme", "auto"))
+        for win in (self._window, self._popover_window):
+            if win:
+                _apply_window_material(win, dark)
 
     def _push_batch(self, items):
         if not self._window:
@@ -572,6 +549,9 @@ def _startup_command():
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+SW_HIDE = 0
+SW_SHOWNA = 8
 HWND_BOTTOM = 1
 HWND_TOP = 0
 SWP_NOMOVE = 0x0002
@@ -590,20 +570,106 @@ SWP_NOACTIVATE = 0x0010
 _hwnd_lock = threading.Lock()
 
 
-# Both DwmExtendFrameIntoClientArea(-1,-1,-1,-1) and DwmSetWindowAttribute
-# with DWMWA_SYSTEMBACKDROP_TYPE were tried here to chase real desktop
-# transparency; neither made the window see-through (verified with a real
-# screen capture - the desktop behind it stayed a plain opaque rectangle),
-# and DwmExtendFrameIntoClientArea specifically fought with the
-# SetWindowRgn corner-clip below: DWM composites the "glass" frame it
-# creates on a layer that doesn't respect the window's region, producing a
-# square, misaligned ghost rectangle behind the properly-rounded clipped
-# window. Removed rather than left in for no benefit and a visible cost.
+# Window shape and material, and why both are DWM's job rather than this
+# app's.
+#
+# The widget is meant to sit on the desktop like a Rainmeter skin: a
+# translucent panel, softly rounded, no drop shadow, no taskbar button.
+# Everything below exists because this hosting stack cannot draw any of
+# that itself.
+#
+# It has no per-pixel window transparency of its own. That was verified
+# directly, not assumed: a minimal pywebview window created with
+# transparent=True, showing nothing but a rounded card, composites
+# everything the page leaves transparent against the WinForms form's own
+# opaque background (measured as a flat #F0F0F0 right up to the window
+# edge, with the desktop visible only *outside* the window).
+#
+# What does work is handing the whole job to the compositor:
+#
+#   DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW draws a real
+#   acrylic material behind the window - blurred desktop, live, no work
+#   from us - and the page's transparent pixels do reach it. It needs
+#   DwmExtendFrameIntoClientArea(-1,-1,-1,-1) first, which is what tells
+#   DWM the frame covers the whole window.
+#
+#   DWMWA_USE_IMMERSIVE_DARK_MODE picks whether that material is the light
+#   or dark variant, so it can follow the widget's own theme setting
+#   rather than the OS's.
+#
+#   DWMWA_WINDOW_CORNER_PREFERENCE rounds the corners, genuinely
+#   see-through and antialiased. DWMWCP_ROUNDSMALL rather than
+#   DWMWCP_ROUND on purpose: ROUND also gets the standard Windows 11
+#   window shadow, which is what made this look like an application window
+#   floating above the desktop instead of a widget stuck to it (measured:
+#   a ~20px darkening ramp around the window with ROUND, ~2px of corner
+#   antialiasing with ROUNDSMALL). The radii differ too - ROUNDSMALL is
+#   the tooltip/flyout corner - but the shadow is the reason.
+#
+# What was tried and does not work, so it doesn't come back:
+#   - SetWindowRgn with a rounded-rect region. It clips, but the excluded
+#     area composites to opaque black instead of revealing the desktop
+#     (a plain WinForms form with the same region *does* reveal it - it is
+#     the WebView2 child that breaks it). That black square framing the
+#     rounded card was this widget's most visible bug. Worse, a region
+#     also caps the size of the surface WebView2 will present, so growing
+#     the window while a smaller region was attached left everything past
+#     the old edge permanently unpainted - the black block that appeared
+#     when switching from Settings back to the wider tile grid.
+#   - WS_EX_LAYERED with SetLayeredWindowAttributes, colour-keyed on
+#     either the page's own background or the form's. The key never
+#     matches: Chromium colour-manages what it paints, and the form's
+#     background isn't what ends up on screen under the WebView2 child.
+#   - DwmEnableBlurBehindWindow with an empty blur region, the usual
+#     "enable per-pixel alpha" trick. No effect here.
+#   - SetWindowCompositionAttribute/ACCENT_ENABLE_ACRYLICBLURBEHIND. This
+#     one *does* work and lets the tint colour be chosen directly, but
+#     it's undocumented; DWMWA_SYSTEMBACKDROP_TYPE reaches the same place
+#     through a supported API, with the tint done in CSS instead.
+
+
+# Declared signatures for every native call below that takes an HWND. A
+# window handle is pointer-sized, and ctypes defaults an undeclared
+# argument to a 32-bit C int - which silently truncates any handle that
+# doesn't fit, and passes garbage for arguments that aren't supplied at
+# all. Declaring them once here is what makes the calls safe.
+# Private WinDLL instances, deliberately not ctypes.windll.user32.
+# ctypes.windll caches one shared object per DLL for the whole process,
+# and the argtypes declared below live on that object's function
+# attributes - so declaring them there would have changed the calls
+# *pywebview* makes through the same handle. It did: pywebview's own
+# move() (the window-drag path) passes None for the cx/cy it isn't using,
+# which a declared c_int argument rejects, and dragging the widget started
+# raising TypeError from inside pywebview.
+_user32 = ctypes.WinDLL("user32")
+_dwmapi = ctypes.WinDLL("dwmapi")
+
+_user32.SetWindowPos.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+]
+_user32.SetWindowPos.restype = ctypes.c_int
+_user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_user32.GetWindowLongW.restype = ctypes.c_long
+_user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+_user32.SetWindowLongW.restype = ctypes.c_long
+_user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+_user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+_dwmapi.DwmSetWindowAttribute.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
+]
+_dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
 
 
 def _get_hwnd(window):
     try:
-        return window.native.Handle.ToInt32()
+        # ToInt64, not ToInt32: an HWND is pointer-sized, and ToInt32
+        # raises OverflowException on any handle above 2^31.
+        return window.native.Handle.ToInt64()
     except Exception:
         return None
 
@@ -612,7 +678,7 @@ def _run_on_ui_thread(window, fn):
     """Run fn (no-arg callable) on the WinForms UI thread that owns this
     window's HWND, blocking until it completes. Every js_api call arrives
     on its own throwaway Python thread (see webview.util.js_bridge_call),
-    so any code that touches the HWND directly - SetWindowPos, SetWindowRgn,
+    so any code that touches the HWND directly - SetWindowPos,
     SetWindowLongW - must be marshaled over like this or it races WinForms'
     own UI-thread-driven layout/paint pipeline for the docked WebView2
     control. This mirrors the InvokeRequired/Invoke pattern pywebview uses
@@ -635,47 +701,84 @@ def _run_on_ui_thread(window, fn):
             pass
 
 
-RGN_OR = 2
+def _set_window_pos(hwnd, x, y):
+    """Set the window's top-left in physical screen pixels, leaving size
+    and z-order alone. Callers must already be on the UI thread.
+    """
+    with _hwnd_lock:
+        try:
+            _user32.SetWindowPos(
+                hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
 
 
-def _apply_window_region(hwnd, rects):
-    # rects: iterable of (x, y, w, h, radius), all already in physical
-    # pixels relative to the window's own top-left. Builds one rounded-rect
-    # region per entry and unions them (CombineRgn/RGN_OR) into a single
-    # region for SetWindowRgn - a plain rectangular union of the boxes
-    # would put square corners back exactly where this is trying to
-    # remove them, so each piece keeps its own rounded corners in the
-    # final combined shape.
+def _set_window_size(hwnd, w, h):
+    """Set the window's physical pixel size, leaving position and z-order
+    alone. Callers must already be on the UI thread (see _run_on_ui_thread).
+    """
+    with _hwnd_lock:
+        try:
+            _user32.SetWindowPos(
+                hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
+
+
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWA_SYSTEMBACKDROP_TYPE = 38
+DWMWCP_ROUNDSMALL = 3
+DWMSBT_TRANSIENTWINDOW = 3
+
+
+class _MARGINS(ctypes.Structure):
+    _fields_ = [
+        ("cxLeftWidth", ctypes.c_int),
+        ("cxRightWidth", ctypes.c_int),
+        ("cyTopHeight", ctypes.c_int),
+        ("cyBottomHeight", ctypes.c_int),
+    ]
+
+
+def _set_dwm_attr(hwnd, attr, value):
+    v = ctypes.c_int(int(value))
     try:
-        create_rgn = ctypes.windll.gdi32.CreateRoundRectRgn
-        create_rgn.restype = ctypes.c_void_p
-        combine_rgn = ctypes.windll.gdi32.CombineRgn
-        combine_rgn.restype = ctypes.c_int
-
-        combined = None
-        for x, y, w, h, r in rects:
-            x, y, w, h, r = int(x), int(y), int(w), int(h), max(0, int(r))
-            part = create_rgn(x, y, x + w + 1, y + h + 1, r * 2, r * 2)
-            if not part:
-                continue
-            if combined is None:
-                combined = part
-                continue
-            # A zero-size placeholder region as CombineRgn's destination:
-            # CombineRgn fully overwrites whatever hDest previously held,
-            # so its initial shape doesn't matter - only that it's a valid
-            # region handle. CreateRoundRectRgn needs all 6 args or ctypes
-            # (no argtypes declared) passes garbage for the missing ones.
-            merged = create_rgn(0, 0, 1, 1, 0, 0)
-            combine_rgn(merged, combined, part, RGN_OR)
-            ctypes.windll.gdi32.DeleteObject(combined)
-            ctypes.windll.gdi32.DeleteObject(part)
-            combined = merged
-
-        if combined and not ctypes.windll.user32.SetWindowRgn(hwnd, combined, True):
-            ctypes.windll.gdi32.DeleteObject(combined)
+        return _dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0
     except Exception:
-        pass
+        return False
+
+
+def _apply_window_material(window, dark):
+    """Give this window its acrylic backdrop and rounded, shadowless
+    corners (see the note above for why each piece is here).
+
+    Safe to call repeatedly - the theme switcher re-runs it to flip the
+    backdrop between its light and dark variants. Windows 10 doesn't know
+    these attributes and fails each call harmlessly, leaving a plain
+    square opaque window, which is the honest fallback.
+    """
+    hwnd = _get_hwnd(window)
+    if not hwnd:
+        return
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                # Extending the frame across the whole client area is what
+                # makes DWM treat the window as frame all the way out, and
+                # is a precondition for the backdrop below showing at all.
+                m = _MARGINS(-1, -1, -1, -1)
+                _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+            except Exception:
+                pass
+            _set_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if dark else 0)
+            _set_dwm_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
+            _set_dwm_attr(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL)
+
+    _run_on_ui_thread(window, _apply)
 
 
 def _set_noactivate(window, enable):
@@ -686,9 +789,9 @@ def _set_noactivate(window, enable):
     def _apply():
         with _hwnd_lock:
             try:
-                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
                 style = (style | WS_EX_NOACTIVATE) if enable else (style & ~WS_EX_NOACTIVATE)
-                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+                _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
             except Exception:
                 pass
 
@@ -696,10 +799,23 @@ def _set_noactivate(window, enable):
 
 
 def _hide_from_taskbar(window):
-    # WS_EX_TOOLWINDOW (not WinForms' ShowInTaskbar property - changing
-    # that after the handle already exists risks the same handle-recreate
-    # hazard that made AllowTransparency briefly hide the window entirely
-    # during testing) excludes the window from the taskbar and Alt+Tab.
+    """Keep this window out of the taskbar and Alt+Tab.
+
+    Two flags, not one. Setting WS_EX_TOOLWINDOW alone was not enough:
+    WinForms puts WS_EX_APPWINDOW on any form whose ShowInTaskbar is true
+    (the default), and APPWINDOW *overrides* TOOLWINDOW - the widget kept
+    its taskbar button the whole time. Clearing it is the other half.
+
+    Neither flag is set through WinForms' own ShowInTaskbar property:
+    changing that after the handle exists makes WinForms recreate the
+    handle, the same hazard that made AllowTransparency briefly lose the
+    window entirely during testing.
+
+    The shell only re-reads these flags when a window is shown, so a
+    window that is already visible has to be hidden and shown again for
+    the button to actually go away. SW_SHOWNA re-shows it without
+    activating it, which matters for a widget that must never steal focus.
+    """
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
@@ -707,8 +823,16 @@ def _hide_from_taskbar(window):
     def _apply():
         with _hwnd_lock:
             try:
-                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW)
+                style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                wanted = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+                if wanted == style:
+                    return
+                visible = bool(_user32.IsWindowVisible(hwnd))
+                if visible:
+                    _user32.ShowWindow(hwnd, SW_HIDE)
+                _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, wanted)
+                if visible:
+                    _user32.ShowWindow(hwnd, SW_SHOWNA)
             except Exception:
                 pass
 
@@ -723,7 +847,7 @@ def _send_to_bottom(window):
     def _apply():
         with _hwnd_lock:
             try:
-                ctypes.windll.user32.SetWindowPos(
+                _user32.SetWindowPos(
                     hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 )
             except Exception:
@@ -740,8 +864,8 @@ def _bring_to_front(window):
     def _apply():
         with _hwnd_lock:
             try:
-                ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                _user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                _user32.SetForegroundWindow(hwnd)
             except Exception:
                 pass
 
@@ -764,21 +888,103 @@ def _bottom_pin_loop(window, stop_event, pin_enabled):
 # Entry point
 # ---------------------------------------------------------------------
 
-def main():
-    api = Api()
+def _hide_own_console():
+    """Hide the console window, but only when it is ours alone.
 
-    n = len(api._cfg.get("tiles", []))
-    if n:
+    Double-clicking main.py (or launching it via `python main.py` from
+    Explorer) gets the script its own console, and that console is a real
+    taskbar button reading "python" - which is half of why this was
+    showing up in the taskbar at all, the other half being the widget
+    window's own WS_EX_APPWINDOW (see _hide_from_taskbar).
+
+    GetConsoleProcessList is the discriminator: a console with only this
+    process attached was created for this process and is pure noise, while
+    a console shared with a shell is the terminal someone is deliberately
+    running from, and closing that out from under them would hide the
+    traceback they are waiting for. Launching with pythonw.exe avoids the
+    console existing in the first place, which is what the "start with
+    Windows" entry does (see _startup_command).
+    """
+    try:
+        kernel32 = ctypes.windll.kernel32
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd:
+            return
+        pids = (ctypes.c_ulong * 8)()
+        count = kernel32.GetConsoleProcessList(pids, 8)
+        if count == 1:
+            _user32.ShowWindow(ctypes.c_void_p(hwnd), SW_HIDE)
+    except Exception:
+        pass
+
+
+def _theme_is_dark(theme):
+    """Resolve the widget's theme setting to the light/dark choice the
+    window material needs, so the acrylic backdrop matches the page drawn
+    on top of it rather than whatever the OS happens to be set to.
+    """
+    if theme == "dark":
+        return True
+    if theme == "light":
+        return False
+    # "auto" follows the OS, the same way the page's own
+    # prefers-color-scheme rule does.
+    return not _os_prefers_light()
+
+
+def _os_prefers_light():
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        try:
+            return bool(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        return True
+
+
+def _initial_window_size(cfg):
+    if cfg.get("fixed_size"):
+        w = max(120, int(cfg.get("fixed_width", 400) or 400))
+        h = max(90, int(cfg.get("fixed_height", 300) or 300))
+    else:
+        n = len(cfg.get("tiles", []))
+        if not n:
+            return 300, 150
         # Match the JS grid's own column math (renderGrid in app.js): never
         # reserve more columns than there are tiles to fill them, or the
         # window opens with a dead strip on the right before the page's
         # own resize corrects it.
-        cols = max(1, min(api._cfg.get("columns", 4), n))
+        cols = max(1, min(cfg.get("columns", 4), n))
         rows = math.ceil(n / cols)
-        init_w = PAD * 2 + cols * TILE + (cols - 1) * GAP
-        init_h = PAD * 2 + rows * TILE + (rows - 1) * GAP
-    else:
-        init_w, init_h = 300, 150
+        w = PAD * 2 + cols * TILE + (cols - 1) * GAP
+        h = PAD * 2 + rows * TILE + (rows - 1) * GAP
+
+    # The page renders inside a CSS `zoom`, so its tiles are not TILE px on
+    # screen - they are TILE * zoom. Leaving this out opened the window at
+    # double its real size on a 50% zoom, which then visibly snapped down
+    # as soon as the page measured itself.
+    try:
+        zoom = max(50, min(200, int(cfg.get("zoom", 100)))) / 100.0
+    except Exception:
+        zoom = 1.0
+    return max(80, int(w * zoom)), max(60, int(h * zoom))
+
+
+def main():
+    _hide_own_console()
+
+    api = Api()
+
+    # Only the *first* size, used for the moment between the window
+    # appearing and the page's own first syncWindowSize measuring the real
+    # thing. Worth getting close anyway: whatever is wrong here is visible
+    # as the window snapping to a different size right after it opens.
+    init_w, init_h = _initial_window_size(api._cfg)
 
     window = webview.create_window(
         "HA Widgets",
@@ -790,9 +996,21 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
+        # transparent=True is what makes WebView2 hand pywebview a
+        # transparent default background, which is how the page's
+        # unpainted pixels reach the acrylic backdrop underneath (see the
+        # material note above). On its own it does *not* make the window
+        # see-through - that part is DWM's.
         transparent=True,
         shadow=False,
         confirm_close=False,
+        # pywebview's default minimum (200x100 logical) is bigger than
+        # this widget legitimately gets: a four-tile grid at 50% zoom is
+        # 98 physical px tall, and MinimumSize silently held the window at
+        # 125, leaving a strip of window below the content that belongs to
+        # nothing. Harmless while the page was opaque, a visible band of
+        # bare backdrop now that it isn't.
+        min_size=(0, 0),
     )
     api._bind_window(window)
     window.events.moved += api._on_moved
@@ -800,6 +1018,7 @@ def main():
     bottom_pin_stop = threading.Event()
 
     def on_shown():
+        _apply_window_material(window, _theme_is_dark(api._cfg.get("theme", "auto")))
         _set_noactivate(window, True)
         _hide_from_taskbar(window)
         _send_to_bottom(window)
@@ -835,11 +1054,11 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
-        transparent=True,
+        transparent=True,                       # see the main window above
         shadow=False,
         confirm_close=False,
         hidden=True,
-        min_size=(50, 50),
+        min_size=(0, 0),
     )
     api._bind_popover_window(popover_window)
 
@@ -874,6 +1093,7 @@ def main():
         threading.Thread(target=_close, daemon=True).start()
 
     def on_popover_shown():
+        _apply_window_material(popover_window, _theme_is_dark(api._cfg.get("theme", "auto")))
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
         # .native only exists once the underlying native window has
@@ -886,18 +1106,18 @@ def main():
 
     popover_window.events.shown += on_popover_shown
 
-    # pywebview has a hardcoded workaround for transparent windows: on
-    # *every* navigation start, it force-shows (and activates!) the form
-    # regardless of the `hidden` the window was created with (see
-    # on_navigation_start in platforms/edgechromium.py - its own comment
-    # calls it "no idea why this works"). That's fine for the main window
-    # (meant to be visible anyway) but defeats starting the popover window
-    # hidden - it briefly, then persistently, shows up at whatever
-    # transient size the page happened to be mid-layout at. `loaded` fires
-    # once navigation actually finishes, after that forced show - hiding
-    # it there puts it back the way it was asked to start. Only needed
-    # once: this window navigates exactly one time (it's reused via
-    # show/hide, never re-created or re-navigated).
+    # Belt and braces on `hidden=True`. pywebview force-shows (and
+    # activates!) a form on *every* navigation start when the window was
+    # created transparent, regardless of the `hidden` it was asked for
+    # (see on_navigation_start in platforms/edgechromium.py - its own
+    # comment calls it "no idea why this works"); that used to leave this
+    # window sitting on screen at whatever transient size the page
+    # happened to be mid-layout at. It no longer applies now that both
+    # windows are opaque, but hiding once navigation has actually finished
+    # costs nothing and keeps this window's "starts hidden" guarantee from
+    # depending on a detail of pywebview's internals. Only needed once:
+    # this window navigates exactly one time (it's reused via show/hide,
+    # never re-created or re-navigated).
     popover_window.events.loaded += lambda: popover_window.hide()
 
     def on_popover_closing():
@@ -929,6 +1149,7 @@ def main():
         nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "light"
         api._cfg["theme"] = nxt
         cfgmod.save_config(api._cfg)
+        api._apply_theme_to_windows()
         try:
             window.evaluate_js("window.__setThemeFromTray && window.__setThemeFromTray(%s)" % json.dumps(nxt))
         except Exception:
@@ -943,6 +1164,9 @@ def main():
     tray_icon = build_tray_icon(toggle_visibility, open_settings, toggle_theme, refresh_now, quit_action)
     api._tray_icon = tray_icon
     tray_icon.run_detached()
+
+    if os.environ.get("HA_WIDGET_DEBUG_OPEN_SETTINGS"):
+        threading.Timer(3.0, open_settings).start()
 
     webview.start()
 

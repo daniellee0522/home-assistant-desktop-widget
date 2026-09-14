@@ -20,12 +20,11 @@
     </div>
   </section>
 
-  <!-- Detail popover: anchored to the tile that opened it, fixed size,
-       fades in/out in place. A *sibling* of view-grid (not nested inside
-       it) so opening it never resizes/distorts the grid's own card - the
-       window just grows to also fit this separately-positioned card, and
-       both get their own independent rounded-rect clip (see
-       getActiveCardRects in app.js + resize_window in main.py). -->
+  <!-- Detail popover. Present but never shown in this window: opening a
+       tile's details hands off to the separate popover window instead
+       (requestPopover in app.js -> Api.open_popover in main.py), which
+       loads popover.html - this same markup with __IS_POPOVER_WINDOW set.
+       Kept here so the two pages stay identical apart from that flag. -->
   <div id="detail-backdrop" class="detail-backdrop" hidden></div>
   <div id="detail-popover" class="detail-popover" hidden>
     <div class="card-bg"></div>
