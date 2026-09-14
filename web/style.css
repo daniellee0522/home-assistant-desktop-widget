@@ -193,57 +193,46 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-panel);
-  /* Two layers in one property: the tint on top, the pre-blurred copy of
-     the desktop underneath. This used to be backdrop-filter, which
-     re-blurred the whole window on the GPU every frame - correct, but the
-     repainting competed with the desktop capture happening at the same
-     moment and roughly doubled what a capture cost, which comes straight
-     back as lag in the corners. The blur is done once, at quarter scale,
-     on the Python side instead.
-
-     --glass-img is set per frame on <html>; until the first capture lands
-     it is unset and only the tint paints, over --panel-solid on
-     #backdrop. Sizing to 100% works because .card-bg fills the view,
-     which fills the stage, which is the window - the same box the capture
-     was taken of. */
+  /* Only the tint. The frosted image underneath it is painted by
+     #backdrop, which draws the blurred copy of the desktop clipped to
+     this element's own rounded rectangle (see paintBackdrop in app.js) -
+     as a CSS background it was a brand new image resource every frame,
+     and Chromium's decoded-image cache grew by ~20MB a minute holding
+     frames nobody would ever ask for again. The blur itself is done once,
+     at quarter scale, on the Python side; backdrop-filter did it on the
+     GPU every frame and the repainting competed with the capture badly
+     enough to double what a frame cost. */
   background-color: transparent;
-  background-image: linear-gradient(var(--panel), var(--panel)), var(--glass-img, none);
-  background-size: 100% 100%, 100% 100%;
-  background-position: 0 0, 0 0;
-  background-repeat: no-repeat, no-repeat;
+  background-image: linear-gradient(var(--panel), var(--panel));
+  background-size: 100% 100%;
+  background-position: 0 0;
+  background-repeat: no-repeat;
   box-shadow: inset 0 0 0 1px var(--glass-edge), inset 0 1px 0 var(--glass-edge-top);
   transition: background-color 0.25s ease;
 }
 
-/* The desktop behind the window, in two layers: #backdrop always holds
-   the frame currently on screen, #backdrop-next fades the incoming one in
-   over the top of it. Only the upper layer's opacity moves - fading
-   *between* the two would leave the composite partly transparent for the
-   length of the fade, and this window has no transparency to fall back
-   on, so the hole showed as the whole widget strobing.
+/* Everything behind the window's own content: the desktop as captured,
+   plus the blurred copy of it inside each card. One canvas rather than a
+   pair of cross-fading <div>s with background-images - a canvas is one
+   bitmap redrawn in place, where the images were a new resource per frame
+   for Chromium to decode, cache and upload as a texture. Drawing is also
+   atomic within a frame, so the cross-fade that used to hide the handover
+   is no longer needed.
 
-   The capture is requested at exactly the number of device pixels these
-   are drawn at, so `100% 100%` is a 1:1 blit and not a resample - which
-   matters at the card's rounded corners, where the backdrop shows
-   unblurred against the real desktop and any softening reads as a ragged
-   edge. */
-#backdrop,
-#backdrop-next {
+   Its bitmap is sized to the exact device pixels the capture was taken at
+   and stretched to the element by `width/height: 100%`, so it is a 1:1
+   blit and not a resample - which matters at the cards' rounded corners,
+   where the backdrop shows unblurred against the real desktop and any
+   softening reads as a ragged edge. */
+#backdrop {
   position: fixed;
   inset: 0;
   z-index: 0;
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  background-position: 0 0;
-}
-#backdrop {
+  width: 100%;
+  height: 100%;
   /* The window is not translucent, so something has to be painted here
      before the first capture arrives. */
   background-color: var(--panel-solid);
-}
-#backdrop-next {
-  opacity: 0;
-  transition: opacity 90ms linear;    /* keep in step with BACKDROP_FADE_MS */
 }
 
 /* ================= Grid view ================= */

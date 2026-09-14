@@ -65,6 +65,40 @@ if sys.platform == "win32":
         except Exception:
             pass
 
+# WebView2 reads this when its environment is created, which pywebview
+# does on the first create_window - so it has to be set before that, and
+# it is additive with whatever the caller already put there (the debug
+# port, when one is being used).
+#
+#   process-per-site       - the three windows are three pages of one
+#                            origin, and without this each gets its own
+#                            renderer process, with its own baseline.
+#   low-end-device-mode    - tells Chromium to size its caches for a
+#                            small machine. This is a widget sitting on
+#                            someone's desktop all day, not a browser
+#                            tab; the decoded-image cache in particular
+#                            was growing ~14MB a minute off the backdrop
+#                            frames and had no reason to hold any of them.
+#   max-old-space-size     - a ceiling for V8, which otherwise lets a
+#                            heap of dead backdrop strings drift past
+#                            100MB before it collects, because the
+#                            default limit is sized off system RAM.
+#   disable-gpu            - this page is a card and one image blit; it
+#                            has nothing a GPU is for. The GPU process
+#                            was holding 300MB of private memory and 100MB
+#                            of working set to do it, and measured, the
+#                            software path is also *cheaper* on CPU here
+#                            (17% of a core against 19%).
+_BROWSER_ARGS = (
+    "--process-per-site "
+    "--enable-low-end-device-mode "
+    "--disable-gpu "
+    "--js-flags=--max-old-space-size=64"
+)
+os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+    os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "") + " " + _BROWSER_ARGS
+).strip()
+
 import webview
 
 import config as cfgmod
