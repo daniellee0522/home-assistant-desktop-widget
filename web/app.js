@@ -214,6 +214,9 @@ async function boot() {
   // window because they all load the same page.
   if (IS_POPOVER_WINDOW) {
     document.getElementById('view-grid').hidden = true;
+    // Lets the card lay itself out in the flow here, so #stage takes the
+    // card's own size and the window follows it - see openDetail.
+    document.documentElement.classList.add('is-popover-window');
   } else if (IS_SETTINGS_WINDOW) {
     openSettingsView();
   }
@@ -890,7 +893,6 @@ function climateStep(tile, delta) {
  * Detail popover: anchored to the tile that opened it, fixed size,
  * fades in place instead of replacing the whole widget.
  * ============================================================ */
-const POPOVER_W = 260, POPOVER_H = 336;
 let popoverCloseTimer = null;
 
 // Detail cards only ever open in the popover window. The grid window
@@ -900,7 +902,6 @@ let popoverCloseTimer = null;
 // same script.
 function openDetail(tile) {
   if (!IS_POPOVER_WINDOW) return;
-  const stage = document.getElementById('stage');
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
   if (popoverCloseTimer) { clearTimeout(popoverCloseTimer); popoverCloseTimer = null; }
@@ -913,12 +914,12 @@ function openDetail(tile) {
   // hidden here - see IS_POPOVER_WINDOW/boot), so the card sits at the
   // window's own origin: there is no laid-out tile in this window to
   // anchor it to, and the window itself was already moved over the tile
-  // that asked for it.
-  popover.style.left = '0px';
-  popover.style.top = '0px';
-  stage.style.width = POPOVER_W + 'px';
-  stage.style.height = POPOVER_H + 'px';
-
+  // that asked for it. In this window the card is in the flow rather
+  // than absolutely positioned (.is-popover-window), which is what lets
+  // #stage - and so the window - be exactly the size of the card,
+  // whatever its content came to. Hard-coding that size here instead
+  // meant every change to the card's CSS had to be mirrored in a pair of
+  // constants, and when it wasn't the card was quietly clipped.
   backdrop.hidden = false;
   popover.hidden = false;
   requestAnimationFrame(() => popover.classList.add('show'));
@@ -936,7 +937,6 @@ function closeDetail() {
   currentDetailTileId = null;
   const popover = document.getElementById('detail-popover');
   const backdrop = document.getElementById('detail-backdrop');
-  const stage = document.getElementById('stage');
   popover.classList.remove('show');
   backdrop.hidden = true;
   if (window.pywebview && window.pywebview.api) {
@@ -946,8 +946,6 @@ function closeDetail() {
     popoverCloseTimer = null;
     if (currentDetailTileId) return; // reopened (on a different tile) before the fade finished
     popover.hidden = true;
-    stage.style.width = '';
-    stage.style.height = '';
     // Nothing else is ever shown in this window - hide the whole OS
     // window instead of shrinking it down to 0x0 and leaving it sitting
     // there invisible-but-present.

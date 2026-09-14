@@ -967,3 +967,49 @@ input[type="range"]::-webkit-slider-thumb {
   transition: opacity 0.25s ease;
 }
 .toast.show { opacity: 1; }
+
+
+/* ================= Detail popover: its own scale =================
+
+   The popover is a small card glanced at from wherever the widget sits,
+   while Settings is a window someone is leaning into - so the shared
+   chrome below runs a step larger here, and keeps further away from the
+   rounded edge it is sitting inside (the corner radius eats the space a
+   12px inset used to leave). Scoped to .detail-popover so none of it
+   reflows the Settings window. */
+
+.detail-popover {
+  width: 288px;
+  /* Height follows the content. In the popover's own window the card is
+     also taken out of absolute positioning (below) so that #stage, and
+     with it the OS window, comes out exactly the size of the card. */
+  height: auto;
+}
+
+/* The card is absolutely positioned in the grid window, where it used to
+   overlay the tiles. In its own window there is nothing to overlay and
+   the window has already been moved into place, so it lays out in the
+   flow instead and lets #stage measure it. */
+.is-popover-window .detail-popover {
+  position: relative;
+  left: auto;
+  top: auto;
+}
+.popover-header {
+  padding: 16px 16px 10px 20px;
+}
+.popover-header .header-title { font-size: 17.5px; }
+.popover-header .header-sub { font-size: 13px; }
+.popover-header .icon-btn { width: 32px; height: 32px; }
+
+.detail-popover .view-body { padding: 4px 20px 20px; }
+.detail-popover .accessory-tile .accessory-state { font-size: 15.5px; }
+.detail-popover .toggle-row .toggle-label { font-size: 15.5px; }
+.detail-popover .slider-block .slider-label { font-size: 13.5px; }
+.detail-popover .btn-row .seg-btn { font-size: 14px; padding: 10px 4px; }
+.detail-popover .detail-readout-sub { font-size: 13px; }
+.detail-popover .section-title { font-size: 13px; }
+.detail-popover .field { font-size: 13px; }
+.detail-popover .field input,
+.detail-popover select { font-size: 14px; }
+.detail-popover .pill-btn { font-size: 13.5px; }
