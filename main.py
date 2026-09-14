@@ -20,11 +20,12 @@ to ha_widgets_config.json next to this script.
 
 Drag the widget by its background to move it (or lock its position in
 Settings); it remembers where you left it. Left-click a tile to toggle it;
-press-and-hold - or right-click - a light/climate/fan/cover/media
-player/vacuum tile to open its detailed controls (brightness, temperature,
-speed, position, volume...). Right-click on a plain on/off tile does
-nothing (no duplicate action, no native context menu). Settings also has a
-"start with Windows" toggle. Right-click the system tray icon for
+press-and-hold - or right-click - any tile to open its detail card, which
+carries whatever controls that accessory has (brightness, temperature,
+speed, position, volume...) and, behind the gear, its name and icon. Tiles
+with nothing to operate - sensors, and anything with no controls yet -
+open the same card showing their reading, so they can be renamed too.
+Settings also has a "start with Windows" toggle. Right-click the system tray icon for
 Settings, theme switching, a manual refresh, or Quit. Closing the widget
 (Alt+F4) just hides it - use tray "Quit" to actually exit.
 
@@ -439,16 +440,22 @@ class Api:
         return True
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None):
-        """A PNG of the desktop directly behind this window, base64'd.
+        """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
-        .glass-bg in style.css), which is how this widget gets a frosted
-        backdrop at all - the window itself cannot be translucent (see the
-        note further down). Returned at the window's exact physical pixel
-        size, so the page can lay it out 1:1 and the unblurred margin
-        around the card lines up with the real desktop behind it.
+        #backdrop and .card-bg in style.css), which is how this widget gets
+        a frosted backdrop at all - the window itself cannot be translucent
+        (see the note further down). Returned at the window's exact
+        physical pixel size, so the page lays it out 1:1 and the unblurred
+        margin around the card lines up with what is really behind it.
+
+        `last_hash` is the caller's previous frame. Most desktops are a
+        still image, and answering "same as before" costs only the grab,
+        so the page can poll fast enough to track an animated wallpaper
+        without paying the encode when there is nothing to send.
         """
-        window = self._popover_window if window_kind == "popover" else self._window
+        is_popover = window_kind == "popover"
+        window = self._popover_window if is_popover else self._window
         if not window:
             return None
         hwnd = _get_hwnd(window)
@@ -458,27 +465,30 @@ class Api:
             r = (ctypes.c_long * 4)()
             _user32.GetWindowRect(hwnd, ctypes.byref(r))
             x, y, w, h = r[0], r[1], r[2] - r[0], r[3] - r[1]
-            raw = _desktop_capture.grab(x, y, w, h)
+            # The popover opens on top of the widget, so the widget is part
+            # of what is behind it.
+            over = ()
+            if is_popover and self._window:
+                main_hwnd = _get_hwnd(self._window)
+                if main_hwnd:
+                    over = (main_hwnd,)
+            raw = _desktop_capture.grab(x, y, w, h, over)
             if not raw:
                 return None
-            # Most desktops are a still image. Hashing the capture lets the
-            # caller find that out for the price of the grab alone, skip the
-            # PNG encode, and back its polling off - see refreshBackdrop in
-            # app.js. Only an animated wallpaper then keeps paying full
-            # price, which is the only case that needs to.
             digest = zlib.crc32(raw) & 0xFFFFFFFF
             if last_hash is not None and int(last_hash) == digest:
                 return {"unchanged": True, "hash": digest}
             from PIL import Image
             img = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
             buf = io.BytesIO()
-            # PNG rather than JPEG: this is a backdrop that gets blurred and
-            # tinted, so JPEG's ringing around the desktop's hard edges would
-            # smear into the blur, and at widget size the file is small either
-            # way.
-            img.save(buf, format="PNG", compress_level=1)
+            # JPEG, not PNG: this is a photo-like backdrop that is about to
+            # be blurred, and encoding it costs ~0.4ms against PNG's ~4.6ms
+            # - the difference between tracking a moving wallpaper and not.
+            # Quality is high enough that the unblurred margin around the
+            # card still matches the desktop pixel for pixel by eye.
+            img.save(buf, format="JPEG", quality=88, subsampling=0)
             return {
-                "url": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
+                "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
                 "w": w,
                 "h": h,
                 "hash": digest,
@@ -594,8 +604,27 @@ class Api:
                 pass
 
     def _on_moved(self, x, y):
-        self._cfg["window_x"] = x
-        self._cfg["window_y"] = y
+        """Remember the window's position - in physical screen pixels, and
+        read back from the window rather than taken from this event.
+
+        The x/y pywebview reports here are logical pixels, divided by the
+        DPI scale of whatever monitor the window is on. Restoring them
+        multiplies by the scale of whatever monitor the window is created
+        on, which is not the same one - so a widget parked on a 100% screen
+        came back 25% further out each restart, and looked like the
+        position simply was not being saved. Physical pixels are the same
+        number on both sides of a restart, whatever the monitor.
+        """
+        hwnd = _get_hwnd(self._window) if self._window else None
+        if hwnd:
+            try:
+                r = (ctypes.c_long * 4)()
+                _user32.GetWindowRect(hwnd, ctypes.byref(r))
+                x, y = r[0], r[1]
+            except Exception:
+                pass
+        self._cfg["window_x"] = int(x)
+        self._cfg["window_y"] = int(y)
         if self._move_timer:
             self._move_timer.cancel()
         self._move_timer = threading.Timer(0.6, lambda: cfgmod.save_config(self._cfg))
@@ -778,12 +807,15 @@ _gdi32.GetDIBits.argtypes = [
 ]
 _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+_user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
 _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
 
+_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 PW_RENDERFULLCONTENT = 0x00000002
 SRCCOPY = 0x00CC0020
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
@@ -802,95 +834,230 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 
 class _DesktopCapture:
-    """A live picture of the desktop, for the page to use as its backdrop.
+    """A live picture of what is behind a window, for it to use as a backdrop.
 
-    Taken with PrintWindow(PW_RENDERFULLCONTENT) against Progman rather
-    than by reading the wallpaper file, because the wallpaper file is
-    often not what is on screen: with an animated wallpaper tool running,
-    SPI_GETDESKWALLPAPER returns a small placeholder image while the real,
-    moving wallpaper is drawn into the desktop window. PrintWindow gets
-    what is actually being drawn, animation included - and unlike a screen
-    grab it renders the desktop window alone, so the widget sitting on top
-    of it never ends up inside its own backdrop.
+    Taken with PrintWindow(PW_RENDERFULLCONTENT) against the desktop
+    rather than by reading the wallpaper file, because the wallpaper file
+    is often not what is on screen: with an animated wallpaper tool
+    running, SPI_GETDESKWALLPAPER returns a small placeholder image while
+    the real, moving wallpaper is drawn into the desktop window.
+    PrintWindow gets what is actually being drawn, animation included -
+    and unlike a screen grab it renders a chosen window alone, so a window
+    never ends up inside its own backdrop.
 
-    The desktop-sized bitmap is built once and reused; each capture
-    re-renders into it and copies out only the rectangle the widget
-    covers.
+    PrintWindow always draws a window at the destination DC's origin, and
+    it ignores the DC's transform: SetViewportOrgEx and SetWindowOrgEx are
+    both silently disregarded, so there is no way to ask it for just the
+    piece of the desktop a widget covers. (Both were tried as an
+    optimisation and both produced a perfectly plausible picture of
+    entirely the wrong part of the wallpaper - which is worth stating
+    plainly, because "the image looks fine" does not catch it. Anything
+    changed here must be checked against a real screen grab taken with the
+    widget hidden.) So the whole surface is rendered and the piece we want
+    is blitted out of it.
+
+    Which surface is what makes that affordable. Progman spans the entire
+    virtual desktop - 3640x1920 here, ~40ms a frame - but the shell and
+    wallpaper tools put per-monitor surfaces underneath it, and rendering
+    only the one the widget sits on costs proportionally less (~16ms for a
+    1080x1920 monitor). _pick_surface finds the smallest descendant of
+    Progman that covers the target and still renders the same thing
+    Progman does; anything that comes back blank or different is skipped,
+    and Progman itself is the fallback that always works.
     """
+
+    # A candidate has to agree with Progman this closely, as a mean
+    # absolute difference per byte, to be trusted. Generous on purpose:
+    # an animated wallpaper moves between the two captures, so some
+    # disagreement is expected. A wrong *region* scores several times this.
+    _AGREE_THRESHOLD = 28
 
     def __init__(self):
         self._lock = threading.Lock()
         self._dc = None
         self._bmp = None
         self._size = (0, 0)
+        self._out_dc = None
+        self._out_bmp = None
+        self._out_size = (0, 0)
+        # Separate scratch for the windows drawn over the desktop: sharing
+        # the desktop's would resize it away and force a fresh
+        # monitor-sized bitmap on every popover frame.
+        self._ov_dc = None
+        self._ov_bmp = None
+        self._ov_size = (0, 0)
+        self._surface = None          # (hwnd, x, y, w, h) of the surface we render
 
-    def _ensure(self, w, h):
-        if self._dc and self._size == (w, h):
+    # -- scratch surfaces ------------------------------------------------
+
+    def _ensure(self, attr_dc, attr_bmp, attr_size, w, h):
+        if getattr(self, attr_dc) and getattr(self, attr_size) == (w, h):
             return True
-        self._release()
+        old_dc, old_bmp = getattr(self, attr_dc), getattr(self, attr_bmp)
+        if old_bmp:
+            _gdi32.DeleteObject(old_bmp)
+        if old_dc:
+            _gdi32.DeleteDC(old_dc)
+        setattr(self, attr_dc, None)
+        setattr(self, attr_bmp, None)
+        setattr(self, attr_size, (0, 0))
         screen_dc = _user32.GetDC(None)
         if not screen_dc:
             return False
         try:
-            self._dc = _gdi32.CreateCompatibleDC(screen_dc)
-            self._bmp = _gdi32.CreateCompatibleBitmap(screen_dc, w, h)
-            if not self._dc or not self._bmp:
-                self._release()
+            dc = _gdi32.CreateCompatibleDC(screen_dc)
+            bmp = _gdi32.CreateCompatibleBitmap(screen_dc, w, h)
+            if not dc or not bmp:
+                if bmp:
+                    _gdi32.DeleteObject(bmp)
+                if dc:
+                    _gdi32.DeleteDC(dc)
                 return False
-            _gdi32.SelectObject(self._dc, self._bmp)
-            self._size = (w, h)
+            _gdi32.SelectObject(dc, bmp)
+            setattr(self, attr_dc, dc)
+            setattr(self, attr_bmp, bmp)
+            setattr(self, attr_size, (w, h))
             return True
         finally:
             _user32.ReleaseDC(None, screen_dc)
 
-    def _release(self):
-        if self._bmp:
-            _gdi32.DeleteObject(self._bmp)
-        if self._dc:
-            _gdi32.DeleteDC(self._dc)
-        self._dc = self._bmp = None
-        self._size = (0, 0)
+    # -- choosing which surface to render --------------------------------
 
-    def grab(self, x, y, w, h):
-        """BGRA bytes for the screen rectangle (x, y, w, h), or None."""
-        if w <= 0 or h <= 0:
-            return None
-        vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        vw = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        vh = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    def _candidates(self, x, y, w, h):
+        """Visible descendants of Progman that fully cover the rect,
+        smallest first, with Progman itself last as the fallback."""
         progman = _user32.FindWindowW("Progman", None)
         if not progman:
+            return []
+        found = []
+
+        def visit(hwnd, _lparam):
+            if not _user32.IsWindowVisible(hwnd):
+                return 1
+            r = (ctypes.c_long * 4)()
+            if not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return 1
+            if r[0] <= x and r[1] <= y and r[2] >= x + w and r[3] >= y + h:
+                found.append((hwnd, r[0], r[1], r[2] - r[0], r[3] - r[1]))
+            return 1
+
+        try:
+            _user32.EnumChildWindows(progman, _ENUM_WINDOWS_PROC(visit), None)
+        except Exception:
+            found = []
+        found.sort(key=lambda c: c[3] * c[4])
+        r = (ctypes.c_long * 4)()
+        _user32.GetWindowRect(progman, ctypes.byref(r))
+        found.append((progman, r[0], r[1], r[2] - r[0], r[3] - r[1]))
+        return found
+
+    def _render(self, surface, x, y, w, h):
+        """Render `surface` and return the requested rect as BGRA, or None."""
+        hwnd, sx, sy, sw, sh = surface
+        if not self._ensure("_dc", "_bmp", "_size", sw, sh):
+            return None
+        if not _user32.PrintWindow(hwnd, self._dc, PW_RENDERFULLCONTENT):
+            return None
+        if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
+            return None
+        _gdi32.BitBlt(self._out_dc, 0, 0, w, h, self._dc, x - sx, y - sy, SRCCOPY)
+        hdr = _BITMAPINFOHEADER(
+            ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
+        )
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+            return None
+        return buf.raw
+
+    @staticmethod
+    def _disagreement(a, b):
+        # Sampled rather than exhaustive: this only has to tell "the same
+        # view, a moment apart" from "somewhere else entirely", and those
+        # are orders of magnitude apart.
+        step = max(4, (len(a) // 4096) * 4)
+        n = total = 0
+        for i in range(0, min(len(a), len(b)), step):
+            total += abs(a[i] - b[i])
+            n += 1
+        return (total / n) if n else 999
+
+    def _pick_surface(self, x, y, w, h):
+        # Cached until it stops covering the widget - which is what
+        # happens when the widget is dragged onto another monitor, and
+        # nothing else. Re-picking costs a full Progman render plus one
+        # per candidate, so doing it on every move would undo the point.
+        if self._surface:
+            hwnd = self._surface[0]
+            r = (ctypes.c_long * 4)()
+            if _user32.IsWindowVisible(hwnd) and _user32.GetWindowRect(hwnd, ctypes.byref(r))                     and r[0] <= x and r[1] <= y and r[2] >= x + w and r[3] >= y + h:
+                return (hwnd, r[0], r[1], r[2] - r[0], r[3] - r[1])
+            self._surface = None
+        cands = self._candidates(x, y, w, h)
+        if not cands:
+            return None
+        reference = self._render(cands[-1], x, y, w, h)      # Progman
+        chosen = cands[-1]
+        if reference:
+            for cand in cands[:-1]:
+                shot = self._render(cand, x, y, w, h)
+                if shot and self._disagreement(shot, reference) <= self._AGREE_THRESHOLD:
+                    chosen = cand
+                    break
+        self._surface = chosen
+        return chosen
+
+    # -- the capture itself ----------------------------------------------
+
+    def grab(self, x, y, w, h, over=()):
+        """BGRA bytes for the screen rectangle (x, y, w, h), or None.
+
+        `over` is a list of HWNDs that sit above the desktop and below the
+        window asking for this, drawn in that order. The detail popover
+        needs it: it opens on top of the widget, so a backdrop of the
+        desktop alone left the widget missing from underneath it, and the
+        popover's rounded corners - which show the backdrop unblurred -
+        showed desktop where the widget actually was.
+        """
+        if w <= 0 or h <= 0:
             return None
         with self._lock:
-            if not self._ensure(vw, vh):
+            surface = self._pick_surface(x, y, w, h)
+            if not surface:
                 return None
-            if not _user32.PrintWindow(progman, self._dc, PW_RENDERFULLCONTENT):
-                return None
-            screen_dc = _user32.GetDC(None)
-            crop_dc = _gdi32.CreateCompatibleDC(self._dc)
-            crop_bmp = _gdi32.CreateCompatibleBitmap(screen_dc, w, h) if screen_dc else None
-            if screen_dc:
-                _user32.ReleaseDC(None, screen_dc)
-            if not crop_dc or not crop_bmp:
-                if crop_dc:
-                    _gdi32.DeleteDC(crop_dc)
-                if crop_bmp:
-                    _gdi32.DeleteObject(crop_bmp)
-                return None
-            try:
-                _gdi32.SelectObject(crop_dc, crop_bmp)
-                _gdi32.BitBlt(crop_dc, 0, 0, w, h, self._dc, x - vx, y - vy, SRCCOPY)
-                hdr = _BITMAPINFOHEADER(
-                    ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
-                )
-                buf = ctypes.create_string_buffer(w * h * 4)
-                if not _gdi32.GetDIBits(crop_dc, crop_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+            raw = self._render(surface, x, y, w, h)
+            if raw is None:
+                # The surface we picked has gone (monitor change, wallpaper
+                # tool restarted). Re-pick once rather than fail.
+                self._surface = None
+                surface = self._pick_surface(x, y, w, h)
+                if not surface:
                     return None
-                return buf.raw
-            finally:
-                _gdi32.DeleteObject(crop_bmp)
-                _gdi32.DeleteDC(crop_dc)
+                raw = self._render(surface, x, y, w, h)
+            if raw is None or not over:
+                return raw
+            # Draw the windows that sit between the desktop and the caller
+            # into the same output bitmap, then read it back again.
+            for hwnd in over:
+                if not hwnd:
+                    continue
+                r = (ctypes.c_long * 4)()
+                if not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                    continue
+                ow, oh = r[2] - r[0], r[3] - r[1]
+                if ow <= 0 or oh <= 0:
+                    continue
+                if not self._ensure("_ov_dc", "_ov_bmp", "_ov_size", ow, oh):
+                    continue
+                if not _user32.PrintWindow(hwnd, self._ov_dc, PW_RENDERFULLCONTENT):
+                    continue
+                _gdi32.BitBlt(self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
+            hdr = _BITMAPINFOHEADER(
+                ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
+            )
+            buf = ctypes.create_string_buffer(w * h * 4)
+            if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+                return raw
+            return buf.raw
 
 
 _desktop_capture = _DesktopCapture()
@@ -1199,6 +1366,10 @@ def main():
         js_api=api,
         width=init_w,
         height=init_h,
+        # Deliberately not the saved position: pywebview scales x/y by the
+        # DPI of the monitor the window is created on, which mangles a
+        # position saved on a differently-scaled monitor. on_shown puts it
+        # where it belongs, in physical pixels, while it is still hidden.
         x=api._cfg.get("window_x", 200),
         y=api._cfg.get("window_y", 200),
         frameless=True,
@@ -1228,6 +1399,16 @@ def main():
     def on_shown():
         _apply_window_shape(window)
         _set_noactivate(window, True)
+        # Position it before _hide_from_taskbar, which hides and re-shows
+        # the window: that way the correction happens while it is hidden
+        # and there is nothing to see jump.
+        saved_x, saved_y = api._cfg.get("window_x"), api._cfg.get("window_y")
+        if saved_x is not None and saved_y is not None:
+            hwnd = _get_hwnd(window)
+            if hwnd:
+                _run_on_ui_thread(
+                    window, lambda: _set_window_pos(hwnd, int(saved_x), int(saved_y)),
+                )
         _hide_from_taskbar(window)
         _send_to_bottom(window)
         threading.Thread(

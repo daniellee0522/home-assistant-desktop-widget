@@ -263,6 +263,42 @@ html, body {
 }
 .tile.is-on .tile-value { color: var(--tile-on-text-1); }
 
+/* A read-only accessory is a readout, so the reading is the headline and
+   the name is the caption underneath it - the reverse of a switch tile,
+   where the name is what you are looking for and the state is a detail.
+   Taking .tile-value out of absolute positioning lets the two sit
+   together at the bottom of the tile instead of the number floating at a
+   fixed offset that only suits the switch layout. */
+.tile.is-readonly .tile-value {
+  position: static;
+  font-size: 27px;
+  line-height: 1.1;
+  margin-bottom: 1px;
+}
+.tile.is-readonly .tile-room {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-off-2);
+}
+
+/* The same idea in the detail card, for accessories with no controls. */
+.detail-readout {
+  padding: 22px 4px 8px;
+  text-align: center;
+}
+.detail-readout-value {
+  font-size: 38px;
+  font-weight: 700;
+  color: var(--text-on-1);
+  line-height: 1.1;
+}
+.detail-readout-sub {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-on-2);
+  word-break: break-all;
+}
+
 .tile.flash { animation: tile-flash 0.6s ease; }
 @keyframes tile-flash {
   0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }

@@ -276,36 +276,75 @@ new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 // It has to be re-taken whenever the window moves or resizes, and on a
 // slow tick as well, because an animated wallpaper keeps changing under a
 // window that has not moved at all.
-const BACKDROP_TICK_MS = 2000;
+// This runs as fast as it can while the picture keeps changing - enough
+// to follow an animated wallpaper - and backs off hard once it stops.
+//
+// The rate is set from what a frame actually costs rather than fixed,
+// because "as fast as possible" on a background widget is the wrong
+// answer: BACKDROP_DUTY is how much of one core the capture is allowed,
+// so a frame that takes 13ms is followed by ~100ms of quiet, and a slower
+// machine thins itself out instead of pinning a core. A blurred backdrop
+// hides a low frame rate well, so this is a cheap trade.
+const BACKDROP_DUTY = 6;              // wait this many times the frame cost
+const BACKDROP_MIN_MS = 70;           // ...but never busier than this
+const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
+const BACKDROP_STILL_BEFORE_IDLE = 8;
 let backdropPending = false;
 let backdropTimer = null;
+let backdropHash = null;
+let backdropStill = 0;
+let backdropFrameMs = BACKDROP_MIN_MS;
 
 function refreshBackdrop() {
-  if (backdropPending || !(window.pywebview && window.pywebview.api)) return;
+  if (backdropPending || !(window.pywebview && window.pywebview.api)) return Promise.resolve();
   backdropPending = true;
-  window.pywebview.api.get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main')
+  const startedAt = performance.now();
+  return window.pywebview.api
+    .get_desktop_backdrop(IS_POPOVER_WINDOW ? 'popover' : 'main', backdropHash)
     .then((shot) => {
       backdropPending = false;
-      if (!shot || !shot.url) return;
-      document.getElementById('backdrop').style.backgroundImage = 'url("' + shot.url + '")';
+      backdropFrameMs = performance.now() - startedAt;
+      if (!shot) return;
+      if (shot.unchanged) { backdropStill += 1; return; }
+      backdropStill = 0;
+      backdropHash = shot.hash;
+      if (shot.url) {
+        document.getElementById('backdrop').style.backgroundImage = 'url("' + shot.url + '")';
+      }
     })
     .catch(() => { backdropPending = false; });
+}
+
+// Anything that changes *which* pixels are behind the window invalidates
+// the comparison as well as the image.
+function invalidateBackdrop() {
+  backdropHash = null;
+  backdropStill = 0;
 }
 
 // Coalesced: a resize or a drag produces a burst of these, and each one is
 // a full desktop render on the Python side.
 let backdropSoonTimer = null;
 function refreshBackdropSoon(delay) {
+  invalidateBackdrop();
   clearTimeout(backdropSoonTimer);
-  backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 120 : delay);
+  backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 60 : delay);
 }
 
 function startBackdropTicker() {
   if (backdropTimer) return;
-  refreshBackdrop();
-  backdropTimer = setInterval(() => {
-    if (!document.hidden) refreshBackdrop();
-  }, BACKDROP_TICK_MS);
+  // Chained rather than setInterval: each frame waits for the previous one
+  // to come back, so a slow machine thins the rate out instead of queueing
+  // work it cannot keep up with.
+  const tick = () => {
+    const wait = backdropStill >= BACKDROP_STILL_BEFORE_IDLE
+      ? BACKDROP_IDLE_MS
+      : Math.max(BACKDROP_MIN_MS, Math.round(backdropFrameMs * BACKDROP_DUTY));
+    backdropTimer = setTimeout(() => {
+      (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
+    }, wait);
+  };
+  refreshBackdrop().then(tick, tick);
 }
 
 /* ============================================================
@@ -399,7 +438,13 @@ function valueTextFor(domain, state) {
   if (!state) return '';
   const attrs = state.attributes || {};
   if (domain === 'climate') return state.state !== 'off' && attrs.temperature != null ? attrs.temperature + '°' : '';
-  if (domain === 'sensor') return state.state + (attrs.unit_of_measurement || '');
+  if (domain === 'sensor') {
+    const unit = attrs.unit_of_measurement || '';
+    // Degrees read better tight against the number; every other unit
+    // (%, ppm, hPa, W) wants the space.
+    return state.state + (unit.startsWith('°') ? unit : (unit ? ' ' + unit : ''));
+  }
+  if (domain === 'binary_sensor') return state.state === 'on' ? '偵測到' : '正常';
   return '';
 }
 
@@ -445,10 +490,15 @@ function tileEl(tile) {
   room.textContent = tile.room || friendlyName(state) || tile.entity;
   div.appendChild(room);
 
-  const label = document.createElement('div');
-  label.className = 'tile-label';
-  label.textContent = ok ? (tile.label || defaultLabel(domain, state)) : '無法連線';
-  div.appendChild(label);
+  // A read-only accessory is a readout: the number is what the tile is
+  // for, and the name below it only says which one. It gets no second
+  // line, because that line would just repeat the number as raw state.
+  if (!meta.readonly || !valueText) {
+    const label = document.createElement('div');
+    label.className = 'tile-label';
+    label.textContent = ok ? (tile.label || defaultLabel(domain, state)) : '無法連線';
+    div.appendChild(label);
+  }
 
   if (!ok) {
     const warn = document.createElement('div');
@@ -477,16 +527,33 @@ function addClimateMiniButtons(div, tile) {
 
 function attachTileInteraction(el, tile) {
   const meta = domainMeta(tile.domain);
-  if (meta.readonly) return;
+
+  // Read-only accessories have nothing to toggle, but they still need the
+  // detail card: that is where a tile's name and icon are edited, and
+  // without this a sensor could only ever be removed and re-added.
+  if (meta.readonly) {
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); requestPopover(tile); });
+    let holdTimer = null;
+    const stop = () => { el.classList.remove('is-pressing'); clearTimeout(holdTimer); holdTimer = null; };
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      el.classList.add('is-pressing');
+      holdTimer = setTimeout(() => { stop(); requestPopover(tile); }, 420);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach((n) => el.addEventListener(n, stop));
+    return;
+  }
 
   if (!meta.expand) {
     // 'click' only ever fires for the primary (left) button, so right-click
-    // naturally can't trigger this - just stop the native context menu.
+    // naturally can't trigger this - it opens the detail card instead, the
+    // same as on an expandable tile, since that is the only way to rename
+    // this accessory.
     el.addEventListener('click', (e) => {
       if (e.target.closest('.mini-btn')) return;
       quickAction(tile);
     });
-    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); requestPopover(tile); });
     return;
   }
 
@@ -740,8 +807,8 @@ function renderDetailBody() {
   document.getElementById('detail-sub').textContent = state ? state.state : '無法連線';
   const body = document.getElementById('detail-body');
   body.innerHTML = '';
-  const builder = DETAIL_BUILDERS[tile.domain];
-  if (builder) builder(body, tile, state);
+  const builder = DETAIL_BUILDERS[tile.domain] || buildReadoutDetail;
+  builder(body, tile, state);
 }
 
 /* ---- per-tile edit sub-panel (icon / name / category) ---- */
@@ -849,6 +916,24 @@ function mediaBtn(iconPath, onClick, big) {
   b.innerHTML = '<svg viewBox="0 0 24 24">' + iconPath + '</svg>';
   b.addEventListener('click', onClick);
   return b;
+}
+
+// Accessories with nothing to operate - sensors, and anything this build
+// has no controls for - still open a detail card, because that is where
+// renaming and icon-picking live. Showing the reading large is more use
+// than showing an empty panel.
+function buildReadoutDetail(body, tile, state) {
+  const wrap = document.createElement('div');
+  wrap.className = 'detail-readout';
+  const big = document.createElement('div');
+  big.className = 'detail-readout-value';
+  big.textContent = state ? (valueTextFor(tile.domain, state) || state.state) : '無法連線';
+  wrap.appendChild(big);
+  const sub = document.createElement('div');
+  sub.className = 'detail-readout-sub';
+  sub.textContent = tile.entity;
+  wrap.appendChild(sub);
+  body.appendChild(wrap);
 }
 
 const DETAIL_BUILDERS = {
