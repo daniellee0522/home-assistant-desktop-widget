@@ -74,7 +74,7 @@ from tray import build_tray_icon
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
-TILE_W, TILE_H, GAP, PAD = 154, 138, 12, 20
+TILE_W, TILE_H, GAP, PAD = 162, 146, 12, 20
 
 
 # The smallest a window is ever made. Windows below roughly this size
