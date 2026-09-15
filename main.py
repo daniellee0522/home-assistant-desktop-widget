@@ -538,6 +538,11 @@ class Api:
         if not hwnd:
             return
         self._flyout_open = True
+        # Idempotent, and worth doing here as well as on `shown`: the
+        # attributes it sets (no DWM rounding, no system show animation)
+        # have to be on before the *first* time this window appears, and
+        # `shown` only fires once that has already happened.
+        _apply_window_shape(window)
         self._flyout_anchor = self._tray_corner()
         r = (ctypes.c_long * 4)()
         _user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -565,6 +570,10 @@ class Api:
         # timeout is only there so a page that never answers cannot leave
         # the panel unopenable.
         self._flyout_ready.wait(0.3)
+        # The page has painted it; give the compositor a frame or two to
+        # put that on the window's surface, or the first thing shown is
+        # whatever was on it when it was last hidden.
+        time.sleep(0.04)
         self._flyout_arming = False
         self._flyout_shown_at = time.monotonic()
         try:
@@ -1798,6 +1807,7 @@ def _set_window_size(hwnd, w, h):
 
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND = 1
+DWMWA_TRANSITIONS_FORCEDISABLED = 3
 
 
 # Which of this app's windows can end up on top of which. A window has
@@ -1994,6 +2004,20 @@ def _apply_window_shape(window):
 
     def _apply():
         with _hwnd_lock:
+            # Windows plays its own fade-and-scale over a window the first
+            # time it is shown, and again on every show after a hide. For
+            # the tray panel that lands on top of the page's own entrance
+            # and the two fight: the system's animation is presenting
+            # frames of the window while the page is still animating its
+            # card, which reads as the picture warping and the panel
+            # flickering. The page's animation is the one we want.
+            off = ctypes.c_int(1)
+            try:
+                _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, ctypes.byref(off), ctypes.sizeof(off),
+                )
+            except Exception:
+                pass
             v = ctypes.c_int(DWMWCP_DONOTROUND)
             try:
                 _dwmapi.DwmSetWindowAttribute(
