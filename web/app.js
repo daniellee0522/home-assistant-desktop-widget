@@ -422,6 +422,7 @@ const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 const BACKDROP_STILL_BEFORE_IDLE = 4;
 let backdropPending = false;
 let backdropTimer = null;
+let backdropRaf = null;
 let backdropHash = null;
 let backdropStill = 0;
 // Set from Python's answer when there is nothing worth capturing (window
@@ -629,15 +630,21 @@ function refreshBackdrop() {
   // since the last full frame. That stale middle showing through the
   // animation is what the panel looked like it was warping through.
   const card = cardGeometry();
-  // The tray panel is the exception to corners-only, because its card
-  // scales out of the corner and back into it: everything the animation
-  // uncovers on the way is canvas nobody has painted since the last full
-  // frame, and that stale middle showing through is what the panel
-  // looked like it was warping through. Unless DWM is drawing the glass,
-  // in which case what it uncovers is the real thing and there is no
-  // middle to be stale.
-  const corner = (card && card.fills && (!IS_FLYOUT_WINDOW || systemGlass()))
-    ? Math.ceil(card.radius) : 0;
+  // Only the wedges outside the card's corners are ever seen sharp, so
+  // that is all that has to come back at full size - as long as the card
+  // really does cover the window. The tray panel is the exception *while
+  // it is animating*: its card scales out of the corner and back into it,
+  // and everything it uncovers on the way is canvas nobody has painted
+  // since the last full frame. That stale middle showing through the
+  // animation is what the panel looked like it was warping through. Once
+  // the animation has finished the card covers the window like any other,
+  // and the corners are enough again - which is what makes one frame per
+  // vsync affordable, since the whole frame was ~250KB of JPEG and the
+  // corners are a twentieth of that.
+  const animating = !!(document.getElementById('view-grid').getAnimations
+    && document.getElementById('view-grid').getAnimations().length);
+  const cornersAreEnough = !IS_FLYOUT_WINDOW || systemGlass() || !animating;
+  const corner = (card && card.fills && cornersAreEnough) ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
@@ -699,25 +706,48 @@ function refreshBackdropSoon(delay) {
 // second while the card animates in over it.
 function restartBackdropTicker() {
   clearTimeout(backdropTimer);
+  if (backdropRaf) cancelAnimationFrame(backdropRaf);
   backdropTimer = null;
+  backdropRaf = null;
   backdropSkipMs = 0;
   backdropStill = 0;
   startBackdropTicker();
 }
 
+// The open panel's pacing: one look per compositor frame, which is the
+// screen's own rate, whatever that is. Nothing else here needs it - the
+// widget is over a wallpaper, and a wallpaper does not scroll - and
+// nothing else would survive it either, since this gives up both the
+// rate ceiling and the backing-off that keeps a still desktop free.
+function backdropTicksOnVsync() {
+  return IS_FLYOUT_WINDOW && flyoutOpen;
+}
+
 function startBackdropTicker() {
-  if (backdropTimer) return;
+  if (backdropTimer || backdropRaf) return;
   // Chained rather than setInterval: each frame waits for the previous one
   // to come back, so a slow machine thins the rate out instead of queueing
-  // work it cannot keep up with.
+  // work it cannot keep up with. That is true of the vsync path too - a
+  // frame that costs more than the screen's interval simply lands on the
+  // frame after next.
+  const again = () => {
+    (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
+  };
   const tick = () => {
+    if (backdropTicksOnVsync() && !backdropSkipMs) {
+      backdropTimer = null;
+      backdropRaf = requestAnimationFrame(() => {
+        backdropRaf = null;
+        again();
+      });
+      return;
+    }
     const wait = backdropSkipMs
       || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
         ? BACKDROP_IDLE_MS
         : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY)));
-    backdropTimer = setTimeout(() => {
-      (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
-    }, wait);
+    backdropRaf = null;
+    backdropTimer = setTimeout(again, wait);
   };
   refreshBackdrop().then(tick, tick);
 }
@@ -1104,7 +1134,18 @@ window.__armBackdrop = function () {
   requestAnimationFrame(() => pendingResize.then(() => attempt(12), () => attempt(12)));
 };
 
+// True from the moment the panel starts opening until it has finished
+// closing. While that is the case it reads the screen on every frame the
+// compositor draws (see startBackdropTicker) rather than at the rate the
+// widget uses, because the panel is the one window that sits over other
+// applications: a browser scrolling behind it changes the whole of its
+// backdrop several times a second, and anything slower than the screen
+// itself reads as the glass lagging the page. It is only ever open for a
+// few seconds at a time, which is what makes that affordable.
+let flyoutOpen = false;
+
 window.__flyoutEnter = function () {
+  flyoutOpen = true;
   restartBackdropTicker();
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter', 'flyout-leave');
@@ -1116,6 +1157,7 @@ window.__flyoutEnter = function () {
 // ...and to play it backwards on the way out. Python waits out the
 // animation before it actually hides the window (see hide_flyout).
 window.__flyoutLeave = function () {
+  flyoutOpen = false;
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter');
     void el.offsetWidth;
