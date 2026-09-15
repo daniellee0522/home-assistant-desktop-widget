@@ -224,15 +224,27 @@ html, body {
    blit and not a resample - which matters at the cards' rounded corners,
    where the backdrop shows unblurred against the real desktop and any
    softening reads as a ragged edge. */
-#backdrop {
+#backdrop,
+#backdrop-glass {
   position: fixed;
   inset: 0;
   z-index: 0;
   width: 100%;
   height: 100%;
+}
+#backdrop {
   /* The window is not translucent, so something has to be painted here
      before the first capture arrives. */
   background-color: var(--panel-solid);
+}
+/* The frosted fill of the card, on its own layer above the sharp desktop
+   rather than drawn into it. It belongs to the card, not to the window,
+   and this is what lets it come and go with the card - painted into the
+   one canvas it stayed behind as a pane of blurred glass after the card
+   itself had gone, which is what the tray panel's dismissal looked
+   like. Transparent everywhere the card is not. */
+#backdrop-glass {
+  background: transparent;
 }
 
 /* ================= Grid view ================= */
@@ -1091,7 +1103,9 @@ input[type="range"]::-webkit-slider-thumb {
    would be included in that measurement - the window would shrink to fit
    the animation's first frame. A transform on a child changes nothing
    about its parent's layout. */
-.is-flyout-window #view-grid {
+/* The card and its own frosted fill move as one thing. */
+.is-flyout-window #view-grid,
+.is-flyout-window #backdrop-glass {
   transform-origin: 100% 100%;
   opacity: 0;                     /* until it is asked to come in */
 }
@@ -1105,13 +1119,15 @@ input[type="range"]::-webkit-slider-thumb {
   from { opacity: 1; transform: none; }
   to   { opacity: 0; transform: scale(0.92); }
 }
-.is-flyout-window #view-grid.flyout-enter {
+.is-flyout-window #view-grid.flyout-enter,
+.is-flyout-window #backdrop-glass.flyout-enter {
   /* Most of the distance is covered in the first third, then it eases
      into place - which is what reads as popping up rather than being
      switched on, without ever going past full size. */
   animation: flyout-enter 220ms cubic-bezier(0.12, 0.9, 0.2, 1) forwards;
 }
-.is-flyout-window #view-grid.flyout-leave {
+.is-flyout-window #view-grid.flyout-leave,
+.is-flyout-window #backdrop-glass.flyout-leave {
   /* Shorter than it arrives in, and accelerating rather than easing:
      things leave faster than they come. */
   animation: flyout-leave 130ms cubic-bezier(0.5, 0, 0.9, 0.35) forwards;

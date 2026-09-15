@@ -411,6 +411,7 @@ function noteFrameCost(ms) {
 // in one go is atomic - nothing is ever half-updated on screen - which is
 // what the old pair of cross-fading layers existed to fake.
 let backdropCtx = null;
+let glassCtx = null;
 
 // Where the visible card sits, in the canvas's device pixels, plus its
 // corner radius. Everything the backdrop does is expressed against this:
@@ -452,6 +453,7 @@ function cardGeometry() {
 
 function paintBackdrop(sharp, blurred, w, h, corner) {
   const cv = document.getElementById('backdrop');
+  const glass = document.getElementById('backdrop-glass');
   if (!cv) return;
   if (!backdropCtx) backdropCtx = cv.getContext('2d', { alpha: false });
   const ctx = backdropCtx;
@@ -473,18 +475,27 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
   } else {
     ctx.drawImage(sharp, 0, 0, w, h);
   }
-  if (!blurred) return;
-  // The frosted fill of the card, clipped to its own rounded rectangle
-  // here rather than set as its CSS background, so the frame never
-  // becomes an image resource of its own.
-  const card = cardGeometry();
+  if (!glass) return;
+  // The card's frosted fill, on its own layer above that: it belongs to
+  // the card and has to be able to come and go with it. Clipped to the
+  // card's own rounded rectangle here rather than set as its CSS
+  // background, so the frame never becomes an image resource of its own.
+  if (!glassCtx) glassCtx = glass.getContext('2d');
+  const gctx = glassCtx;
+  if (glass.width !== w || glass.height !== h) {
+    glass.width = w;
+    glass.height = h;
+  } else {
+    gctx.clearRect(0, 0, w, h);
+  }
+  const card = blurred ? cardGeometry() : null;
   if (!card) return;
-  ctx.save();
-  ctx.beginPath();
-  ctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
-  ctx.clip();
-  ctx.drawImage(blurred, 0, 0, w, h);
-  ctx.restore();
+  gctx.save();
+  gctx.beginPath();
+  gctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
+  gctx.clip();
+  gctx.drawImage(blurred, 0, 0, w, h);
+  gctx.restore();
 }
 
 // Decoded off the main thread, drawn, then closed - the bitmap's lifetime
@@ -873,9 +884,14 @@ function requestPopover(tile) {
 // frosted picture of somewhere else, replaced a moment later, which is
 // the flash and the lag. Python waits for the flyout_ready call back
 // before it shows the window.
+function flyoutLayers() {
+  // The card and the frosted pane behind it animate as one thing.
+  return [document.getElementById('view-grid'),
+          document.getElementById('backdrop-glass')].filter(Boolean);
+}
+
 window.__flyoutPrepare = function () {
-  const view = document.getElementById('view-grid');
-  if (view) view.classList.remove('flyout-enter', 'flyout-leave');
+  for (const el of flyoutLayers()) el.classList.remove('flyout-enter', 'flyout-leave');
   const done = () => {
     if (window.pywebview && window.pywebview.api) {
       window.pywebview.api.flyout_ready().catch(() => {});
@@ -886,21 +902,21 @@ window.__flyoutPrepare = function () {
 };
 
 window.__flyoutEnter = function () {
-  const view = document.getElementById('view-grid');
-  if (!view) return;
-  view.classList.remove('flyout-enter', 'flyout-leave');
-  void view.offsetWidth;
-  view.classList.add('flyout-enter');
+  for (const el of flyoutLayers()) {
+    el.classList.remove('flyout-enter', 'flyout-leave');
+    void el.offsetWidth;
+    el.classList.add('flyout-enter');
+  }
 };
 
 // ...and to play it backwards on the way out. Python waits out the
 // animation before it actually hides the window (see hide_flyout).
 window.__flyoutLeave = function () {
-  const view = document.getElementById('view-grid');
-  if (!view) return;
-  view.classList.remove('flyout-enter');
-  void view.offsetWidth;
-  view.classList.add('flyout-leave');
+  for (const el of flyoutLayers()) {
+    el.classList.remove('flyout-enter');
+    void el.offsetWidth;
+    el.classList.add('flyout-leave');
+  }
 };
 
 // Pushed from Python (see Api.open_popover in main.py) once the popover
