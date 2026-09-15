@@ -1012,7 +1012,23 @@ class Api:
             _user32.GetWindowRect(hwnd, ctypes.byref(r))
             x, y, w, h = r[0], r[1], r[2] - r[0], r[3] - r[1]
             if want_w and want_h:
-                w, h = max(1, int(want_w)), max(1, int(want_h))
+                want_w, want_h = max(1, int(want_w)), max(1, int(want_h))
+                # The page's own arithmetic - its viewport in CSS pixels
+                # times its devicePixelRatio - lands a pixel either side
+                # of the window's real size, because the viewport is a
+                # rounded number of CSS pixels. Where it is that close the
+                # window is the truthful answer: its client area is what
+                # the viewport is mapped onto, so a capture of exactly
+                # that, drawn edge to edge, lines up everywhere. Taking
+                # the page's number instead squeezed the image into a
+                # window a pixel narrower, which is nothing in the middle
+                # and a whole pixel out by the far corner - and the
+                # corners are the one place the backdrop is shown
+                # unblurred against the real desktop, where a pixel shows.
+                # Further apart than that and the page knows something
+                # this does not (a fixed size, a zoom), so it wins.
+                if abs(want_w - w) > 3 or abs(want_h - h) > 3:
+                    w, h = want_w, want_h
             # The popover opens on top of the widget, so the widget is part
             # of what is behind it. In the fast path the widget is excluded
             # from screen capture as well, so it has to be drawn back in;
@@ -1725,6 +1741,20 @@ class _DesktopCapture:
         """
         if w <= 0 or h <= 0:
             return None
+        # Only the part of the rectangle that is actually on a monitor can
+        # be read, and it has to land at its own offset in the result. A
+        # window dragged so a corner hangs off the screen asks for a
+        # rectangle that starts outside the desktop, and BitBlt answers
+        # that by sliding what it *can* read up against the corner - so
+        # the backdrop came back shifted by however far off the edge the
+        # window was, which is what showed at the corners.
+        vx = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        vy = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        sx, sy = max(x, vx), max(y, vy)
+        ex = min(x + w, vx + _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+        ey = min(y + h, vy + _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        if ex <= sx or ey <= sy:
+            return None
         with self._lock:
             if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
                 return None
@@ -1732,7 +1762,8 @@ class _DesktopCapture:
             if not screen_dc:
                 return None
             try:
-                if not _gdi32.BitBlt(self._out_dc, 0, 0, w, h, screen_dc, x, y, SRCCOPY):
+                if not _gdi32.BitBlt(self._out_dc, sx - x, sy - y, ex - sx, ey - sy,
+                                     screen_dc, sx, sy, SRCCOPY):
                     return None
             finally:
                 _user32.ReleaseDC(None, screen_dc)
