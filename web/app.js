@@ -232,6 +232,9 @@ async function boot() {
     openSettingsView();
   }
   updateConnDot();
+  // The views are built and this window knows which one it is; its stage
+  // is now the size it is going to be, and the window may follow it.
+  markLayoutReady();
   try { await window.pywebview.api.ui_ready(); } catch (e) { /* ignore */ }
   startBackdropTicker();
 
@@ -335,7 +338,28 @@ function applyFixedSizeConstraint() {
 // happen at the window's final size can wait for it - see armBackdrop.
 let pendingResize = Promise.resolve();
 
+// The ResizeObserver below is armed the moment this file runs, and fires
+// once straight away - on a #stage that is still the empty shell the
+// markup ships with, 40px square. That measurement went to the OS as the
+// window's new size, where it hit the minimum and left the window 80x60
+// for a tenth of a second: the whole widget squeezed into a stamp, and
+// the desktop capture taken while it was there stretched back out over
+// the real window when it grew again. (Whether it happened at all was a
+// race between the observer's first callback and boot()'s first render,
+// which is why it was every other launch rather than every one.)
+//
+// So: measurements only count once there is something to measure. boot()
+// says when.
+let layoutReady = false;
+
+function markLayoutReady() {
+  if (layoutReady) return;
+  layoutReady = true;
+  syncWindowSize();
+}
+
 function syncWindowSize() {
+  if (!layoutReady) return;
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
     if (!(window.pywebview && window.pywebview.api)) return;
@@ -401,6 +425,23 @@ const BACKDROP_DUTY = 4;              // wait this many times the capture cost
 // whatever it is given.
 const SAMPLE_FPS_MIN = 2;
 const SAMPLE_FPS_MAX = 30;
+// ...except in the tray panel while it is open, where none of the above
+// applies. Both the duty and the user's sample rate are answers to the
+// question "how fast does the wallpaper behind the widget move", and the
+// panel is not over a wallpaper - it is over whatever the user was just
+// looking at, which is as likely as not a page being scrolled. At the
+// widget's settings (16/s, and a wait of four times the capture cost on
+// top) the glass under the panel was measured redrawing 8 times a second
+// against a screen doing 180: not frozen, just always a little behind
+// what it is supposed to be a picture of.
+//
+// Twice the capture cost, with a floor of one 60Hz frame, measures ~50
+// looks a second here - one per frame QtWebEngine actually presents - and
+// costs about a third of a core on top of what the program burns at rest.
+// That is a lot to spend at rest and nothing to spend for the second or
+// two this panel is ever open.
+const PANEL_DUTY = 2;
+const PANEL_FLOOR_MS = 16;
 
 function backdropFloorMs() {
   const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
@@ -540,6 +581,19 @@ function cardGeometry() {
   return null;
 }
 
+// What the backdrop is drawn over, in CSS pixels. The glass canvas is
+// inset to the window's edges, so its box is the window's - except in
+// system-glass mode, where it is not in the document at all; the visual
+// viewport is the same rectangle and is always there.
+function viewportBox() {
+  const g = document.getElementById('backdrop-glass');
+  if (g) {
+    const r = g.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) return r;
+  }
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
 // How often the frosted copy is refreshed, against every frame for the
 // sharp corners. The corners sit against the live desktop along the
 // window's edge, so anything stale there shows as a seam; the frosted
@@ -637,7 +691,14 @@ function refreshBackdrop() {
   const startedAt = performance.now();
   // Ask for exactly the number of device pixels this will be drawn at, so
   // the image lands 1:1 and is never resampled (see get_desktop_backdrop).
-  const box = document.getElementById('backdrop').getBoundingClientRect();
+  // Measured off the glass canvas, not off #backdrop: that one is
+  // display:none here (nothing is drawn on it any more - see style.css),
+  // and a hidden element's box is zero, which quietly turned every
+  // request into "whatever size you think the window is". Python's answer
+  // to that is its own GetWindowRect, which is right almost always and
+  // wrong in exactly the moment that matters - while a resize is in
+  // flight.
+  const box = viewportBox();
   const dpr = window.devicePixelRatio || 1;
   // Only the wedges outside the card's corners are ever seen sharp, so
   // that is all that has to come back at full size - as long as the card
@@ -681,6 +742,23 @@ function refreshBackdrop() {
       backdropStill = 0;
       backdropHash = shot.hash;
       if (!shot.url && !shot.blur_url) { backdropPending = false; return; }
+      // A capture is of a window of a particular size, and by the time it
+      // has been encoded, carried over the bridge and decoded, the window
+      // may not be that size any more - the page resizes it to fit its own
+      // content, and the first fit lands right about here. Painting it
+      // anyway stretches a picture of the old window across the new one,
+      // which is the backdrop arriving at visibly the wrong scale. Drop it
+      // and ask again; the next one is 20ms away.
+      const live = viewportBox();
+      const liveDpr = window.devicePixelRatio || 1;
+      const liveW = Math.round(live.width * liveDpr);
+      const liveH = Math.round(live.height * liveDpr);
+      if (Math.abs(shot.w - liveW) > 3 || Math.abs(shot.h - liveH) > 3) {
+        backdropHash = null;            // that frame was never painted
+        backdropPending = false;
+        refreshBackdropSoon(0);
+        return;
+      }
       return Promise.all([
         shot.url ? decodeShot(shot.url) : null,
         shot.blur_url ? decodeShot(shot.blur_url) : null,
@@ -766,14 +844,15 @@ function startBackdropTicker() {
     // stopped in three seconds. It is wrong for the panel, which sits
     // over other people's windows - four identical frames there means a
     // browser that happens to be still, and the moment it scrolls the
-    // glass is frozen until the backoff expires. That wait is the panel
-    // "getting stuck". While it is open it never sleeps for more than a
-    // fifth of a second; it is open for seconds at a time.
-    const idleMs = (IS_FLYOUT_WINDOW && flyoutOpen) ? 200 : BACKDROP_IDLE_MS;
+    // glass is frozen until the backoff expires. That wait is what the
+    // panel getting stuck was. An open panel does not back off at all.
+    const openPanel = IS_FLYOUT_WINDOW && flyoutOpen;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
-      || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
-        ? idleMs
-        : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY))));
+      || (openPanel
+        ? Math.max(PANEL_FLOOR_MS, Math.round(backdropFrameMs * PANEL_DUTY))
+        : backdropStill >= BACKDROP_STILL_BEFORE_IDLE
+          ? BACKDROP_IDLE_MS
+          : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY))));
     backdropRaf = null;
     backdropTimer = setTimeout(again, wait);
   };
