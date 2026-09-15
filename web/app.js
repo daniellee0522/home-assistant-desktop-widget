@@ -866,6 +866,25 @@ function requestPopover(tile) {
 // Pushed from Python each time the tray flyout is shown, to replay its
 // entrance. Restarting a CSS animation needs the class off, a layout read
 // to make that land, and the class back on.
+// Called by Python while the window is still hidden but already moved
+// to where it will appear: puts the card back to its pre-entrance state
+// and takes a fresh backdrop of the place it is about to cover. Without
+// it the panel arrived carrying whatever was behind it last time - a
+// frosted picture of somewhere else, replaced a moment later, which is
+// the flash and the lag. Python waits for the flyout_ready call back
+// before it shows the window.
+window.__flyoutPrepare = function () {
+  const view = document.getElementById('view-grid');
+  if (view) view.classList.remove('flyout-enter', 'flyout-leave');
+  const done = () => {
+    if (window.pywebview && window.pywebview.api) {
+      window.pywebview.api.flyout_ready().catch(() => {});
+    }
+  };
+  invalidateBackdrop();
+  Promise.resolve(refreshBackdrop()).then(done, done);
+};
+
 window.__flyoutEnter = function () {
   const view = document.getElementById('view-grid');
   if (!view) return;

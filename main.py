@@ -172,6 +172,12 @@ class Api:
         # around while a window is being shown, and the Deactivate that
         # comes out of that churn is not the user clicking away.
         self._flyout_shown_at = 0.0
+        # True for the moment between moving the panel into place and
+        # actually showing it, during which it is allowed to capture the
+        # backdrop it is about to sit on - see show_flyout.
+        self._flyout_arming = False
+        # Set by the panel's page once it has that backdrop in hand.
+        self._flyout_ready = threading.Event()
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
@@ -514,6 +520,12 @@ class Api:
 
     _FLYOUT_MARGIN = 12         # what Windows leaves around its own flyouts
 
+    def flyout_ready(self):
+        """Called by the panel's page once the backdrop it was asked to
+        take has been painted - see show_flyout."""
+        self._flyout_ready.set()
+        return True
+
     def toggle_flyout(self):
         if self._flyout_open:
             self.hide_flyout()
@@ -537,6 +549,23 @@ class Api:
         # capturable to appear in its frosted backdrop.
         self._overlays_open.add("flyout")
         self._apply_capture_exclusion()
+        # Take the backdrop *before* it is on screen. It has been moved
+        # into place but is still hidden, so a read of the screen there is
+        # exactly what it is about to cover - and it cannot read itself
+        # in. Shown first, the panel arrives carrying a frosted picture of
+        # wherever it was last time, which is replaced a frame or two
+        # later: that is the flash, and the lag behind it.
+        self._flyout_arming = True
+        self._flyout_ready.clear()
+        try:
+            window.evaluate_js("window.__flyoutPrepare && window.__flyoutPrepare()")
+        except Exception:
+            pass
+        # The page calls flyout_ready below when it has painted it; the
+        # timeout is only there so a page that never answers cannot leave
+        # the panel unopenable.
+        self._flyout_ready.wait(0.3)
+        self._flyout_arming = False
         self._flyout_shown_at = time.monotonic()
         try:
             window.show()
@@ -874,10 +903,14 @@ class Api:
         # loop is ~100% of what it burns, and two of the three windows are
         # hidden almost all of the time (the detail popover and Settings)
         # while the third is usually behind something.
-        if not _user32.IsWindowVisible(hwnd):
-            return {"skip": True, "retry_ms": 1000}
-        if _nothing_visible_of(hwnd, self._own_hwnds()):
-            return {"skip": True, "retry_ms": 400}
+        # The panel being armed is the one case where a window that is
+        # not on screen still has a backdrop worth taking (see
+        # show_flyout), and where nothing can be covering it either.
+        if not (window_kind == "flyout" and self._flyout_arming):
+            if not _user32.IsWindowVisible(hwnd):
+                return {"skip": True, "retry_ms": 1000}
+            if _nothing_visible_of(hwnd, self._own_hwnds()):
+                return {"skip": True, "retry_ms": 400}
         started = time.perf_counter()
         try:
             r = (ctypes.c_long * 4)()
