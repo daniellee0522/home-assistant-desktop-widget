@@ -1232,3 +1232,24 @@ input[type="range"]::-webkit-slider-thumb {
   stroke: #fff;
   stroke-width: 1.2;
 }
+
+/* ================= Faded out =================
+
+   When the machine has been quiet for a while, or something is running
+   full screen, the widget fades back into the desktop rather than
+   disappearing: the backdrop it is painted on is a copy of what is
+   behind it, so fading the card towards it is the same thing as fading
+   the widget out. The first click brings it back (see wakeFromDim).
+
+   Long and slow on the way out - it should be something you notice
+   having happened rather than happening - and quick on the way back,
+   because by then someone is waiting for it. */
+html:not(.is-flyout-window) #view-grid,
+html:not(.is-flyout-window) #backdrop-glass {
+  transition: opacity 220ms ease-out;
+}
+html.is-dimmed:not(.is-flyout-window) #view-grid,
+html.is-dimmed:not(.is-flyout-window) #backdrop-glass {
+  opacity: 0.3;
+  transition: opacity 1400ms ease-in-out;
+}

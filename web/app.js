@@ -130,6 +130,7 @@ function climateBadge(state, on) {
  * ============================================================ */
 let CONFIG = {
   ha_url: '', ha_token: '', theme: 'auto', columns: 4, tiles: [], sample_fps: 16,
+  dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
   zoom: 100, fixed_size: false, fixed_width: 400, fixed_height: 300,
 };
@@ -397,10 +398,18 @@ const SAMPLE_FPS_MAX = 30;
 function backdropFloorMs() {
   const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
     Number(CONFIG.sample_fps) || 16));
-  return Math.round(1000 / fps);
+  // Faded back into the desktop, there is almost nothing of the glass
+  // left to be out of date, so it is read a few times a second at most.
+  return Math.max(dimmed ? 250 : 0, Math.round(1000 / fps));
 }
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
-const BACKDROP_STILL_BEFORE_IDLE = 8;
+// How many identical frames it takes to decide the desktop has stopped
+// moving. Four rather than eight: a still wallpaper - Wallpaper Engine
+// paused, or a plain picture - is the common case, and eight frames at
+// the top rate is half a second of work to learn nothing. Anything that
+// starts moving again is picked up on the next look either way, because
+// invalidateBackdrop resets this the moment a frame differs.
+const BACKDROP_STILL_BEFORE_IDLE = 4;
 let backdropPending = false;
 let backdropTimer = null;
 let backdropHash = null;
@@ -409,6 +418,10 @@ let backdropStill = 0;
 // hidden, or completely covered); it replaces the pacing below for as
 // long as that lasts - see refreshBackdrop.
 let backdropSkipMs = 0;
+// Where the window is being moved to, while it is being dragged. The
+// capture is taken there rather than where the window currently is - see
+// get_desktop_backdrop.
+let backdropAt = null;
 let backdropFrameMs = 60;
 
 // The interval is derived from what a capture costs, so a single slow
@@ -553,7 +566,8 @@ function refreshBackdrop() {
   const corner = (card && card.fills && !IS_FLYOUT_WINDOW) ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
-                          Math.round(box.width * dpr), Math.round(box.height * dpr), corner)
+                          Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
+                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null)
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a
@@ -671,6 +685,9 @@ function installWindowDrag() {
       .catch(() => { start = null; });
   });
 
+  let dragRaf = 0;
+  let dragTo = null;
+
   document.addEventListener('mousemove', (e) => {
     if (!start || !start.origin) return;
     const dpr = window.devicePixelRatio || 1;
@@ -678,14 +695,28 @@ function installWindowDrag() {
     const dy = (e.screenY - start.sy) * dpr;
     if (!start.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
     start.moved = true;
-    window.pywebview.api.move_window(
-      Math.round(start.origin.x + dx), Math.round(start.origin.y + dy), kind,
-    ).catch(() => {});
-    // Different part of the desktop now behind the window.
-    refreshBackdropSoon(60);
+    dragTo = { x: Math.round(start.origin.x + dx), y: Math.round(start.origin.y + dy) };
+    // One move a frame, however fast the mouse reports. Every one of
+    // these is a round trip into Python on a thread of its own, and a
+    // mouse that reports at 1000Hz was queueing sixty of them for every
+    // frame the window could actually be drawn at.
+    if (dragRaf) return;
+    dragRaf = requestAnimationFrame(() => {
+      dragRaf = 0;
+      const to = dragTo;
+      if (!to) return;
+      window.pywebview.api.move_window(to.x, to.y, kind).catch(() => {});
+      // Different part of the desktop behind it now. Not
+      // refreshBackdropSoon: that is a debounce, and a drag never stops
+      // moving long enough for it to fire, so the glass sat still for
+      // the whole drag. Let the sampler take it at its own rate, aimed
+      // at where the window is going.
+      backdropAt = to;
+      invalidateBackdrop();
+    });
   });
 
-  const end = () => { start = null; };
+  const end = () => { start = null; dragTo = null; backdropAt = null; };
   document.addEventListener('mouseup', end);
   window.addEventListener('blur', end);
 }
@@ -919,6 +950,41 @@ function requestPopover(tile) {
     );
   }).catch(() => {});
 }
+
+/* ============================================================
+ * Fading out while nobody is there
+ * ============================================================ */
+// Python decides when (see _watch_for_idle): the machine has been quiet
+// for long enough, or something is running full screen. All this side
+// does is carry the state, slow the sampling down while it is faded -
+// there is not much left to see - and treat the first click as a tap to
+// wake rather than as a tap on whatever was under it.
+let dimmed = false;
+
+window.__setDimmed = function (on) {
+  const next = !!on;
+  if (next === dimmed) return;
+  dimmed = next;
+  document.documentElement.classList.toggle('is-dimmed', dimmed);
+  if (!dimmed) restartBackdropTicker();
+};
+
+function wakeFromDim() {
+  if (!dimmed) return false;
+  window.__setDimmed(false);
+  if (window.pywebview && window.pywebview.api) {
+    window.pywebview.api.wake().catch(() => {});
+  }
+  return true;
+}
+
+// Capture phase, so the tap that wakes it never reaches a tile: waking
+// something up and turning a light off with the same click is not what
+// anyone meant by it.
+document.addEventListener('mousedown', (e) => {
+  if (wakeFromDim()) { e.stopPropagation(); e.preventDefault(); }
+}, true);
+document.addEventListener('mousemove', () => { wakeFromDim(); }, true);
 
 // Pushed from Python each time the tray flyout is shown, to replay its
 // entrance. Restarting a CSS animation needs the class off, a layout read
@@ -1558,6 +1624,9 @@ function openSettingsView() {
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
   setSampleFpsSlider(CONFIG.sample_fps || 16);
+  document.getElementById('dim-idle-check').checked = CONFIG.dim_when_idle !== false;
+  setDimAfterSlider(CONFIG.dim_after_sec || 120);
+  document.getElementById('dim-after-block').hidden = CONFIG.dim_when_idle === false;
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
   document.getElementById('fast-glass-check').checked = CONFIG.fast_glass !== false;
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
@@ -1569,6 +1638,13 @@ function openSettingsView() {
   renderTileList();
   updateConnDot();
   showView('view-settings');
+}
+
+function setDimAfterSlider(sec) {
+  const v = Math.max(10, Math.min(600, Number(sec) || 120));
+  document.getElementById('dim-after-range').value = String(v);
+  document.getElementById('dim-after-value').textContent =
+    v < 60 ? (v + ' 秒') : (Math.round(v / 6) / 10 + ' 分鐘');
 }
 
 function setSampleFpsSlider(fps) {
@@ -1593,7 +1669,8 @@ async function savePrefs() {
   try {
     await window.pywebview.api.save_prefs(CONFIG.theme, CONFIG.columns, CONFIG.lock_position,
       CONFIG.zoom, CONFIG.fixed_size, CONFIG.fixed_width, CONFIG.fixed_height,
-      CONFIG.opacity, CONFIG.fast_glass, CONFIG.sample_fps);
+      CONFIG.opacity, CONFIG.fast_glass, CONFIG.sample_fps,
+      CONFIG.dim_when_idle, CONFIG.dim_after_sec);
   } catch (e) { /* ignore */ }
 }
 
@@ -1825,6 +1902,23 @@ function init() {
   // widget is only re-laid-out on release: every step in between would
   // save the config and put the grid window through a relayout and a
   // fresh desktop capture, which is a lot of work to throw away 5% later.
+  document.getElementById('dim-idle-check').addEventListener('change', async (e) => {
+    CONFIG.dim_when_idle = !!e.target.checked;
+    document.getElementById('dim-after-block').hidden = !CONFIG.dim_when_idle;
+    await savePrefs();
+  });
+  const dimRange = document.getElementById('dim-after-range');
+  dimRange.addEventListener('input', (e) => {
+    const v = Number(e.target.value);
+    document.getElementById('dim-after-value').textContent =
+      v < 60 ? (v + ' 秒') : (Math.round(v / 6) / 10 + ' 分鐘');
+  });
+  dimRange.addEventListener('change', async (e) => {
+    CONFIG.dim_after_sec = Number(e.target.value);
+    setDimAfterSlider(CONFIG.dim_after_sec);
+    await savePrefs();
+  });
+
   const fpsRange = document.getElementById('sample-fps-range');
   fpsRange.addEventListener('input', (e) => {
     document.getElementById('sample-fps-value').textContent = e.target.value + ' fps';

@@ -143,6 +143,11 @@ class Api:
         # Whether the widget is currently sitting on the desktop. The
         # tray flyout is a window of its own and tracks itself.
         self._desktop_visible = True
+        # Whether the widget is currently faded back into the desktop, and
+        # the thread watching for the moments it should be - see
+        # _watch_for_idle.
+        self._dimmed = False
+        self._dim_stop = threading.Event()
 
         # The detail popover lives in its own separate OS window (see the
         # IS_POPOVER_WINDOW comment in app.js for why) - it shares this
@@ -272,6 +277,8 @@ class Api:
                 "opacity": self._cfg.get("opacity", 100),
                 "fast_glass": bool(self._cfg.get("fast_glass", True)),
                 "sample_fps": int(self._cfg.get("sample_fps", 16)),
+                "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
+                "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
                 "tiles": tiles,
             },
             "connected": self._connected,
@@ -359,7 +366,8 @@ class Api:
 
     def save_prefs(self, theme, columns, lock_position=None,
                    zoom=None, fixed_size=None, fixed_width=None, fixed_height=None,
-                   opacity=None, fast_glass=None, sample_fps=None):
+                   opacity=None, fast_glass=None, sample_fps=None,
+                   dim_when_idle=None, dim_after_sec=None):
         self._cfg["theme"] = theme or "auto"
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
@@ -386,6 +394,16 @@ class Api:
                 pass
         if fast_glass is not None:
             self._cfg["fast_glass"] = bool(fast_glass)
+        if dim_when_idle is not None:
+            self._cfg["dim_when_idle"] = bool(dim_when_idle)
+            if not self._cfg["dim_when_idle"] and self._dimmed:
+                self._dimmed = False
+                self._push_dim()
+        if dim_after_sec is not None:
+            try:
+                self._cfg["dim_after_sec"] = max(10, min(3600, int(dim_after_sec)))
+            except Exception:
+                pass
         if sample_fps is not None:
             # How often the desktop behind the widget is re-read, in
             # frames a second. The page paces itself from what a frame
@@ -968,7 +986,7 @@ class Api:
         return True
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             want_corner=0):
+                             want_corner=0, at_x=None, at_y=None):
         """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
@@ -1029,6 +1047,18 @@ class Api:
             r = (ctypes.c_long * 4)()
             _user32.GetWindowRect(hwnd, ctypes.byref(r))
             x, y, w, h = r[0], r[1], r[2] - r[0], r[3] - r[1]
+            if at_x is not None and at_y is not None:
+                # Where the window is going, rather than where it is. A
+                # drag moves the window by asking Python to move it, so
+                # the page knows the new position before the window is
+                # there; capturing what it is about to be over takes a
+                # round trip of lag out of the glass, which is the
+                # difference between it following the window and trailing
+                # behind it.
+                try:
+                    x, y = int(at_x), int(at_y)
+                except Exception:
+                    pass
             if want_w and want_h:
                 want_w, want_h = max(1, int(want_w)), max(1, int(want_h))
                 # The page's own arithmetic - its viewport in CSS pixels
@@ -1258,6 +1288,52 @@ class Api:
         self._excluded_kinds = {k for k, v in excluded.items() if v}
         self._capture_excluded = wanted and ok
 
+    # ---- fading out while nobody is there --------------------------------
+
+    def wake(self):
+        """Called by the page when someone touches the widget."""
+        if self._dimmed:
+            self._dimmed = False
+            self._push_dim()
+        return True
+
+    def _push_dim(self):
+        if not self._window:
+            return
+        try:
+            self._window.evaluate_js(
+                "window.__setDimmed && window.__setDimmed(%s)"
+                % ("true" if self._dimmed else "false")
+            )
+        except Exception:
+            pass
+
+    def _watch_for_idle(self):
+        """Fade the widget down when the machine goes quiet, and back up
+        the moment anything happens.
+
+        Polled once a second rather than hooked: GetLastInputInfo is a
+        counter, there is no event for "nothing has happened", and a
+        second either way does not matter for something measured in
+        minutes.
+        """
+        def loop():
+            while not self._dim_stop.wait(1.0):
+                try:
+                    if not self._cfg.get("dim_when_idle", True):
+                        wanted = False
+                    else:
+                        after = max(10, int(self._cfg.get("dim_after_sec", 120)))
+                        wanted = (_idle_seconds() >= after
+                                  or _fullscreen_app_present(self._own_hwnds()))
+                    if wanted != self._dimmed:
+                        self._dimmed = wanted
+                        self._push_dim()
+                except Exception:
+                    pass
+
+        threading.Thread(target=loop, daemon=True).start()
+
     def _push_prefs(self):
         """Send the current preferences to the popover window's page.
 
@@ -1282,6 +1358,8 @@ class Api:
             "opacity": self._cfg.get("opacity", 100),
             "fast_glass": bool(self._cfg.get("fast_glass", True)),
             "sample_fps": int(self._cfg.get("sample_fps", 16)),
+            "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
+            "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
         script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
@@ -1550,6 +1628,9 @@ _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
 _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.GetAncestor.restype = ctypes.c_void_p
 _user32.GetForegroundWindow.restype = ctypes.c_void_p
+_user32.GetLastInputInfo.argtypes = [ctypes.c_void_p]
+_kernel32 = ctypes.WinDLL("kernel32")
+_kernel32.GetTickCount.restype = ctypes.c_uint32
 _user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
@@ -2040,6 +2121,65 @@ _user32.WindowFromPoint.restype = ctypes.c_void_p
 
 
 GA_ROOT = 2
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint32), ("dwTime", ctypes.c_uint32)]
+
+
+def _idle_seconds():
+    """How long since the last keyboard or mouse input, anywhere.
+
+    Deliberately the whole machine's idle time rather than this window's:
+    the widget is furniture, and "nobody is here" is the question, not
+    "nobody has touched the widget".
+    """
+    try:
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not _user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        # Both halves are 32-bit and wrap together every 49 days; the
+        # subtraction is done in that width so a wrap cancels out.
+        return ((_kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+    except Exception:
+        return 0.0
+
+
+_SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
+
+
+def _fullscreen_app_present(ours=()):
+    """True when the foreground window covers its whole monitor.
+
+    Games and video players, in other words - the moments when a widget
+    on the desktop is both invisible and unwanted.
+    """
+    try:
+        fg = _user32.GetForegroundWindow()
+        if not fg:
+            return False
+        root = _user32.GetAncestor(fg, GA_ROOT) or fg
+        if root in ours:
+            return False
+        buf = ctypes.create_unicode_buffer(64)
+        _user32.GetClassNameW(root, buf, 64)
+        if buf.value in _SHELL_CLASSES:
+            return False
+        r = (ctypes.c_long * 4)()
+        if not _user32.GetWindowRect(root, ctypes.byref(r)):
+            return False
+        mon = _user32.MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST)
+        if not mon:
+            return False
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return False
+        m = info.rcMonitor
+        return (r[0] <= m[0] and r[1] <= m[1] and r[2] >= m[2] and r[3] >= m[3])
+    except Exception:
+        return False
 
 
 def _nothing_visible_of(hwnd, ours):
@@ -2661,6 +2801,8 @@ def main():
 
     def quit_action(icon=None, item=None):
         api._quit()
+
+    api._watch_for_idle()
 
     tray_icon = build_tray_icon(activate, toggle_visibility, open_settings,
                                 toggle_theme, refresh_now, quit_action)

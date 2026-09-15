@@ -61,6 +61,13 @@ DEFAULT_CONFIG = {
     # app.js). Higher tracks an animated wallpaper more closely and costs
     # proportionally more.
     "sample_fps": 16,
+    # Fade the widget back into the desktop when nobody has touched the
+    # machine for a while, or while something is running full screen, and
+    # bring it back on the first click. It is a gadget that lives on the
+    # desktop all day; there is no reason for it to be at full strength
+    # while nobody is there.
+    "dim_when_idle": True,
+    "dim_after_sec": 120,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,

@@ -133,6 +133,16 @@
           <span>鎖定位置 (無法拖曳移動)</span>
         </label>
         <label class="check-row">
+          <input id="dim-idle-check" type="checkbox">
+          <span>閒置時淡化 (全螢幕時也淡化，點一下恢復)</span>
+        </label>
+        <div class="slider-block" id="dim-after-block">
+          <div class="slider-label">
+            <span>閒置多久後淡化</span><span id="dim-after-value">2 分鐘</span>
+          </div>
+          <input id="dim-after-range" type="range" min="10" max="600" step="10">
+        </div>
+        <label class="check-row">
           <input id="fast-glass-check" type="checkbox">
           <span>流暢毛玻璃 (widget 不會出現在截圖／錄影)</span>
         </label>
