@@ -555,14 +555,18 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
   const glass = document.getElementById('backdrop-glass');
   if (!cv || !ctx) return;
   if (cv.width !== w || cv.height !== h) {
-    // Resizing clears the bitmap to black; the fill and the draw below
-    // happen in this same task, so that black is never painted.
+    // Kept in step with the capture even though nothing is drawn on it:
+    // cardGeometry measures against this canvas to decide whether the
+    // card covers the window.
     cv.width = w;
     cv.height = h;
   } else if (sys) {
     ctx.clearRect(0, 0, w, h);
   }
-  if (corner) {
+  if (!sharp) {
+    // The window is transparent where the page paints nothing, which is
+    // exactly the four corners.
+  } else if (corner) {
     // The sharp copy arrived as the four corner wedges packed into one
     // square (see get_desktop_backdrop); put each back where it came
     // from. Everything between them is about to be covered by the card.
@@ -642,29 +646,22 @@ function refreshBackdrop() {
   // and everything it uncovers on the way is canvas nobody has painted
   // since the last full frame. That stale middle showing through the
   // animation is what the panel looked like it was warping through.
+  // Nothing sharp is wanted from Python at all any more, and this is the
+  // whole point of the Qt window: outside the card's rounded corners the
+  // window is genuinely transparent, so those corners *are* the desktop.
+  // They used to be a copy of it, painted from a capture a frame or two
+  // old, sitting against the live desktop just beyond the window's edge -
+  // which is what tore whenever anything behind it moved. There is
+  // nothing to tear now, because there is nothing painted there.
   const card = cardGeometry();
-  // Only the wedges outside the card's corners are ever seen sharp, so
-  // that is all that has to come back at full size - as long as the card
-  // really does cover the window. The tray panel is the exception *while
-  // it is animating*: its card scales out of the corner and back into it,
-  // and everything it uncovers on the way is canvas nobody has painted
-  // since the last full frame. That stale middle showing through the
-  // animation is what the panel looked like it was warping through. Once
-  // the animation has finished the card covers the window like any other,
-  // and the corners are enough again - which is what makes one frame per
-  // vsync affordable, since the whole frame was ~250KB of JPEG and the
-  // corners are a twentieth of that.
-  const animating = !!(document.getElementById('view-grid').getAnimations
-    && document.getElementById('view-grid').getAnimations().length);
-  const cornersAreEnough = !IS_FLYOUT_WINDOW || systemGlass() || !animating;
-  const corner = (card && card.fills && cornersAreEnough) ? Math.ceil(card.radius) : 0;
-  const wantBlur = !corner || (startedAt - lastBlurAt) >= BLUR_EVERY_MS;
-  if (wantBlur) lastBlurAt = startedAt;
+  const corner = 0;
+  // The frosted copy is now the only thing a frame carries, so every
+  // frame carries it.
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
                           backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null,
-                          wantBlur)
+                          true, false)
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a
@@ -683,15 +680,13 @@ function refreshBackdrop() {
       if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
       backdropStill = 0;
       backdropHash = shot.hash;
-      if (!shot.url) { backdropPending = false; return; }
-      // Both frames are decoded before either is drawn, so the sharp
-      // desktop and the frosted card can never be a frame apart.
+      if (!shot.url && !shot.blur_url) { backdropPending = false; return; }
       return Promise.all([
-        decodeShot(shot.url),
+        shot.url ? decodeShot(shot.url) : null,
         shot.blur_url ? decodeShot(shot.blur_url) : null,
       ]).then(([sharp, blurred]) => {
         paintBackdrop(sharp, blurred, shot.w, shot.h, shot.corner || 0);
-        sharp.close();
+        if (sharp) sharp.close();
         if (blurred) blurred.close();
         backdropPending = false;
       }, () => { backdropPending = false; });
@@ -730,13 +725,20 @@ function restartBackdropTicker() {
   startBackdropTicker();
 }
 
-// The open panel's pacing: one look per compositor frame, which is the
-// screen's own rate, whatever that is. Nothing else here needs it - the
-// widget is over a wallpaper, and a wallpaper does not scroll - and
-// nothing else would survive it either, since this gives up both the
-// rate ceiling and the backing-off that keeps a still desktop free.
+// Reading the screen once per compositor frame was for the panel's sharp
+// corners: they sat against the live desktop along the window's edge, so
+// anything stale there showed as a seam, and only the screen's own rate
+// kept up. The corners are not painted at all now - the window is
+// transparent there and they *are* the desktop - and what is left to
+// capture is the frosted copy under the card, which is blurred past the
+// point where a frame or two of age can be seen.
+//
+// So it goes back to the ordinary pacing, and that is not only cheaper:
+// the capture and Qt's own compositing share a process here, and a look
+// that costs 12ms of it, sixty times a second, is 12ms the panel's
+// animation does not get.
 function backdropTicksOnVsync() {
-  return IS_FLYOUT_WINDOW && flyoutOpen;
+  return false;
 }
 
 function startBackdropTicker() {
@@ -747,7 +749,8 @@ function startBackdropTicker() {
   // frame that costs more than the screen's interval simply lands on the
   // frame after next.
   const again = () => {
-    (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
+    const idle = document.hidden || flyoutAnimating;
+    (idle ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
   };
   const tick = () => {
     if (backdropTicksOnVsync() && !backdropSkipMs) {
@@ -758,10 +761,10 @@ function startBackdropTicker() {
       });
       return;
     }
-    const wait = backdropSkipMs
+    const wait = flyoutAnimating ? 40 : (backdropSkipMs
       || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
         ? BACKDROP_IDLE_MS
-        : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY)));
+        : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY))));
     backdropRaf = null;
     backdropTimer = setTimeout(again, wait);
   };
@@ -1159,9 +1162,24 @@ window.__armBackdrop = function () {
 // itself reads as the glass lagging the page. It is only ever open for a
 // few seconds at a time, which is what makes that affordable.
 let flyoutOpen = false;
+let flyoutAnimating = false;
 
 window.__flyoutEnter = function () {
   flyoutOpen = true;
+  // Nothing is read from the screen while the card is scaling in. The
+  // backdrop for this frame was taken before the window was on screen
+  // (see _arm_backdrop), so there is nothing to gain from another one
+  // mid-animation - and a great deal to lose, since the capture runs in
+  // the same process that is compositing the animation.
+  flyoutAnimating = true;
+  const view = document.getElementById('view-grid');
+  const settled = () => {
+    if (!flyoutAnimating) return;
+    flyoutAnimating = false;
+    restartBackdropTicker();
+  };
+  if (view) view.addEventListener('animationend', settled, { once: true });
+  setTimeout(settled, 500);       // in case the animation never reports
   restartBackdropTicker();
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter', 'flyout-leave');
@@ -1174,6 +1192,7 @@ window.__flyoutEnter = function () {
 // animation before it actually hides the window (see hide_flyout).
 window.__flyoutLeave = function () {
   flyoutOpen = false;
+  flyoutAnimating = true;         // and nothing while it scales back out
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter');
     void el.offsetWidth;

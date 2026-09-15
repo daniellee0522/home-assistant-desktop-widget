@@ -80,15 +80,13 @@ if sys.platform == "win32":
 #                            of working set to do it, and measured, the
 #                            software path is also *cheaper* on CPU here
 #                            (17% of a core against 19%).
-_BROWSER_ARGS = (
-    "--process-per-site "
-    "--disable-gpu"
-)
-os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
-    os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "") + " " + _BROWSER_ARGS
-).strip()
+# Chromium's flags reach QtWebEngine through its own variable. Software
+# rendering for the same reason as before: measured, the GPU path costs
+# more CPU here than it saves and ~300MB of working set, and there is
+# nothing in this page a GPU is needed for.
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
-import webview
+import qtshell as webview
 
 import config as cfgmod
 from ha_client import HAClient
@@ -997,7 +995,8 @@ class Api:
         return True
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             want_corner=0, at_x=None, at_y=None, want_blur=True):
+                             want_corner=0, at_x=None, at_y=None, want_blur=True,
+                             want_sharp=True):
         """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
@@ -1191,15 +1190,18 @@ class Api:
                 atlas.paste(img.crop((w - corner, h - corner, w, h)), (corner, corner))
                 img = atlas
 
-            buf = io.BytesIO()
-            # JPEG, not PNG: this is a photo-like backdrop that is about to
-            # be blurred, and encoding it costs ~0.4ms against PNG's ~4.6ms
-            # - the difference between tracking a moving wallpaper and not.
-            # Quality is high enough that the unblurred margin around the
-            # card still matches the desktop pixel for pixel by eye.
-            img.save(buf, format="JPEG", quality=88, subsampling=0)
+            sharp_buf = None
+            if want_sharp:
+                sharp_buf = io.BytesIO()
+                # JPEG, not PNG: this is a photo-like backdrop that is
+                # about to be blurred, and encoding it costs ~0.4ms
+                # against PNG's ~4.6ms - the difference between tracking a
+                # moving wallpaper and not.
+                img.save(sharp_buf, format="JPEG", quality=88, subsampling=0)
             return {
-                "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
+                "url": ("data:image/jpeg;base64,"
+                        + base64.b64encode(sharp_buf.getvalue()).decode("ascii")
+                        ) if sharp_buf else None,
                 "blur_url": ("data:image/jpeg;base64,"
                              + base64.b64encode(blur_buf.getvalue()).decode("ascii")
                              ) if blur_buf else None,
@@ -1379,6 +1381,22 @@ class Api:
             if win:
                 _set_capture_exclusion(win, not on)
         return True
+
+    def debug_eval(self, kind, script):
+        """Run a script in one of the windows and hand back what it says.
+
+        For this project's own testing only, and only when HA_WIDGET_DEBUG
+        is set. It exists because QtWebEngine's devtools endpoint is not
+        dependable here - it refuses connections at random - and measuring
+        the page from outside is how everything in this program has been
+        decided.
+        """
+        if not os.environ.get("HA_WIDGET_DEBUG"):
+            return None
+        win = self._window_for(kind)
+        if not win:
+            return None
+        return win.evaluate_js_result(script)
 
     # ---- fading out while nobody is there --------------------------------
 
@@ -2109,38 +2127,23 @@ _desktop_capture = _DesktopCapture()
 
 def _get_hwnd(window):
     try:
-        # ToInt64, not ToInt32: an HWND is pointer-sized, and ToInt32
-        # raises OverflowException on any handle above 2^31.
-        return window.native.Handle.ToInt64()
+        return window.hwnd()
     except Exception:
         return None
 
 
 def _run_on_ui_thread(window, fn):
-    """Run fn (no-arg callable) on the WinForms UI thread that owns this
-    window's HWND, blocking until it completes. Every js_api call arrives
-    on its own throwaway Python thread (see webview.util.js_bridge_call),
-    so any code that touches the HWND directly - SetWindowPos,
-    SetWindowLongW - must be marshaled over like this or it races WinForms'
-    own UI-thread-driven layout/paint pipeline for the docked WebView2
-    control. This mirrors the InvokeRequired/Invoke pattern pywebview uses
-    internally for its own native calls (see platforms/winforms.py).
+    """Run fn (no-arg callable) on the thread that owns this window.
+
+    Every API call arrives on its own request thread (see _Handler in
+    qtshell.py), so anything that touches a window directly -
+    SetWindowPos, SetWindowLongW - has to be marshalled over or it races
+    the GUI thread's own layout and paint.
     """
-    native = getattr(window, "native", None)
-    if native is None:
-        fn()
-        return
     try:
-        if native.InvokeRequired:
-            from System import Func, Type
-            native.Invoke(Func[Type](fn))
-        else:
-            fn()
+        return window.run_on_ui_thread(fn)
     except Exception:
-        try:
-            fn()
-        except Exception:
-            pass
+        return fn()
 
 
 def _set_window_rect(hwnd, x, y, w, h):
@@ -2610,6 +2613,19 @@ def _apply_window_shape(window):
                 )
             except Exception:
                 pass
+            # And no border either. Windows 11 draws its standard hairline
+            # around a window while that window is active - which the
+            # widget never is, but the tray panel and Settings both are,
+            # so a pale rectangle appeared around their rounded cards and
+            # sometimes outlasted them on screen. Every outline here is
+            # the page's.
+            try:
+                border = ctypes.c_uint(DWMWA_COLOR_NONE)
+                _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border),
+                )
+            except Exception:
+                pass
 
     _run_on_ui_thread(window, _apply)
 
@@ -2632,44 +2648,13 @@ def _set_noactivate(window, enable):
 
 
 def _hide_from_taskbar(window):
-    """Keep this window out of the taskbar and Alt+Tab.
-
-    Two flags, not one. Setting WS_EX_TOOLWINDOW alone was not enough:
-    WinForms puts WS_EX_APPWINDOW on any form whose ShowInTaskbar is true
-    (the default), and APPWINDOW *overrides* TOOLWINDOW - the widget kept
-    its taskbar button the whole time. Clearing it is the other half.
-
-    Neither flag is set through WinForms' own ShowInTaskbar property:
-    changing that after the handle exists makes WinForms recreate the
-    handle, the same hazard that made AllowTransparency briefly lose the
-    window entirely during testing.
-
-    The shell only re-reads these flags when a window is shown, so a
-    window that is already visible has to be hidden and shown again for
-    the button to actually go away. SW_SHOWNA re-shows it without
-    activating it, which matters for a widget that must never steal focus.
+    """Nothing to do: these windows are created as tool windows (see
+    qtshell.py), which is what keeps them off the taskbar and out of
+    Alt-Tab. The old build had to rewrite the extended styles after the
+    window existed and hide and re-show it to make them take, which is
+    also what kept undoing everything else set on the window.
     """
-    hwnd = _get_hwnd(window)
-    if not hwnd:
-        return
-
-    def _apply():
-        with _hwnd_lock:
-            try:
-                style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                wanted = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-                if wanted == style:
-                    return
-                visible = bool(_user32.IsWindowVisible(hwnd))
-                if visible:
-                    _user32.ShowWindow(hwnd, SW_HIDE)
-                _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, wanted)
-                if visible:
-                    _user32.ShowWindow(hwnd, SW_SHOWNA)
-            except Exception:
-                pass
-
-    _run_on_ui_thread(window, _apply)
+    return
 
 
 def _send_to_bottom(window):
@@ -2840,6 +2825,10 @@ def main():
     _hide_own_console()
 
     api = Api()
+    # The application and the page's own origin, before any window exists:
+    # windows are loaded from that origin so the bridge is same-origin
+    # (see qtshell.py).
+    webview.prepare(WEB_DIR, api)
 
     # Only the *first* size, used for the moment between the window
     # appearing and the page's own first syncWindowSize measuring the real
@@ -2861,12 +2850,12 @@ def main():
         y=api._cfg.get("window_y", 200),
         frameless=True,
         easy_drag=False,
-        # Not transparent=True. It cannot make this window see-through
-        # (see the note above) - all it does is leave the form's
-        # background unset and hand WebView2 a transparent default, so any
-        # part of the window the page hasn't painted shows raw,
-        # never-initialised surface as black. An opaque background makes
-        # the worst case a frame of flat panel colour instead.
+        # The whole reason this build exists. A Qt window with this set
+        # is genuinely see-through: measured with the window hidden and
+        # shown and the two pictures subtracted, the area inside the
+        # window but outside the card's rounded corner differs by zero.
+        # Nothing is painted there - it *is* the desktop - so there is
+        # nothing to lag behind it.
         transparent=True,
         shadow=False,
         confirm_close=False,
@@ -2947,7 +2936,7 @@ def main():
     )
     api._bind_popover_window(popover_window)
 
-    def on_popover_deactivate(sender, args):
+    def on_popover_deactivate():
         # In the old shared-window design, the popover floated over a
         # visible backdrop that covered whatever of the window *wasn't*
         # the popover card - clicking that empty space closed it. Now
@@ -2987,7 +2976,7 @@ def main():
         # actually been created, which happens right before this event
         # fires - not yet at the point create_window() above returns.
         try:
-            popover_window.native.Deactivate += on_popover_deactivate
+            popover_window.events.deactivated += on_popover_deactivate
         except Exception:
             pass
 
@@ -3064,10 +3053,6 @@ def main():
         y=200,
         frameless=True,
         easy_drag=False,
-        # Transparent like the widget's own window, so DWM's backdrop has
-        # somewhere to show through when the glass is the system's (see
-        # _set_system_glass). The page paints every pixel in the other
-        # modes, so nothing here is left bare.
         transparent=True,
         shadow=False,
         confirm_close=False,
@@ -3076,7 +3061,7 @@ def main():
     )
     api._bind_flyout_window(flyout_window)
 
-    def on_flyout_deactivate(sender, args):
+    def on_flyout_deactivate():
         # Click anywhere else and it goes, the way every taskbar flyout
         # does. Deactivate fires synchronously on the UI thread inside
         # Windows' own WM_ACTIVATE handling, so the actual hiding is
@@ -3089,7 +3074,7 @@ def main():
         api._apply_capture_exclusion()
         _hide_from_taskbar(flyout_window)
         try:
-            flyout_window.native.Deactivate += on_flyout_deactivate
+            flyout_window.events.deactivated += on_flyout_deactivate
         except Exception:
             pass
 

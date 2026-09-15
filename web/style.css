@@ -243,9 +243,19 @@ html, body {
   height: 100%;
 }
 #backdrop {
-  /* The window is not translucent, so something has to be painted here
-     before the first capture arrives. */
-  background-color: var(--panel-solid);
+  /* Nothing is drawn on this any more - the window is translucent, so
+     the four corners are simply left alone and the desktop is what is
+     there. It stays in the document, and out of the way, because
+     cardGeometry measures the card against this canvas's bitmap to
+     decide whether the card covers the window.
+
+     display:none rather than a transparent background: the canvas is
+     created without an alpha channel (it used to hold an opaque copy of
+     the desktop), and a canvas with no alpha is *black* where nothing
+     has been drawn on it - which is what a translucent window then
+     showed, a black frame around the card where the desktop should have
+     been. */
+  display: none;
 }
 /* The frosted fill of the card, on its own layer above the sharp desktop
    rather than drawn into it. It belongs to the card, not to the window,
