@@ -1320,6 +1320,72 @@ function buildReadoutDetail(body, tile, state) {
   sub.textContent = tile.entity;
   wrap.appendChild(sub);
   body.appendChild(wrap);
+  if (state && !Number.isNaN(Number(state.state))) addHistoryChart(body, tile);
+}
+
+// --- history ---------------------------------------------------------------
+// A reading on its own says what it is now; the shape of the last day says
+// whether that is unusual. Home Assistant keeps the recording, so this is
+// a fetch and a path rather than anything this widget has to remember.
+const HISTORY_HOURS = 24;
+const CHART_W = 248;      // the detail card's body width, in its own px
+const CHART_H = 64;
+
+function addHistoryChart(body, tile) {
+  const block = document.createElement('div');
+  block.className = 'history-block';
+  const head = document.createElement('div');
+  head.className = 'history-head';
+  head.innerHTML = '<span>過去 ' + HISTORY_HOURS + ' 小時</span><span class="history-range"></span>';
+  block.appendChild(head);
+  const holder = document.createElement('div');
+  holder.className = 'history-chart';
+  holder.textContent = '載入中…';
+  block.appendChild(holder);
+  body.appendChild(block);
+  if (!(window.pywebview && window.pywebview.api)) return;
+  window.pywebview.api.get_history(tile.entity, HISTORY_HOURS).then((res) => {
+    if (!res || !res.ok || !res.points || res.points.length < 2) {
+      holder.textContent = '沒有紀錄';
+      return;
+    }
+    holder.innerHTML = historySvg(res.points);
+    const lo = Math.min.apply(null, res.points.map((p) => p[1]));
+    const hi = Math.max.apply(null, res.points.map((p) => p[1]));
+    head.querySelector('.history-range').textContent =
+      trimNumber(lo) + ' – ' + trimNumber(hi);
+    syncWindowSize();
+  }).catch(() => { holder.textContent = '讀不到紀錄'; });
+}
+
+function trimNumber(n) {
+  return String(Math.round(n * 10) / 10);
+}
+
+function historySvg(points) {
+  const t0 = points[0][0];
+  const t1 = points[points.length - 1][0] || (t0 + 1);
+  const span = Math.max(1, t1 - t0);
+  let lo = Math.min.apply(null, points.map((p) => p[1]));
+  let hi = Math.max.apply(null, points.map((p) => p[1]));
+  if (hi - lo < 0.5) {          // a flat line deserves to look flat
+    const mid = (hi + lo) / 2;
+    lo = mid - 0.5;
+    hi = mid + 0.5;
+  }
+  const pad = 3;
+  const x = (t) => ((t - t0) / span) * CHART_W;
+  const y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (CHART_H - pad * 2);
+  const line = points.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ' ' + y(p[1]).toFixed(1)).join(' ');
+  const area = line + ' L' + CHART_W + ' ' + CHART_H + ' L0 ' + CHART_H + ' Z';
+  const last = points[points.length - 1];
+  return '<svg viewBox="0 0 ' + CHART_W + ' ' + CHART_H + '" preserveAspectRatio="none" class="history-svg">'
+    + '<path class="history-area" d="' + area + '"/>'
+    + '<path class="history-line" d="' + line + '"/>'
+    + '</svg>'
+    + '<svg viewBox="0 0 ' + CHART_W + ' ' + CHART_H + '" class="history-dot-layer">'
+    + '<circle class="history-dot" cx="' + x(last[0]).toFixed(1) + '" cy="' + y(last[1]).toFixed(1) + '" r="2.5"/>'
+    + '</svg>';
 }
 
 const DETAIL_BUILDERS = {

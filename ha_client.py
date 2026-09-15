@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import websocket  # websocket-client
 
@@ -105,6 +106,31 @@ class HAClient:
 
     def get_state(self, entity_id, timeout=8):
         return self._request("/api/states/%s" % entity_id, timeout=timeout)
+
+    def get_history(self, entity_id, hours=24, timeout=15):
+        """Recorded states for one entity over the last `hours`.
+
+        minimal_response and no_attributes keep this to what a chart needs
+        - a state and a timestamp - rather than the full attribute set on
+        every sample, which for a sensor polled every few seconds is most
+        of the payload. significant_changes_only is deliberately *not*
+        set: for a temperature that only ever drifts, it throws away the
+        drift.
+        """
+        start = time.strftime(
+            "%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - hours * 3600)
+        ) + "+00:00"
+        path = (
+            "/api/history/period/%s?filter_entity_id=%s"
+            "&minimal_response&no_attributes&end_time=%s"
+            % (
+                urllib.parse.quote(start),
+                urllib.parse.quote(entity_id),
+                urllib.parse.quote(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "+00:00"),
+            )
+        )
+        series = self._request(path, timeout=timeout) or []
+        return series[0] if series else []
 
     def call_service(self, domain, service, entity_id=None, extra=None, timeout=8):
         data = dict(extra or {})

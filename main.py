@@ -36,6 +36,7 @@ pythonnet automatically to drive the EdgeWebView2 control.
 
 import base64
 import ctypes
+import datetime
 import io
 import json
 import math
@@ -409,6 +410,43 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def get_history(self, entity_id, hours=24):
+        """Recent recorded values for a sensor, thinned for drawing.
+
+        Returned as [[seconds since the epoch, value], ...] with the
+        non-numeric samples dropped - a sensor that goes `unavailable` for
+        a while should leave a gap in the line rather than a dive to zero.
+        """
+        try:
+            raw = self._client.get_history(entity_id, hours=hours)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        points = []
+        for row in raw or []:
+            try:
+                value = float(row.get("state"))
+            except (TypeError, ValueError):
+                continue        # unknown / unavailable / a text state
+            stamp = row.get("last_changed") or row.get("last_updated") or ""
+            try:
+                # "2026-09-15T01:02:03.456789+00:00"; the fraction and the
+                # zone are both optional in practice.
+                text = stamp.replace("Z", "+00:00")
+                when = datetime.datetime.fromisoformat(text).timestamp()
+            except Exception:
+                continue
+            points.append([when, value])
+        points.sort(key=lambda p: p[0])
+        # A day of a sensor that reports every few seconds is tens of
+        # thousands of points for a chart a couple of hundred pixels wide;
+        # keep one in every nth rather than sending all of them through
+        # the bridge to be thrown away by the renderer.
+        limit = 240
+        if len(points) > limit:
+            step = len(points) / float(limit)
+            points = [points[min(len(points) - 1, int(i * step))] for i in range(limit)]
+        return {"ok": True, "points": points, "hours": hours}
 
     def call_service(self, domain, service, entity_id, extra):
         try:
