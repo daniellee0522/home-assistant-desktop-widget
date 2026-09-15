@@ -153,6 +153,10 @@ let allEntities = [];
 // takes focus, Settings must, and Settings ignores the widget's zoom.
 const WINDOW_ROLE = (location.hash || '').replace('#', '') || 'grid';
 const IS_POPOVER_WINDOW = WINDOW_ROLE === 'popover';
+const IS_FLYOUT_WINDOW = WINDOW_ROLE === 'flyout';
+// What Python calls this window. Same page, four windows; every call that
+// has to act on "this one" carries it.
+const WINDOW_KIND = WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE;
 const IS_SETTINGS_WINDOW = WINDOW_ROLE === 'settings';
 
 function findTile(id) { return (CONFIG.tiles || []).find((t) => t.id === id); }
@@ -212,6 +216,11 @@ async function boot() {
   // Each window owns one of the views; the others stay hidden for the
   // life of that window. The markup for all of them is present in every
   // window because they all load the same page.
+  if (IS_FLYOUT_WINDOW) {
+    // Same grid as the desktop widget, in a window that behaves like a
+    // taskbar panel - see the flyout rules in style.css.
+    document.documentElement.classList.add('is-flyout-window');
+  }
   if (IS_POPOVER_WINDOW) {
     document.getElementById('view-grid').hidden = true;
     // Lets the card lay itself out in the flow here, so #stage takes the
@@ -331,6 +340,7 @@ function syncWindowSize() {
     const physW = Math.ceil(cssW * dpr), physH = Math.ceil(cssH * dpr);
     const resize = IS_POPOVER_WINDOW ? window.pywebview.api.resize_popover_window
       : IS_SETTINGS_WINDOW ? window.pywebview.api.resize_settings_window
+      : IS_FLYOUT_WINDOW ? window.pywebview.api.resize_flyout_window
       : window.pywebview.api.resize_window;
     const done = resize(physW, physH, resizeSeq);
     // The backdrop is captured at the window's size, so it is wrong the
@@ -489,7 +499,7 @@ function refreshBackdrop() {
   const card = cardGeometry();
   const corner = (card && card.fills) ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
-    .get_desktop_backdrop(WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE, backdropHash,
+    .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner)
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
@@ -574,7 +584,9 @@ function startBackdropTicker() {
 const DRAG_THRESHOLD_PX = 5;
 
 function installWindowDrag() {
-  if (IS_POPOVER_WINDOW) return;   // the popover is placed by its tile, never dragged
+  // The popover is placed by its tile and the flyout by the tray icon;
+  // neither is ever dragged.
+  if (IS_POPOVER_WINDOW || IS_FLYOUT_WINDOW) return;
   const kind = IS_SETTINGS_WINDOW ? 'settings' : 'main';
   let start = null;
 
@@ -830,7 +842,7 @@ function requestPopover(tile) {
   if (!tileNode || !(window.pywebview && window.pywebview.api)) return;
   const dpr = window.devicePixelRatio || 1;
   const r = tileNode.getBoundingClientRect();
-  window.pywebview.api.get_window_pos().then((pos) => {
+  window.pywebview.api.get_window_pos(WINDOW_KIND).then((pos) => {
     const screenX = Math.round((pos && pos.x || 0) + r.left * dpr);
     const screenY = Math.round((pos && pos.y || 0) + r.top * dpr);
     // The tile's size goes along too: near a screen edge the popover
@@ -841,6 +853,17 @@ function requestPopover(tile) {
     );
   }).catch(() => {});
 }
+
+// Pushed from Python each time the tray flyout is shown, to replay its
+// entrance. Restarting a CSS animation needs the class off, a layout read
+// to make that land, and the class back on.
+window.__flyoutEnter = function () {
+  const view = document.getElementById('view-grid');
+  if (!view) return;
+  view.classList.remove('flyout-enter');
+  void view.offsetWidth;
+  view.classList.add('flyout-enter');
+};
 
 // Pushed from Python (see Api.open_popover in main.py) once the popover
 // window has been moved into position for a given tile.

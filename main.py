@@ -131,6 +131,9 @@ class Api:
         self._last_resize_seq = -1
         self._pin_enabled = threading.Event()
         self._pin_enabled.set()
+        # Whether the widget is currently sitting on the desktop. The
+        # tray flyout is a window of its own and tracks itself.
+        self._desktop_visible = True
 
         # The detail popover lives in its own separate OS window (see the
         # IS_POPOVER_WINDOW comment in app.js for why) - it shares this
@@ -145,6 +148,26 @@ class Api:
         # window is deliberately left capturable, because it is part of
         # what is behind them and so part of their frosted backdrop.
         self._overlays_open = set()
+
+        # The tray flyout: a fourth window showing the same tile grid,
+        # which comes up beside the clock when the tray icon is clicked
+        # and goes away again when it loses focus - the way the volume and
+        # network panels behave. Separate from the desktop widget so that
+        # summoning it neither moves nor disturbs the one the user has
+        # placed.
+        self._flyout_window = None
+        self._flyout_resize_lock = threading.Lock()
+        self._flyout_last_resize_seq = -1
+        self._flyout_open = False
+        # The work area it was summoned into, and which side of it the
+        # notification area is on. Fixed when it opens rather than read
+        # per resize: the pointer is over the tray at the moment of the
+        # click and somewhere else entirely a second later.
+        self._flyout_anchor = None
+        # When it was last put on screen. Windows shuffles activation
+        # around while a window is being shown, and the Deactivate that
+        # comes out of that churn is not the user clicking away.
+        self._flyout_shown_at = 0.0
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
@@ -181,10 +204,14 @@ class Api:
     def _bind_settings_window(self, window):
         self._settings_window = window
 
+    def _bind_flyout_window(self, window):
+        self._flyout_window = window
+
     def _window_for(self, kind):
         return {
             "popover": self._popover_window,
             "settings": self._settings_window,
+            "flyout": self._flyout_window,
         }.get(kind, self._window)
 
     # ---------------------------------------------------------------
@@ -402,6 +429,16 @@ class Api:
             origin=self._popover_origin,
         )
 
+    def resize_flyout_window(self, phys_w, phys_h, seq=None):
+        # The flyout is anchored to a screen corner rather than to a
+        # top-left position, so growing it has to move it as well - hence
+        # its own origin function, exactly as the detail popover has.
+        self._resize_native(
+            self._flyout_window, self._flyout_resize_lock, "_flyout_last_resize_seq",
+            phys_w, phys_h, seq, "resize_flyout_window",
+            origin=self._flyout_origin,
+        )
+
     def resize_settings_window(self, phys_w, phys_h, seq=None):
         # Same as the grid window's path above, with its own sequence
         # counter - Settings resizes as its sections expand, on a schedule
@@ -468,6 +505,147 @@ class Api:
                 self._pin_enabled.set()
                 _send_to_bottom(self._window)
         return True
+
+    # ---- tray flyout ----------------------------------------------------
+
+    _FLYOUT_MARGIN = 12         # what Windows leaves around its own flyouts
+
+    def toggle_flyout(self):
+        if self._flyout_open:
+            self.hide_flyout()
+        else:
+            self.show_flyout()
+
+    def show_flyout(self):
+        window = self._flyout_window
+        hwnd = _get_hwnd(window) if window else None
+        if not hwnd:
+            return
+        self._flyout_open = True
+        self._flyout_anchor = self._tray_corner()
+        r = (ctypes.c_long * 4)()
+        _user32.GetWindowRect(hwnd, ctypes.byref(r))
+        at = self._flyout_origin(r[2] - r[0], r[3] - r[1])
+        if at:
+            _run_on_ui_thread(window, lambda: _set_window_pos(hwnd, at[0], at[1]))
+        # Registered as an overlay for the same reason the popover is: it
+        # sits over whatever is on screen, so the widget below has to stay
+        # capturable to appear in its frosted backdrop.
+        self._overlays_open.add("flyout")
+        self._apply_capture_exclusion()
+        self._flyout_shown_at = time.monotonic()
+        try:
+            window.show()
+        except Exception:
+            pass
+        _bring_to_front(window)
+        self._flyout_shown_at = time.monotonic()
+        self._watch_flyout_focus()
+        try:
+            window.evaluate_js("window.__flyoutEnter && window.__flyoutEnter()")
+        except Exception:
+            pass
+
+    def dismiss_flyout(self):
+        """Close it because attention moved elsewhere - as opposed to
+        hide_flyout, which closes it because something asked.
+
+        Two things do not count as moving away. One is the moment right
+        after it was shown: putting a window on screen and handing it the
+        foreground is several activation changes, and one of them reads as
+        a deactivation from the window's own point of view. The other is
+        focus going to one of this app's own windows - opening an
+        accessory's detail card from inside the panel is not leaving it,
+        and without this the card's own activation closed the panel out
+        from under itself.
+        """
+        if time.monotonic() - self._flyout_shown_at < 0.5:
+            return
+        # The activation change is still in flight when Deactivate fires;
+        # let it land before asking who has the foreground now.
+        time.sleep(0.12)
+        try:
+            fg = _user32.GetForegroundWindow()
+            root = _user32.GetAncestor(fg, GA_ROOT) if fg else None
+            if root and root in self._own_hwnds():
+                return
+        except Exception:
+            pass
+        self.hide_flyout()
+
+    def hide_flyout(self):
+        if not self._flyout_open:
+            return
+        self._flyout_open = False
+        self.close_popover()
+        if self._flyout_window:
+            try:
+                self._flyout_window.hide()
+            except Exception:
+                pass
+        self._overlays_open.discard("flyout")
+        self._apply_capture_exclusion()
+
+    def _watch_flyout_focus(self):
+        """Backstop for the Deactivate handler in main().
+
+        That handler is the real mechanism and fires the moment focus
+        moves away - but it can only fire if the window was focused in the
+        first place, and SetForegroundWindow is refused outright when
+        another process owns the foreground. A tray click makes this
+        process the foreground so it normally succeeds; when it does not,
+        the panel would otherwise sit there for good. Polled four times a
+        second, only while it is open, and only until it closes.
+        """
+        def watch():
+            time.sleep(0.8)          # activation is not instant
+            misses = 0
+            while self._flyout_open:
+                fg = _user32.GetForegroundWindow()
+                root = _user32.GetAncestor(fg, GA_ROOT) if fg else None
+                if root and root in self._own_hwnds():
+                    misses = 0
+                else:
+                    misses += 1
+                    if misses >= 2:
+                        self.hide_flyout()
+                        return
+                time.sleep(0.25)
+
+        threading.Thread(target=watch, daemon=True).start()
+
+    def _tray_corner(self):
+        """Which work area the tray icon was just clicked in, and which
+        side of it the notification area sits on.
+
+        Read from the pointer, which is over that icon at the moment of
+        the click - so this lands on the monitor that was clicked, and on
+        a taskbar that has been moved to the left of the screen the panel
+        comes up on the left as Windows' own do."""
+        try:
+            pt = _POINT(0, 0)
+            _user32.GetCursorPos(ctypes.byref(pt))
+            work = _work_area_at(pt.x, pt.y)
+            if not work:
+                return None
+            return (work, pt.x - work[0] > (work[2] - work[0]) / 2)
+        except Exception:
+            return None
+
+    def _flyout_origin(self, w, h):
+        """Where the panel goes: tucked into the corner of the work area,
+        which already excludes the taskbar, so it sits beside it rather
+        than over it."""
+        anchor = self._flyout_anchor
+        if not anchor or w <= 0 or h <= 0:
+            return None
+        work, near_right = anchor
+        m = self._FLYOUT_MARGIN
+        x = work[2] - w - m if near_right else work[0] + m
+        return (
+            max(work[0] + m, min(x, work[2] - w - m)),
+            max(work[1] + m, work[3] - h - m),
+        )
 
     def _popover_origin(self, w, h):
         """Where a w*h popover goes for the tile that opened it, or None if
@@ -775,7 +953,8 @@ class Api:
 
     def _own_hwnds(self):
         out = set()
-        for win in (self._window, self._popover_window, self._settings_window):
+        for win in (self._window, self._popover_window, self._settings_window,
+                    self._flyout_window):
             if win:
                 h = _get_hwnd(win)
                 if h:
@@ -835,7 +1014,7 @@ class Api:
             ok = _set_capture_exclusion(self._window, wanted and not self._overlays_open)
             if self._overlays_open:
                 ok = True          # the mode is still on, just suspended here
-        for win in (self._popover_window, self._settings_window):
+        for win in (self._popover_window, self._settings_window, self._flyout_window):
             if win:
                 _set_capture_exclusion(win, wanted)
         self._capture_excluded = wanted and ok
@@ -1126,6 +1305,8 @@ _user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
 _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.GetAncestor.restype = ctypes.c_void_p
+_user32.GetForegroundWindow.restype = ctypes.c_void_p
+_user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
@@ -1955,13 +2136,12 @@ def main():
 
     window.events.shown += on_shown
 
-    visible = {"v": True}
-
     def on_closing():
+        api.hide_flyout()
         window.hide()
         popover_window.hide()
         settings_window.hide()
-        visible["v"] = False
+        api._desktop_visible = False
         return False  # cancel the actual close; keep running in the tray
 
     window.events.closing += on_closing
@@ -2092,19 +2272,73 @@ def main():
 
     settings_window.events.closing += on_settings_closing
 
+    # The tray flyout: a fourth window on the same page, showing the same
+    # tile grid as the desktop widget. It is focusable - it has to be, so
+    # that losing focus is what dismisses it - and it starts hidden, like
+    # the other two.
+    flyout_window = webview.create_window(
+        "HA Widgets Panel",
+        url=os.path.join(WEB_DIR, "index.html") + "#flyout",
+        js_api=api,
+        width=init_w,
+        height=init_h,
+        x=200,
+        y=200,
+        frameless=True,
+        easy_drag=False,
+        transparent=False,
+        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        shadow=False,
+        confirm_close=False,
+        hidden=True,
+        min_size=(0, 0),
+    )
+    api._bind_flyout_window(flyout_window)
+
+    def on_flyout_deactivate(sender, args):
+        # Click anywhere else and it goes, the way every taskbar flyout
+        # does. Deactivate fires synchronously on the UI thread inside
+        # Windows' own WM_ACTIVATE handling, so the actual hiding is
+        # dispatched off it - see on_popover_deactivate for the deadlock
+        # that calling into the webview from here causes.
+        threading.Thread(target=api.dismiss_flyout, daemon=True).start()
+
+    def on_flyout_shown():
+        _apply_window_shape(flyout_window)
+        api._apply_capture_exclusion()
+        _hide_from_taskbar(flyout_window)
+        try:
+            flyout_window.native.Deactivate += on_flyout_deactivate
+        except Exception:
+            pass
+
+    flyout_window.events.shown += on_flyout_shown
+    flyout_window.events.loaded += lambda: flyout_window.hide()
+
+    def on_flyout_closing():
+        flyout_window.hide()
+        return False        # reused, never destroyed - as with the others
+
+    flyout_window.events.closing += on_flyout_closing
+
     def toggle_visibility(icon=None, item=None):
-        if visible["v"]:
+        api.hide_flyout()
+        if api._desktop_visible:
             window.hide()
             popover_window.hide()
             settings_window.hide()
         else:
             window.show()
-        visible["v"] = not visible["v"]
+        api._desktop_visible = not api._desktop_visible
+
+    def activate(icon=None, item=None):
+        # The left click. Runs on pystray's own thread.
+        api.toggle_flyout()
 
     def open_settings(icon=None, item=None):
-        if not visible["v"]:
+        if not api._desktop_visible:
             window.show()
-            visible["v"] = True
+            api._desktop_visible = True
         api.open_settings_window()
 
     def toggle_theme(icon=None, item=None):
@@ -2125,7 +2359,8 @@ def main():
     def quit_action(icon=None, item=None):
         api._quit()
 
-    tray_icon = build_tray_icon(toggle_visibility, open_settings, toggle_theme, refresh_now, quit_action)
+    tray_icon = build_tray_icon(activate, toggle_visibility, open_settings,
+                                toggle_theme, refresh_now, quit_action)
     api._tray_icon = tray_icon
     tray_icon.run_detached()
 
