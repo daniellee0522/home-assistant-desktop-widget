@@ -1078,43 +1078,41 @@ input[type="range"]::-webkit-slider-thumb {
    is anchored to and fades back into it, which is how Windows' own panels
    come and go.
 
-   #stage is padded so the window is a little larger than the card: the
-   animation moves and overshoots past the card's resting size, and
-   without room to do that in it would be clipped against the window edge.
-   The ring that padding leaves is painted with the desktop behind the
-   window, like every other part of the window the card does not cover, so
-   there is nothing to see there.
+   Nothing in the animation ever grows past the card's resting size, and
+   that is a constraint rather than a preference: the window is exactly
+   the card, so anything larger is clipped against its edge - and a window
+   the card does not quite fill gives up the trick where only the four
+   corner wedges of the backdrop have to be captured sharp, which is most
+   of what keeps the sampling smooth. It grows *into* its resting size
+   instead, out of the corner it is anchored to.
 
    The animation is on #view-grid rather than on #stage because the window
    is sized from #stage's measured box (syncWindowSize), and a transform
    would be included in that measurement - the window would shrink to fit
    the animation's first frame. A transform on a child changes nothing
    about its parent's layout. */
-.is-flyout-window #stage {
-  padding: 10px;
-}
 .is-flyout-window #view-grid {
   transform-origin: 100% 100%;
   opacity: 0;                     /* until it is asked to come in */
 }
 
 @keyframes flyout-enter {
-  from { opacity: 0; transform: scale(0.88) translateY(10px); }
-  60%  { opacity: 1; }
+  from { opacity: 0; transform: scale(0.86); }
+  55%  { opacity: 1; }
   to   { opacity: 1; transform: none; }
 }
 @keyframes flyout-leave {
   from { opacity: 1; transform: none; }
-  to   { opacity: 0; transform: scale(0.94) translateY(6px); }
+  to   { opacity: 0; transform: scale(0.92); }
 }
 .is-flyout-window #view-grid.flyout-enter {
-  /* Overshoots a little on the way out of the corner - that slight
-     spring is what makes it read as popping up rather than being
-     switched on. */
-  animation: flyout-enter 260ms cubic-bezier(0.22, 1.35, 0.4, 1) forwards;
+  /* Most of the distance is covered in the first third, then it eases
+     into place - which is what reads as popping up rather than being
+     switched on, without ever going past full size. */
+  animation: flyout-enter 220ms cubic-bezier(0.12, 0.9, 0.2, 1) forwards;
 }
 .is-flyout-window #view-grid.flyout-leave {
-  /* Shorter and without the spring: things should leave faster than they
-     arrive, and nothing springs on its way out. */
-  animation: flyout-leave 140ms cubic-bezier(0.4, 0, 0.8, 0.4) forwards;
+  /* Shorter than it arrives in, and accelerating rather than easing:
+     things leave faster than they come. */
+  animation: flyout-leave 130ms cubic-bezier(0.5, 0, 0.9, 0.35) forwards;
 }

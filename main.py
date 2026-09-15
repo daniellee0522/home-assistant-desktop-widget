@@ -894,9 +894,12 @@ class Api:
                 below = []
                 for kind in ("main", "flyout"):
                     win = self._window_for(kind)
-                    h = _get_hwnd(win) if win else None
-                    if h and _user32.IsWindowVisible(h):
-                        below.append(h)
+                    # Not `h`: that is this capture's height, and naming
+                    # the handle the same thing sent a window handle in as
+                    # the number of rows to grab.
+                    below_hwnd = _get_hwnd(win) if win else None
+                    if below_hwnd and _user32.IsWindowVisible(below_hwnd):
+                        below.append(below_hwnd)
                 over = tuple(below)
             # Reading the screen only shows what this process has not
             # excluded from capture, so which window is excluded decides
@@ -915,6 +918,16 @@ class Api:
             # when it next composes, so a read taken immediately after
             # clearing it still shows the window missing.
             can_read_screen = self._capture_excluded and window_kind in self._excluded_kinds
+            if window_kind == "flyout" and not can_read_screen:
+                # The panel sits over whatever the user had open, so the
+                # only truthful backdrop for it is a read of the screen.
+                # While something of ours is on top of it that read would
+                # include this window itself, and the fallback - a render
+                # of the wallpaper alone - would show the desktop straight
+                # through the windows that are actually there. Nothing
+                # behind it is moving in that moment anyway, so it keeps
+                # the frame it already has.
+                return {"skip": True, "retry_ms": 300}
             raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
             if raw is None:
                 # Either the fast path is off or unusable here, or it
