@@ -182,9 +182,11 @@ class Api:
         # True for the moment between moving the panel into place and
         # actually showing it, during which it is allowed to capture the
         # backdrop it is about to sit on - see show_flyout.
-        self._flyout_arming = False
-        # Set by the panel's page once it has that backdrop in hand.
-        self._flyout_ready = threading.Event()
+        # Which window, if any, is being armed: positioned and rendered
+        # but not yet shown, taking the backdrop of the place it is about
+        # to cover. See _arm_backdrop.
+        self._arming_kind = None
+        self._armed = threading.Event()
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
@@ -528,11 +530,39 @@ class Api:
 
     _FLYOUT_MARGIN = 12         # what Windows leaves around its own flyouts
 
-    def flyout_ready(self):
-        """Called by the panel's page once the backdrop it was asked to
-        take has been painted - see show_flyout."""
-        self._flyout_ready.set()
+    def backdrop_armed(self):
+        """Called by a window's page once the backdrop it was asked to
+        take has been painted - see _arm_backdrop."""
+        self._armed.set()
         return True
+
+    def _arm_backdrop(self, kind, window):
+        """Have a window take the backdrop of where it is about to appear,
+        while it is still hidden.
+
+        Shown first and refreshed afterwards, a window arrives carrying a
+        frosted picture of wherever it was last time, replaced a frame or
+        two later once the new capture lands: that replacement is the
+        flash. Hidden is the ideal moment for the read - the window is
+        already over exactly what it is about to cover, and cannot read
+        itself in - so the only thing that has to be lifted for it is the
+        check that skips windows which are not on screen.
+        """
+        self._arming_kind = kind
+        self._armed.clear()
+        try:
+            window.evaluate_js("window.__armBackdrop && window.__armBackdrop()")
+        except Exception:
+            pass
+        # The page calls backdrop_armed when it has painted it; the
+        # timeout is only there so a page that never answers cannot leave
+        # the window unopenable.
+        self._armed.wait(0.3)
+        # And a moment for the compositor to put that on the window's
+        # surface, or the first thing shown is whatever was on it when it
+        # was last hidden.
+        time.sleep(0.04)
+        self._arming_kind = None
 
     def toggle_flyout(self):
         if self._flyout_open:
@@ -568,6 +598,7 @@ class Api:
         # sits over whatever is on screen, so the widget below has to stay
         # capturable to appear in its frosted backdrop.
         self._overlays_open.add("flyout")
+        self._arming_kind = "flyout"
         self._apply_capture_exclusion()
         # Take the backdrop *before* it is on screen. It has been moved
         # into place but is still hidden, so a read of the screen there is
@@ -575,26 +606,13 @@ class Api:
         # in. Shown first, the panel arrives carrying a frosted picture of
         # wherever it was last time, which is replaced a frame or two
         # later: that is the flash, and the lag behind it.
-        self._flyout_arming = True
-        self._flyout_ready.clear()
-        try:
-            window.evaluate_js("window.__flyoutPrepare && window.__flyoutPrepare()")
-        except Exception:
-            pass
-        # The page calls flyout_ready below when it has painted it; the
-        # timeout is only there so a page that never answers cannot leave
-        # the panel unopenable.
-        self._flyout_ready.wait(0.3)
-        # The page has painted it; give the compositor a frame or two to
-        # put that on the window's surface, or the first thing shown is
-        # whatever was on it when it was last hidden.
-        time.sleep(0.04)
-        self._flyout_arming = False
+        self._arm_backdrop("flyout", window)
         self._flyout_shown_at = time.monotonic()
         try:
             window.show()
         except Exception:
             pass
+        self._apply_capture_exclusion()
         _bring_to_front(window)
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
@@ -787,10 +805,6 @@ class Api:
                 self._popover_window,
                 lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
             )
-        try:
-            self._popover_window.show()
-        except Exception:
-            pass
         # Re-assert the exclusions here as well as on `shown`: that event
         # fires during window creation, while this window is still hidden
         # and zero-ish, and the affinity did not stick. Without it this
@@ -799,14 +813,27 @@ class Api:
         # mirror. Registering the overlay first also lifts the grid
         # window's exclusion, so the popover's backdrop can contain it.
         self._overlays_open.add("popover")
+        self._arming_kind = "popover"
         self._apply_capture_exclusion()
-        _bring_to_front(self._popover_window)
+        # Everything below happens while the window is still hidden: the
+        # card is rendered, which settles its size, which settles where it
+        # goes (resize_popover_window places it), and only then is the
+        # backdrop of that place taken. Shown first and filled in
+        # afterwards, it arrived carrying a frosted picture of whichever
+        # tile it was opened on last - the flash.
         try:
             self._popover_window.evaluate_js(
                 "window.__showPopoverForTile && window.__showPopoverForTile(%s)" % json.dumps(tile_id)
             )
         except Exception:
             pass
+        self._arm_backdrop("popover", self._popover_window)
+        try:
+            self._popover_window.show()
+        except Exception:
+            pass
+        self._apply_capture_exclusion()
+        _bring_to_front(self._popover_window)
 
     def open_settings_window(self):
         """Bring up Settings, centred on whichever screen the widget is on.
@@ -927,10 +954,10 @@ class Api:
         # loop is ~100% of what it burns, and two of the three windows are
         # hidden almost all of the time (the detail popover and Settings)
         # while the third is usually behind something.
-        # The panel being armed is the one case where a window that is
-        # not on screen still has a backdrop worth taking (see
-        # show_flyout), and where nothing can be covering it either.
-        if not (window_kind == "flyout" and self._flyout_arming):
+        # A window being armed is the one case where one that is not on
+        # screen still has a backdrop worth taking (see _arm_backdrop),
+        # and where nothing can be covering it either.
+        if window_kind != self._arming_kind:
             if not _user32.IsWindowVisible(hwnd):
                 return {"skip": True, "retry_ms": 1000}
             if _nothing_visible_of(hwnd, self._own_hwnds()):
@@ -1124,7 +1151,13 @@ class Api:
         showing the widget its own reflection.
         """
         wanted = bool(self._cfg.get("fast_glass", True))
-        rects = {kind: _visible_rect(self._window_for(kind))
+        # A window being armed is already sitting at the rectangle it is
+        # about to appear in - it is only the showing that has not
+        # happened yet - so it counts as present here. Left out, the
+        # window it is about to cover stays hidden from capture, and the
+        # backdrop taken for it in that moment has a hole where that
+        # window is.
+        rects = {kind: _visible_rect(self._window_for(kind), kind == self._arming_kind)
                  for kind in ("main", "flyout", "popover", "settings")}
         excluded = {}
         for kind, above in _WINDOWS_ABOVE.items():
@@ -1836,10 +1869,10 @@ _WINDOWS_ABOVE = {
 }
 
 
-def _visible_rect(window):
+def _visible_rect(window, even_if_hidden=False):
     """This window's screen rectangle, or None if it is not on screen."""
     hwnd = _get_hwnd(window) if window else None
-    if not hwnd or not _user32.IsWindowVisible(hwnd):
+    if not hwnd or (not even_if_hidden and not _user32.IsWindowVisible(hwnd)):
         return None
     try:
         r = (ctypes.c_long * 4)()

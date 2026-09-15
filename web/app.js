@@ -323,6 +323,10 @@ function applyFixedSizeConstraint() {
   }
 }
 
+// The last resize this window asked Python for, so anything that has to
+// happen at the window's final size can wait for it - see armBackdrop.
+let pendingResize = Promise.resolve();
+
 function syncWindowSize() {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
@@ -352,6 +356,7 @@ function syncWindowSize() {
       : IS_FLYOUT_WINDOW ? window.pywebview.api.resize_flyout_window
       : window.pywebview.api.resize_window;
     const done = resize(physW, physH, resizeSeq);
+    pendingResize = Promise.resolve(done).catch(() => {});
     // The backdrop is captured at the window's size, so it is wrong the
     // moment the window changes size - re-take it once the resize lands.
     Promise.resolve(done).then(() => refreshBackdropSoon()).catch(() => {});
@@ -920,11 +925,11 @@ function flyoutLayers() {
           document.getElementById('backdrop-glass')].filter(Boolean);
 }
 
-window.__flyoutPrepare = function () {
+window.__armBackdrop = function () {
   for (const el of flyoutLayers()) el.classList.remove('flyout-enter', 'flyout-leave');
   const done = () => {
     if (window.pywebview && window.pywebview.api) {
-      window.pywebview.api.flyout_ready().catch(() => {});
+      window.pywebview.api.backdrop_armed().catch(() => {});
     }
   };
   // Two things have to settle before the capture is worth taking. The
@@ -941,7 +946,11 @@ window.__flyoutPrepare = function () {
     invalidateBackdrop();
     Promise.resolve(refreshBackdrop()).then(done, done);
   };
-  requestAnimationFrame(() => attempt(12));
+  // Whatever content this window is about to show has just been rendered
+  // into it; ask for the window to be sized to that first, and wait for
+  // that to land, or the capture is of the wrong rectangle.
+  syncWindowSize();
+  requestAnimationFrame(() => pendingResize.then(() => attempt(12), () => attempt(12)));
 };
 
 window.__flyoutEnter = function () {
@@ -1118,8 +1127,10 @@ function openDetail(tile) {
   requestAnimationFrame(() => popover.classList.add('show'));
   syncWindowSize();
   // This window was just moved over the tile that asked for it, so
-  // whatever backdrop it last captured is of somewhere else entirely.
-  refreshBackdropSoon(60);
+  // whatever backdrop it last captured is of somewhere else entirely -
+  // and while it was hidden it will have booked its next look a second
+  // out, which is a second of the card sitting on a still picture.
+  restartBackdropTicker();
   if (window.pywebview && window.pywebview.api) {
     window.pywebview.api.set_popover_activatable(true).catch(() => {});
   }
