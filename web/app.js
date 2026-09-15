@@ -207,6 +207,7 @@ async function boot() {
     /* keep defaults, still render an empty widget */
   }
   applyTheme();
+  applySystemGlass();
   applyZoom();
   applyFixedSizeConstraint();
   renderGrid();
@@ -255,7 +256,13 @@ async function boot() {
 }
 
 function applyTheme() {
-  document.documentElement.setAttribute('data-theme', CONFIG.theme || 'auto');
+  // The tray panel gets its own answer. It is the one surface that is not
+  // lying on the wallpaper: it opens over whatever the user had in front
+  // of them, which is as likely to be a white page as a dark one, and the
+  // theme that suits the desktop often reads badly there.
+  const panel = CONFIG.panel_theme || 'follow';
+  const theme = (IS_FLYOUT_WINDOW && panel !== 'follow') ? panel : (CONFIG.theme || 'auto');
+  document.documentElement.setAttribute('data-theme', theme);
 }
 
 /* ============================================================
@@ -398,9 +405,12 @@ const SAMPLE_FPS_MAX = 30;
 function backdropFloorMs() {
   const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
     Number(CONFIG.sample_fps) || 16));
-  // Faded back into the desktop, there is almost nothing of the glass
-  // left to be out of date, so it is read a few times a second at most.
-  return Math.max(dimmed ? 250 : 0, Math.round(1000 / fps));
+  // Note that being faded out is not a reason to slow this down. Less of
+  // the widget is visible then, but the glass showing through it is more
+  // of what you see and not less, and a glass that lags the wallpaper
+  // moving behind it is exactly when the card stops looking like part of
+  // the desktop and starts looking like a stale picture pasted over it.
+  return Math.round(1000 / fps);
 }
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 // How many identical frames it takes to decide the desktop has stopped
@@ -440,7 +450,43 @@ function noteFrameCost(ms) {
 // in one go is atomic - nothing is ever half-updated on screen - which is
 // what the old pair of cross-fading layers existed to fake.
 let backdropCtx = null;
+let backdropCtxAlpha = null;
 let glassCtx = null;
+
+// True when DWM is drawing the frosted glass for this window instead (see
+// _set_system_glass in main.py). Then the blurred copy is not painted at
+// all - the real thing is already behind the page, live and free - and
+// this canvas is reduced to the four sharp corners the system backdrop
+// knows nothing about, over a surface that is otherwise left clear so the
+// glass can show through it.
+function systemGlass() {
+  return CONFIG.glass_mode === 'system' && CONFIG.system_glass_ok === true
+    && (WINDOW_KIND === 'main' || WINDOW_KIND === 'popover'
+        || WINDOW_KIND === 'flyout');
+}
+
+function applySystemGlass() {
+  document.documentElement.classList.toggle('is-system-glass', systemGlass());
+}
+
+// A canvas cannot be told to grow or drop its alpha channel after its
+// context exists, and which one it needs depends on the mode: opaque
+// while the page paints the whole backdrop itself, transparent while DWM
+// paints most of it. Switching modes replaces the element.
+function backdropContext(wantAlpha) {
+  let cv = document.getElementById('backdrop');
+  if (!cv) return null;
+  if (backdropCtx && backdropCtxAlpha === wantAlpha) return backdropCtx;
+  if (backdropCtx) {
+    const fresh = document.createElement('canvas');
+    fresh.id = 'backdrop';
+    cv.replaceWith(fresh);
+    cv = fresh;
+  }
+  backdropCtxAlpha = wantAlpha;
+  backdropCtx = cv.getContext('2d', { alpha: wantAlpha });
+  return backdropCtx;
+}
 
 // Where the visible card sits, in the canvas's device pixels, plus its
 // corner radius. Everything the backdrop does is expressed against this:
@@ -494,16 +540,18 @@ function cardGeometry() {
 }
 
 function paintBackdrop(sharp, blurred, w, h, corner) {
+  const sys = systemGlass();
+  const ctx = backdropContext(sys);
   const cv = document.getElementById('backdrop');
   const glass = document.getElementById('backdrop-glass');
-  if (!cv) return;
-  if (!backdropCtx) backdropCtx = cv.getContext('2d', { alpha: false });
-  const ctx = backdropCtx;
+  if (!cv || !ctx) return;
   if (cv.width !== w || cv.height !== h) {
     // Resizing clears the bitmap to black; the fill and the draw below
     // happen in this same task, so that black is never painted.
     cv.width = w;
     cv.height = h;
+  } else if (sys) {
+    ctx.clearRect(0, 0, w, h);
   }
   if (corner) {
     // The sharp copy arrived as the four corner wedges packed into one
@@ -516,6 +564,24 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
     ctx.drawImage(sharp, c, c, c, c, w - c, h - c, c, c);
   } else {
     ctx.drawImage(sharp, 0, 0, w, h);
+  }
+  if (sys) {
+    // Everything the card covers belongs to DWM, so cut the card's own
+    // rounded rectangle back out of what was just drawn. What is left is
+    // exactly the wedges outside its corners - the one part of the window
+    // the system backdrop gets wrong, because it fills the rectangle and
+    // has never heard of the card.
+    const card = cardGeometry();
+    if (card) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
+      ctx.fill();
+      ctx.restore();
+    }
+    if (glass && glassCtx) glassCtx.clearRect(0, 0, glass.width, glass.height);
+    return;
   }
   if (!glass) return;
   // The card's frosted fill, on its own layer above that: it belongs to
@@ -563,7 +629,15 @@ function refreshBackdrop() {
   // since the last full frame. That stale middle showing through the
   // animation is what the panel looked like it was warping through.
   const card = cardGeometry();
-  const corner = (card && card.fills && !IS_FLYOUT_WINDOW) ? Math.ceil(card.radius) : 0;
+  // The tray panel is the exception to corners-only, because its card
+  // scales out of the corner and back into it: everything the animation
+  // uncovers on the way is canvas nobody has painted since the last full
+  // frame, and that stale middle showing through is what the panel
+  // looked like it was warping through. Unless DWM is drawing the glass,
+  // in which case what it uncovers is the real thing and there is no
+  // middle to be stale.
+  const corner = (card && card.fills && (!IS_FLYOUT_WINDOW || systemGlass()))
+    ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
@@ -1460,8 +1534,19 @@ function historySvg(points) {
     + '<path class="history-area" d="' + area + '"/>'
     + '<path class="history-line" d="' + line + '"/>'
     + '</svg>'
-    + '<svg viewBox="0 0 ' + CHART_W + ' ' + CHART_H + '" class="history-dot-layer">'
-    + '<circle class="history-dot" cx="' + x(last[0]).toFixed(1) + '" cy="' + y(last[1]).toFixed(1) + '" r="2.5"/>'
+    // The dot is placed as a percentage of the box rather than in the
+    // chart's own coordinates, and this layer deliberately has no viewBox.
+    // The line's does, stretched to fit (preserveAspectRatio="none"), and
+    // a dot drawn that way would be an ellipse - but giving this layer the
+    // same viewBox without the stretch scales it uniformly and centres it,
+    // which is why the dot sat to one side of the line it belongs to by
+    // half the difference between the box and the chart's nominal width.
+    // Percentages are measured against the box itself, so they land where
+    // the stretched line does, and r stays a circle.
+    + '<svg class="history-dot-layer">'
+    + '<circle class="history-dot"'
+    + ' cx="' + (x(last[0]) / CHART_W * 100).toFixed(2) + '%"'
+    + ' cy="' + (y(last[1]) / CHART_H * 100).toFixed(2) + '%" r="2.5"/>'
     + '</svg>';
 }
 
@@ -1628,7 +1713,13 @@ function openSettingsView() {
   setDimAfterSlider(CONFIG.dim_after_sec || 120);
   document.getElementById('dim-after-block').hidden = CONFIG.dim_when_idle === false;
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
-  document.getElementById('fast-glass-check').checked = CONFIG.fast_glass !== false;
+  const glassSelect = document.getElementById('glass-mode-select');
+  glassSelect.value = CONFIG.glass_mode || 'fast';
+  // Offering a mode this build of Windows cannot do would be a setting
+  // that silently does nothing.
+  glassSelect.querySelector('option[value="system"]').hidden = CONFIG.system_glass_ok !== true;
+  if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
+  document.getElementById('panel-theme-select').value = CONFIG.panel_theme || 'follow';
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
   document.getElementById('fixed-size-check').checked = !!CONFIG.fixed_size;
   document.getElementById('fixed-width-input').value = String(CONFIG.fixed_width || 400);
@@ -1665,12 +1756,14 @@ async function saveHaConfig(url, token) {
   try { await window.pywebview.api.save_ha_config(url, token); } catch (e) { /* ignore */ }
 }
 
-async function savePrefs() {
+// One preference at a time, by name. Sending the whole of CONFIG - which
+// is what this used to do - meant every window could write its own copy
+// of every setting, and a window whose copy was a few seconds out of date
+// silently undid whatever had just been changed somewhere else.
+async function savePref(changes) {
+  Object.assign(CONFIG, changes);
   try {
-    await window.pywebview.api.save_prefs(CONFIG.theme, CONFIG.columns, CONFIG.lock_position,
-      CONFIG.zoom, CONFIG.fixed_size, CONFIG.fixed_width, CONFIG.fixed_height,
-      CONFIG.opacity, CONFIG.fast_glass, CONFIG.sample_fps,
-      CONFIG.dim_when_idle, CONFIG.dim_after_sec);
+    await window.pywebview.api.save_prefs(changes);
   } catch (e) { /* ignore */ }
 }
 
@@ -1877,35 +1970,36 @@ function init() {
   document.getElementById('close-settings-btn').addEventListener('click', closeSettingsAndSave);
   document.getElementById('quit-btn').addEventListener('click', () => { window.pywebview.api.quit_app(); });
   document.getElementById('theme-select').addEventListener('change', async (e) => {
-    CONFIG.theme = e.target.value;
     applyTheme();
-    await savePrefs();
+    await savePref({ theme: e.target.value });
   });
   document.getElementById('columns-select').addEventListener('change', async (e) => {
-    CONFIG.columns = Number(e.target.value);
-    await savePrefs();
+    await savePref({ columns: Number(e.target.value) });
     renderGrid();
   });
   document.getElementById('lock-position-check').addEventListener('change', async (e) => {
-    CONFIG.lock_position = !!e.target.checked;
-    await savePrefs();
+    await savePref({ lock_position: !!e.target.checked });
   });
-  document.getElementById('fast-glass-check').addEventListener('change', async (e) => {
-    CONFIG.fast_glass = !!e.target.checked;
-    await savePrefs();
-    // The capture path changed underneath us, so the pacing estimate and
-    // the held frame are both about the old one.
+  document.getElementById('glass-mode-select').addEventListener('change', async (e) => {
+    await savePref({ glass_mode: e.target.value });
+    applySystemGlass();
+    // Who paints the backdrop has changed, so both the frame on screen and
+    // the estimate of what a frame costs belong to the old way of doing it.
+    backdropHash = null;
     backdropFrameMs = backdropFloorMs();
     refreshBackdropSoon(0);
+  });
+  document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
+    await savePref({ panel_theme: e.target.value });
   });
   // The number follows the thumb while it is being dragged, but the
   // widget is only re-laid-out on release: every step in between would
   // save the config and put the grid window through a relayout and a
   // fresh desktop capture, which is a lot of work to throw away 5% later.
   document.getElementById('dim-idle-check').addEventListener('change', async (e) => {
-    CONFIG.dim_when_idle = !!e.target.checked;
-    document.getElementById('dim-after-block').hidden = !CONFIG.dim_when_idle;
-    await savePrefs();
+    const on = !!e.target.checked;
+    document.getElementById('dim-after-block').hidden = !on;
+    await savePref({ dim_when_idle: on });
   });
   const dimRange = document.getElementById('dim-after-range');
   dimRange.addEventListener('input', (e) => {
@@ -1914,9 +2008,8 @@ function init() {
       v < 60 ? (v + ' 秒') : (Math.round(v / 6) / 10 + ' 分鐘');
   });
   dimRange.addEventListener('change', async (e) => {
-    CONFIG.dim_after_sec = Number(e.target.value);
+    await savePref({ dim_after_sec: Number(e.target.value) });
     setDimAfterSlider(CONFIG.dim_after_sec);
-    await savePrefs();
   });
 
   const fpsRange = document.getElementById('sample-fps-range');
@@ -1924,9 +2017,8 @@ function init() {
     document.getElementById('sample-fps-value').textContent = e.target.value + ' fps';
   });
   fpsRange.addEventListener('change', async (e) => {
-    CONFIG.sample_fps = Number(e.target.value);
+    await savePref({ sample_fps: Number(e.target.value) });
     setSampleFpsSlider(CONFIG.sample_fps);
-    await savePrefs();
   });
 
   const zoomRange = document.getElementById('zoom-range');
@@ -1934,31 +2026,27 @@ function init() {
     document.getElementById('zoom-value').textContent = e.target.value + '%';
   });
   zoomRange.addEventListener('change', async (e) => {
-    CONFIG.zoom = Number(e.target.value);
+    await savePref({ zoom: Number(e.target.value) });
     setZoomSlider(CONFIG.zoom);
     applyZoom();
-    await savePrefs();
     syncWindowSize();
   });
   document.getElementById('fixed-size-check').addEventListener('change', async (e) => {
-    CONFIG.fixed_size = !!e.target.checked;
+    await savePref({ fixed_size: !!e.target.checked });
     document.getElementById('fixed-size-fields').hidden = !CONFIG.fixed_size;
     applyFixedSizeConstraint();
-    await savePrefs();
     syncWindowSize();
   });
   document.getElementById('fixed-width-input').addEventListener('change', async (e) => {
-    CONFIG.fixed_width = Math.max(120, Number(e.target.value) || 400);
+    await savePref({ fixed_width: Math.max(120, Number(e.target.value) || 400) });
     e.target.value = String(CONFIG.fixed_width);
     applyFixedSizeConstraint();
-    await savePrefs();
     syncWindowSize();
   });
   document.getElementById('fixed-height-input').addEventListener('change', async (e) => {
-    CONFIG.fixed_height = Math.max(90, Number(e.target.value) || 300);
+    await savePref({ fixed_height: Math.max(90, Number(e.target.value) || 300) });
     e.target.value = String(CONFIG.fixed_height);
     applyFixedSizeConstraint();
-    await savePrefs();
     syncWindowSize();
   });
   document.getElementById('start-on-boot-check').addEventListener('change', async (e) => {
@@ -2025,9 +2113,23 @@ window.__applyPrefs = function (cfg) {
   // is mid-edit is worse than doing nothing.
   const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
   const themeChanged = cfg.theme !== CONFIG.theme;
+  const glassChanged = cfg.glass_mode !== CONFIG.glass_mode;
+  const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
   const layoutChanged = cfg.zoom !== CONFIG.zoom || cfg.columns !== CONFIG.columns ||
     cfg.fixed_size !== CONFIG.fixed_size || cfg.fixed_width !== CONFIG.fixed_width ||
     cfg.fixed_height !== CONFIG.fixed_height;
+  if (glassChanged) {
+    // Who paints the backdrop has changed; the frame on screen was drawn
+    // by the other one.
+    CONFIG = Object.assign({}, CONFIG, cfg);
+    applySystemGlass();
+    backdropHash = null;
+    refreshBackdropSoon(0);
+  }
+  if (panelThemeChanged) {
+    CONFIG = Object.assign({}, CONFIG, cfg);
+    applyTheme();
+  }
   if (!tilesChanged && !themeChanged && !layoutChanged) {
     CONFIG = Object.assign({}, CONFIG, cfg);
     return;

@@ -50,10 +50,15 @@ DEFAULT_CONFIG = {
     "start_on_boot": False,
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
     "opacity": 85,            # percent; whole-window translucency (see main.py)
-    # Keep the frosted backdrop live cheaply by hiding the widget from
-    # screen capture - which also hides it from screenshots. See
-    # _set_capture_exclusion in main.py.
-    "fast_glass": True,
+    # Who draws the frosted glass, and at what price:
+    #   "system"  - DWM does it (Windows 11 22H2+), cheapest and always in
+    #               step with what is behind the window
+    #   "fast"    - captured from the screen, which needs the widget to be
+    #               hidden from screen capture to avoid reading itself back
+    #   "compat"  - captured the slow way, with the widget visible to
+    #               screenshots and screen recording
+    # See _set_system_glass and _set_capture_exclusion in main.py.
+    "glass_mode": "system",
     # How often the frosted backdrop is re-read from the screen, in
     # frames per second. The ceiling rather than the rate: a still
     # wallpaper backs off to a look every few seconds on its own, and a
@@ -61,6 +66,10 @@ DEFAULT_CONFIG = {
     # app.js). Higher tracks an animated wallpaper more closely and costs
     # proportionally more.
     "sample_fps": 16,
+    # The tray panel's own light/dark setting. It is not on the desktop
+    # like the widget is - it sits over whatever was open - so what reads
+    # well there is often the opposite. "follow" takes the widget's.
+    "panel_theme": "follow",
     # Fade the widget back into the desktop when nobody has touched the
     # machine for a while, or while something is running full screen, and
     # bring it back on the first click. It is a gadget that lives on the
@@ -103,8 +112,29 @@ def load_config():
                 loaded = json.load(f)
             cfg.update({k: v for k, v in loaded.items() if k != "tiles"})
             cfg["tiles"] = [_migrate_tile(t) for t in loaded.get("tiles", [])]
+            _migrate(cfg, loaded)
         except Exception:
             pass
+    return cfg
+
+
+def _migrate(cfg, loaded):
+    """Carry an older settings file forward.
+
+    Judged on what the *file* had, not on the merged config: the defaults
+    have already filled in the new keys, so asking whether the merged one
+    knows about glass_mode would always say yes and quietly ignore what
+    the user had chosen.
+    """
+    if "glass_mode" not in loaded:
+        # The two booleans this replaces could describe states that made no
+        # sense together, which is why they became one setting.
+        if loaded.get("system_glass"):
+            cfg["glass_mode"] = "system"
+        else:
+            cfg["glass_mode"] = "fast" if loaded.get("fast_glass", True) else "compat"
+    cfg.pop("system_glass", None)
+    cfg.pop("fast_glass", None)
     return cfg
 
 

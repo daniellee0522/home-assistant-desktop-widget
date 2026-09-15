@@ -147,6 +147,8 @@ class Api:
         # the thread watching for the moments it should be - see
         # _watch_for_idle.
         self._dimmed = False
+        # When someone last asked for it back (see wake).
+        self._woke_at = 0.0
         self._dim_stop = threading.Event()
 
         # The detail popover lives in its own separate OS window (see the
@@ -275,7 +277,9 @@ class Api:
                 "fixed_width": self._cfg.get("fixed_width", 400),
                 "fixed_height": self._cfg.get("fixed_height", 300),
                 "opacity": self._cfg.get("opacity", 100),
-                "fast_glass": bool(self._cfg.get("fast_glass", True)),
+                "glass_mode": self._cfg.get("glass_mode", "fast"),
+                "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
+                "panel_theme": self._cfg.get("panel_theme", "follow"),
                 "sample_fps": int(self._cfg.get("sample_fps", 16)),
                 "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
                 "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
@@ -364,61 +368,58 @@ class Api:
         self._push_prefs()
         return True
 
-    def save_prefs(self, theme, columns, lock_position=None,
-                   zoom=None, fixed_size=None, fixed_width=None, fixed_height=None,
-                   opacity=None, fast_glass=None, sample_fps=None,
-                   dim_when_idle=None, dim_after_sec=None):
-        self._cfg["theme"] = theme or "auto"
-        try:
-            self._cfg["columns"] = max(2, min(8, int(columns)))
-        except Exception:
-            self._cfg["columns"] = 4
-        if lock_position is not None:
-            self._cfg["lock_position"] = bool(lock_position)
-        if zoom is not None:
+    # How each preference is cleaned up on the way in. The page sends only
+    # the keys it changed (see savePref in app.js) and everything else is
+    # left exactly as it was, which is the point: four windows each hold
+    # their own copy of the config, and the old call - every preference,
+    # positionally, from whichever window happened to have a control on it
+    # - wrote one window's stale copy over everyone else's changes. That
+    # is what "the settings don't stick" was.
+    _PREF_CLEANERS = {
+        "theme": lambda v: v if v in ("auto", "light", "dark") else "auto",
+        # The tray panel sits over other windows rather than on the
+        # wallpaper, so what looks right there is not what looks right on
+        # the desktop; "follow" means don't have an opinion.
+        "panel_theme": lambda v: v if v in ("follow", "auto", "light", "dark") else "follow",
+        "columns": lambda v: max(2, min(8, int(v))),
+        "lock_position": bool,
+        "zoom": lambda v: max(50, min(200, int(v))),
+        "fixed_size": bool,
+        "fixed_width": lambda v: max(120, int(v)),
+        "fixed_height": lambda v: max(90, int(v)),
+        "opacity": lambda v: max(0, min(100, int(v))),
+        "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",
+        # How often the desktop behind the widget is re-read, in frames a
+        # second. The page paces itself from what a frame actually costs
+        # (see BACKDROP_DUTY in app.js); this is the ceiling on that pace.
+        "sample_fps": lambda v: max(2, min(30, int(v))),
+        "dim_when_idle": bool,
+        "dim_after_sec": lambda v: max(10, min(3600, int(v))),
+    }
+
+    def save_prefs(self, changes):
+        """Merge `changes` into the config, clean, save and broadcast."""
+        if not isinstance(changes, dict):
+            return False
+        touched = set()
+        for key, value in changes.items():
+            clean = self._PREF_CLEANERS.get(key)
+            if clean is None or value is None:
+                continue
             try:
-                self._cfg["zoom"] = max(50, min(200, int(zoom)))
+                self._cfg[key] = clean(value)
             except Exception:
-                self._cfg["zoom"] = 100
-        if fixed_size is not None:
-            self._cfg["fixed_size"] = bool(fixed_size)
-        if fixed_width is not None:
-            try:
-                self._cfg["fixed_width"] = max(120, int(fixed_width))
-            except Exception:
-                pass
-        if fixed_height is not None:
-            try:
-                self._cfg["fixed_height"] = max(90, int(fixed_height))
-            except Exception:
-                pass
-        if fast_glass is not None:
-            self._cfg["fast_glass"] = bool(fast_glass)
-        if dim_when_idle is not None:
-            self._cfg["dim_when_idle"] = bool(dim_when_idle)
-            if not self._cfg["dim_when_idle"] and self._dimmed:
-                self._dimmed = False
-                self._push_dim()
-        if dim_after_sec is not None:
-            try:
-                self._cfg["dim_after_sec"] = max(10, min(3600, int(dim_after_sec)))
-            except Exception:
-                pass
-        if sample_fps is not None:
-            # How often the desktop behind the widget is re-read, in
-            # frames a second. The page paces itself from what a frame
-            # actually costs (see BACKDROP_DUTY in app.js); this is the
-            # ceiling on that pace.
-            try:
-                self._cfg["sample_fps"] = max(2, min(30, int(sample_fps)))
-            except Exception:
-                pass
+                continue
+            touched.add(key)
+        if "glass_mode" in touched:
+            # Both of these read the mode, and both have to be told: one
+            # decides which windows hide from screen capture, the other
+            # who paints the glass.
             self._apply_capture_exclusion()
-        if opacity is not None:
-            try:
-                self._cfg["opacity"] = max(0, min(100, int(opacity)))
-            except Exception:
-                pass
+            self._apply_system_glass()
+        if "dim_when_idle" in touched and not self._cfg["dim_when_idle"] and self._dimmed:
+            self._dimmed = False
+            self._push_dim()
         cfgmod.save_config(self._cfg)
         self._push_prefs()
         return True
@@ -687,7 +688,9 @@ class Api:
         except Exception:
             pass
         self._apply_capture_exclusion()
-        _bring_to_front(window)
+        # Above everything while it is open, the way the volume and
+        # network flyouts are; put back on the way out (see hide_flyout).
+        _bring_to_front(window, stay_on_top=True)
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
         try:
@@ -754,6 +757,10 @@ class Api:
                 window.hide()
             except Exception:
                 pass
+            # Out of the topmost band it was put in to open (see
+            # show_flyout), so a hidden panel is not still outranking
+            # everything the next time something asks about z-order.
+            _drop_topmost(window)
 
         threading.Thread(target=fade_then_hide, daemon=True).start()
 
@@ -1120,6 +1127,15 @@ class Api:
                 # behind it is moving in that moment anyway, so it keeps
                 # the frame it already has.
                 return {"skip": True, "retry_ms": 300}
+            corner = max(0, min(int(want_corner or 0), w // 2, h // 2))
+            from PIL import Image, ImageFilter
+            # Once DWM is drawing the glass, the four corner wedges are the
+            # entire remaining job - a twentieth of the window's pixels -
+            # and reading only those looks like the obvious saving. It is
+            # not: a blit off the screen costs about 5ms whatever its size,
+            # so four small ones measured 20ms against 8ms for one blit of
+            # the whole 512x258 window. One blit, then; what the corners
+            # save is in what gets encoded and sent, below.
             raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
             if raw is None:
                 # Either the fast path is off or unusable here, or it
@@ -1131,7 +1147,6 @@ class Api:
             cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
                 return {"unchanged": True, "hash": digest, "ms": cost_ms}
-            from PIL import Image, ImageFilter
             img = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
 
             # The frosted copy is blurred here rather than by the page.
@@ -1143,15 +1158,21 @@ class Api:
             # and the browser scales it back up for free; at this blur
             # radius the downscale is invisible, because a 20px blur throws
             # away far more detail than a 4x downscale does.
-            small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
-            small = small.filter(ImageFilter.GaussianBlur(radius=4))
-            blur_buf = io.BytesIO()
-            small.save(blur_buf, format="JPEG", quality=80)
+            #
+            # None of it is needed when DWM is drawing the glass itself
+            # (see _set_system_glass): then the only thing the page still
+            # wants from here is the sharp corners, and a blurred copy
+            # would be painted over the real thing.
+            blur_buf = None
+            if not self._system_glass_on(window_kind):
+                small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+                small = small.filter(ImageFilter.GaussianBlur(radius=4))
+                blur_buf = io.BytesIO()
+                small.save(blur_buf, format="JPEG", quality=80)
 
             # The sharp copy, cut down to the only part of it anyone ever
             # sees: the four wedges outside the card's rounded corners.
             # Packed clockwise from the top left into one 2r square.
-            corner = max(0, min(int(want_corner or 0), w // 2, h // 2))
             if corner:
                 atlas = Image.new("RGB", (corner * 2, corner * 2))
                 atlas.paste(img.crop((0, 0, corner, corner)), (0, 0))
@@ -1169,7 +1190,9 @@ class Api:
             img.save(buf, format="JPEG", quality=88, subsampling=0)
             return {
                 "url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii"),
-                "blur_url": "data:image/jpeg;base64," + base64.b64encode(blur_buf.getvalue()).decode("ascii"),
+                "blur_url": ("data:image/jpeg;base64,"
+                             + base64.b64encode(blur_buf.getvalue()).decode("ascii")
+                             ) if blur_buf else None,
                 "w": w,
                 "h": h,
                 "corner": corner,
@@ -1258,7 +1281,10 @@ class Api:
         PrintWindow path has to keep being used, silently rather than
         showing the widget its own reflection.
         """
-        wanted = bool(self._cfg.get("fast_glass", True))
+        # Everything but the compatibility mode wants the fast path: the
+        # system-glass mode still reads the four corners off the screen,
+        # and reading the screen means being out of it.
+        wanted = self._cfg.get("glass_mode", "fast") != "compat"
         # A window being armed is already sitting at the rectangle it is
         # about to appear in - it is only the showing that has not
         # happened yet - so it counts as present here. Left out, the
@@ -1288,10 +1314,61 @@ class Api:
         self._excluded_kinds = {k for k, v in excluded.items() if v}
         self._capture_excluded = wanted and ok
 
+    # ---- glass ----------------------------------------------------------
+
+    # The windows DWM can do the glass for: the ones created with
+    # transparent=True, which is what gives WebView2 a surface with real
+    # alpha for the backdrop to show through. Settings is not one of them
+    # - it is a normal focusable window with a background colour to fall
+    # back on while its page loads - so it goes on painting its own.
+    #
+    # The tray panel is here for a second reason: it is the one window
+    # that is not over the wallpaper but over whatever the user had open,
+    # and a captured backdrop of that is only ever as fresh as the last
+    # read. Scroll a browser behind it and the glass lagged the page by
+    # however long the capture took. DWM's does not lag, because DWM is
+    # what drew both.
+    _SYSTEM_GLASS_KINDS = ("main", "popover", "flyout")
+
+    def _system_glass_on(self, kind=None):
+        if not (_SYSTEM_GLASS_SUPPORTED and self._cfg.get("glass_mode") == "system"):
+            return False
+        return kind is None or kind in self._SYSTEM_GLASS_KINDS
+
+    def _apply_system_glass(self):
+        for kind in self._SYSTEM_GLASS_KINDS:
+            win = self._window_for(kind)
+            if win:
+                _set_system_glass(win, self._system_glass_on(kind))
+
+    def debug_capturable(self, on=True):
+        """Put the windows back into screen captures, for development.
+
+        The fast glass path works by hiding them from capture, which also
+        hides them from any screenshot taken to check what they look like -
+        including the ones this project's own testing takes. Off unless
+        HA_WIDGET_DEBUG is set in the environment, and undone by the next
+        thing that touches the exclusion.
+        """
+        if not os.environ.get("HA_WIDGET_DEBUG"):
+            return False
+        for kind in ("main", "popover", "settings", "flyout"):
+            win = self._window_for(kind)
+            if win:
+                _set_capture_exclusion(win, not on)
+        return True
+
     # ---- fading out while nobody is there --------------------------------
 
     def wake(self):
         """Called by the page when someone touches the widget."""
+        # Held awake for a full idle period from here, rather than left to
+        # the input clock: a click on the widget is a request to see it,
+        # and it should not be able to fade out from under the hand that
+        # asked - which is what happened when the click landed at the end
+        # of a long quiet spell and the idle counter was still reading
+        # minutes.
+        self._woke_at = time.monotonic()
         if self._dimmed:
             self._dimmed = False
             self._push_dim()
@@ -1324,8 +1401,21 @@ class Api:
                         wanted = False
                     else:
                         after = max(10, int(self._cfg.get("dim_after_sec", 120)))
+                        mine = self._own_hwnds()
                         wanted = (_idle_seconds() >= after
-                                  or _fullscreen_app_present(self._own_hwnds()))
+                                  or _fullscreen_app_present(mine))
+                        if wanted and (time.monotonic() - self._woke_at) < after:
+                            wanted = False          # asked for, recently
+                        # Coming back up is not the same question as going
+                        # down. Input alone is not a reason: someone
+                        # answering mail has not asked to see the widget,
+                        # and a widget that brightens behind their window
+                        # every time they touch the keyboard is exactly the
+                        # thing fading it was meant to stop. It comes back
+                        # for the desktop, or for a click on itself (which
+                        # arrives through wake(), not through here).
+                        if self._dimmed and not wanted and not _desktop_is_front(mine):
+                            wanted = True
                     if wanted != self._dimmed:
                         self._dimmed = wanted
                         self._push_dim()
@@ -1356,14 +1446,17 @@ class Api:
             "fixed_height": self._cfg.get("fixed_height", 300),
             "lock_position": bool(self._cfg.get("lock_position", False)),
             "opacity": self._cfg.get("opacity", 100),
-            "fast_glass": bool(self._cfg.get("fast_glass", True)),
+            "glass_mode": self._cfg.get("glass_mode", "fast"),
+            "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
+            "panel_theme": self._cfg.get("panel_theme", "follow"),
             "sample_fps": int(self._cfg.get("sample_fps", 16)),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
             "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
         script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
-        for win in (self._window, self._popover_window, self._settings_window):
+        for win in (self._window, self._popover_window, self._settings_window,
+                    self._flyout_window):
             if not win:
                 continue
             try:
@@ -1494,6 +1587,8 @@ SW_HIDE = 0
 SW_SHOWNA = 8
 HWND_BOTTOM = 1
 HWND_TOP = 0
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
@@ -1532,14 +1627,21 @@ _hwnd_lock = threading.Lock()
 #   No taskbar button: see _hide_from_taskbar.
 #
 # Everything visual is the page's, drawn over a live picture of the
-# desktop that _DesktopCapture takes from behind the window. That
-# indirection is not a shortcut - it is the only thing that works here.
-# This window cannot be see-through at all, which was established by
-# measurement rather than assumption: the panel's colour came out
-# identical with the widget over a dark purple region of the wallpaper
-# and over a pink one, for every one of these:
+# desktop that _DesktopCapture takes from behind the window - except on
+# Windows 11 22H2 and later, where DWM will draw the glass itself and the
+# capture is reduced to the four sharp corners (see _set_system_glass,
+# and the glass_mode setting). What follows is why the capture had to
+# exist at all, and why it is still the fallback.
 #
-#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic) with its extended frame.
+# Every one of these was measured, with the widget over a dark purple
+# region of the wallpaper and over a pink one, and the panel's colour came
+# out identical both times - the window was not see-through:
+#
+#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic) *on its own*. This is the
+#     one that turned out to be half a solution: it does nothing without
+#     DwmExtendFrameIntoClientArea over the whole client area, and with it
+#     the window really is translucent. That pairing is what
+#     _set_system_glass does now.
 #   - SetWindowCompositionAttribute, both ACCENT_ENABLE_ACRYLICBLURBEHIND
 #     and ACCENT_ENABLE_BLURBEHIND.
 #   - pywebview's transparent=True, which composites the page's
@@ -1561,6 +1663,11 @@ _hwnd_lock = threading.Lock()
 # backdrop-filter, and leaves it unblurred outside the card's rounded
 # corners so those corners read as a real cutout. Tiles stay fully opaque,
 # because nothing about the window is translucent.
+#
+# And with the system backdrop the same drawing still works: the glass
+# under the card comes from DWM instead of from the capture, the corner
+# wedges are still painted over it, and the page cannot tell the
+# difference beyond not being handed a blurred frame (see paintBackdrop).
 
 
 # Declared signatures for every native call below that takes an HWND. A
@@ -1636,6 +1743,15 @@ _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
 _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+_dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
+
+
+class _MARGINS(ctypes.Structure):
+    _fields_ = [
+        ("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+        ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int),
+    ]
 
 
 _ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
@@ -2035,6 +2151,76 @@ def _set_window_size(hwnd, w, h):
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND = 1
 DWMWA_TRANSITIONS_FORCEDISABLED = 3
+DWMWA_SYSTEMBACKDROP_TYPE = 38
+DWMSBT_NONE = 1
+DWMSBT_TRANSIENTWINDOW = 3          # acrylic: a blur of whatever is behind
+DWMWA_BORDER_COLOR = 34
+DWMWA_COLOR_NONE = 0xFFFFFFFE
+
+# DWMWA_SYSTEMBACKDROP_TYPE arrived in Windows 11 22H2. Below that the
+# call fails harmlessly and the captured backdrop does all the work.
+_SYSTEM_GLASS_SUPPORTED = sys.getwindowsversion().build >= 22621
+
+
+def _set_system_glass(window, on):
+    """Ask DWM for the frosted glass instead of painting a copy of it.
+
+    The note above records that this window cannot be see-through, which
+    was true of everything measured there - but not of this pair, which
+    was not tried: DwmExtendFrameIntoClientArea over the whole client
+    area, *and* DWMWA_SYSTEMBACKDROP_TYPE. It is the recipe Windhawk's
+    Translucent Windows mod uses (HandleEffects in
+    mods/translucent-windows.wh.cpp), and most of that mod's six thousand
+    lines are hooks that force an app to paint alpha-zero pixels so the
+    backdrop has somewhere to show through. WebView2 does that part for
+    free, because pywebview's transparent=True hands it a transparent
+    DefaultBackgroundColor.
+
+    Measured over a window painting a moving pattern behind it: the page
+    reads the pattern through the card, live, at no cost to this process -
+    DWM composes it. That is the whole of the capture loop's job for
+    everything except the four sharp corners, which still come from a
+    read of the screen because DWM's backdrop fills the window's whole
+    rectangle and knows nothing about the card's rounded outline.
+
+    Left alone deliberately: the window's shape. SetWindowRgn does work
+    now (it is the opaque surface, not WebView2, that used to composite
+    the cut-away corners to black), but a region is one bit per pixel and
+    the corners come out visibly stepped. The page's own corners are
+    anti-aliased, so they stay.
+    """
+    hwnd = _get_hwnd(window)
+    if not hwnd or not _SYSTEM_GLASS_SUPPORTED:
+        return False
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                # -1 on every side is "the frame is the whole window", the
+                # sheet-of-glass form. Without it the backdrop is drawn
+                # only under the (nonexistent) frame of this frameless
+                # window, which is nowhere.
+                m = _MARGINS(-1, -1, -1, -1) if on else _MARGINS(0, 0, 0, 0)
+                _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                v = ctypes.c_uint(DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
+                _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(v), ctypes.sizeof(v),
+                )
+                # Granting a window a system backdrop also gives it the
+                # standard Windows 11 window border, which is drawn around
+                # the window's *rectangle* - so it appeared as a bright
+                # hairline cutting across the card's rounded corners.
+                # Nothing here wants a frame: the visible outline is the
+                # page's.
+                border = ctypes.c_uint(DWMWA_COLOR_NONE)
+                _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border),
+                )
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
+    return True
 
 
 # Which of this app's windows can end up on top of which. A window has
@@ -2147,6 +2333,28 @@ def _idle_seconds():
 
 
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
+
+
+def _desktop_is_front(ours=()):
+    """True when what has the user's attention is the desktop itself.
+
+    Which is the only place a widget lying on the desktop is worth waking
+    up for. Anything else in front - a browser, an editor - means the
+    typing and clicking that GetLastInputInfo is reporting was meant for
+    that, not for this.
+    """
+    try:
+        fg = _user32.GetForegroundWindow()
+        if not fg:
+            return True                     # nothing in front of anything
+        root = _user32.GetAncestor(fg, GA_ROOT) or fg
+        if root in ours:
+            return True
+        buf = ctypes.create_unicode_buffer(64)
+        _user32.GetClassNameW(root, buf, 64)
+        return buf.value in _SHELL_CLASSES
+    except Exception:
+        return True
 
 
 def _fullscreen_app_present(ours=()):
@@ -2390,7 +2598,7 @@ def _send_to_bottom(window):
     _run_on_ui_thread(window, _apply)
 
 
-def _bring_to_front(window):
+def _bring_to_front(window, stay_on_top=False):
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
@@ -2398,8 +2606,35 @@ def _bring_to_front(window):
     def _apply():
         with _hwnd_lock:
             try:
-                _user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+                # HWND_TOP is not enough for the tray panel. It cannot take
+                # the foreground for itself (WS_EX_NOACTIVATE), and
+                # SetForegroundWindow from a process that is not already
+                # the foreground one is refused - so the window that *was*
+                # in front stays in front, and the panel opens behind it.
+                # Behind a maximised browser that means it is not on screen
+                # at all: invisible, and skipping its backdrop every frame
+                # because nothing of it can be seen.
+                where = HWND_TOPMOST if stay_on_top else HWND_TOP
+                _user32.SetWindowPos(hwnd, where, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
                 _user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+
+    _run_on_ui_thread(window, _apply)
+
+
+def _drop_topmost(window):
+    """Put a window back into the ordinary z-order."""
+    hwnd = _get_hwnd(window)
+    if not hwnd:
+        return
+
+    def _apply():
+        with _hwnd_lock:
+            try:
+                _user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
             except Exception:
                 pass
 
@@ -2560,6 +2795,7 @@ def main():
     def on_shown():
         _apply_window_shape(window)
         api._apply_capture_exclusion()
+        api._apply_system_glass()
         _set_noactivate(window, True)
         # Position it before _hide_from_taskbar, which hides and re-shows
         # the window: that way the correction happens while it is hidden
@@ -2646,6 +2882,7 @@ def main():
     def on_popover_shown():
         _apply_window_shape(popover_window)
         api._apply_capture_exclusion()
+        api._apply_system_glass()
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
         # .native only exists once the underlying native window has
@@ -2729,8 +2966,11 @@ def main():
         y=200,
         frameless=True,
         easy_drag=False,
-        transparent=False,
-        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        # Transparent like the widget's own window, so DWM's backdrop has
+        # somewhere to show through when the glass is the system's (see
+        # _set_system_glass). The page paints every pixel in the other
+        # modes, so nothing here is left bare.
+        transparent=True,
         shadow=False,
         confirm_close=False,
         hidden=True,
@@ -2748,6 +2988,7 @@ def main():
 
     def on_flyout_shown():
         _apply_window_shape(flyout_window)
+        api._apply_system_glass()
         api._apply_capture_exclusion()
         _hide_from_taskbar(flyout_window)
         try:

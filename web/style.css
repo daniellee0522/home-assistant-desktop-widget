@@ -257,6 +257,19 @@ html, body {
   background: transparent;
 }
 
+/* DWM is drawing the frosted glass behind this window itself (see
+   _set_system_glass in main.py). It is *behind* everything the page
+   paints, so the page's own opaque layers have to get out of its way:
+   the fallback colour that stood in for a capture that had not arrived
+   yet, and the blurred copy, which is now a picture of the thing that is
+   already there. What is left on #backdrop is the four sharp corners. */
+html.is-system-glass #backdrop {
+  background-color: transparent;
+}
+html.is-system-glass #backdrop-glass {
+  display: none;
+}
+
 /* ================= Grid view ================= */
 
 #view-grid {
@@ -764,6 +777,20 @@ html[data-theme="dark"] #view-picker .card-bg {
 }
 
 .slider-block { margin: 14px 0; }
+/* The chip-sized selects hold a word; this one holds a sentence, so it
+   gets the width of the panel and a line of its own. */
+.wide-select {
+  width: 100%;
+  appearance: none;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text-on-1);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  margin-top: 2px;
+}
 .slider-hint {
   margin-top: 6px;
   font-size: 11.5px;
@@ -1236,20 +1263,84 @@ input[type="range"]::-webkit-slider-thumb {
 /* ================= Faded out =================
 
    When the machine has been quiet for a while, or something is running
-   full screen, the widget fades back into the desktop rather than
-   disappearing: the backdrop it is painted on is a copy of what is
-   behind it, so fading the card towards it is the same thing as fading
-   the widget out. The first click brings it back (see wakeFromDim).
+   full screen, the widget settles back into the desktop rather than
+   disappearing. It comes back for a click on itself, or for the desktop
+   coming to the front - not for any keystroke anywhere (see
+   _desktop_is_front in main.py).
 
-   Long and slow on the way out - it should be something you notice
-   having happened rather than happening - and quick on the way back,
-   because by then someone is waiting for it. */
-html:not(.is-flyout-window) #view-grid,
-html:not(.is-flyout-window) #backdrop-glass {
-  transition: opacity 220ms ease-out;
+   It is done by restyling the tiles, not by fading a layer out. Opacity
+   on the grid was the obvious way and it is the wrong one: it fades the
+   tiles towards whatever is behind them, so on a busy wallpaper the whole
+   thing reads as coming apart rather than quietening down, and it dims
+   the glass along with the tiles even though the glass is the part that
+   should stay. So the tokens move instead - an "on" tile stops being a
+   solid white card and becomes translucent pale grey, an "off" one gives
+   up most of its remaining weight, the panel's tint thins out, and the
+   type and icons go to a grey-white with nothing left to shout with. The
+   frosted pane underneath is untouched, and so is the rate it is sampled
+   at: what is behind the glass is most of what is left to look at.
+
+   Both directions are carried by the transitions on the elements
+   themselves, since it is colours that move now and not a layer. */
+html.is-dimmed:not(.is-flyout-window) {
+  --panel: rgba(220, 232, 244, 0.20);
+  /* An "on" tile keeps its lead over an "off" one - it is still the thing
+     that is on - but as a shade of the same pale glass rather than as a
+     solid white card. Both carry the same near-white type, which is what
+     decides the ceiling here: at much above this the tile turns into a
+     bright field and takes its own text with it. */
+  --tile-on: rgba(255, 255, 255, 0.30);
+  --tile-on-text-1: rgba(255, 255, 255, 0.95);
+  --tile-on-text-2: rgba(255, 255, 255, 0.74);
+  --tile-off: rgba(150, 160, 176, 0.18);
+  --tile-off-hover: rgba(150, 160, 176, 0.18);
+  --text-off-1: rgba(255, 255, 255, 0.85);
+  --text-off-2: rgba(255, 255, 255, 0.64);
+  --glass-edge: rgba(255, 255, 255, 0.14);
+  --glass-edge-on: rgba(255, 255, 255, 0.22);
 }
-html.is-dimmed:not(.is-flyout-window) #view-grid,
-html.is-dimmed:not(.is-flyout-window) #backdrop-glass {
-  opacity: 0.3;
-  transition: opacity 1400ms ease-in-out;
+html:not(.is-flyout-window) .card-bg,
+html:not(.is-flyout-window) .tile,
+html:not(.is-flyout-window) .tile .tile-room,
+html:not(.is-flyout-window) .tile .tile-label,
+html:not(.is-flyout-window) .tile .tile-value,
+html:not(.is-flyout-window) .tile .tile-icon {
+  transition: background 260ms ease-out, background-image 260ms ease-out,
+              box-shadow 260ms ease-out, color 260ms ease-out,
+              text-shadow 260ms ease-out, transform 0.12s ease;
+}
+html.is-dimmed:not(.is-flyout-window) .card-bg,
+html.is-dimmed:not(.is-flyout-window) .tile,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-room,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-label,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-value,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-icon {
+  transition: background 700ms ease-in-out, background-image 700ms ease-in-out,
+              box-shadow 700ms ease-in-out, color 700ms ease-in-out,
+              text-shadow 700ms ease-in-out, transform 0.12s ease;
+}
+/* The icon's colour is set per accessory as an inline style (a lit bulb
+   is yellow, a running fan is blue), which is the one thing a stylesheet
+   cannot outrank without saying so. Faded out they all go the same way as
+   the type around them: near-white on a lit tile, and exactly the text's
+   own colour on an unlit one. */
+html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon {
+  color: rgba(255, 255, 255, 0.92) !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon,
+html.is-dimmed:not(.is-flyout-window) .tile:not(.is-on) .tile-icon {
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.22));
+}
+html.is-dimmed:not(.is-flyout-window) .tile:not(.is-on) .tile-icon {
+  color: var(--text-off-1) !important;
+  background: transparent !important;
+}
+/* The shadow under the type is there to hold white text off a bright
+   wallpaper. Type this pale has given up being read, and a hard shadow
+   under it only makes it look grubby. */
+html.is-dimmed:not(.is-flyout-window) .tile .tile-room,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-label,
+html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }

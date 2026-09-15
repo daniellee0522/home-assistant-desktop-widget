@@ -51,11 +51,13 @@ python packaging/build.py
 
 幾個比較不直覺的地方，原始碼裡有更完整的註解：
 
-- **視窗沒辦法是半透明的。** Mica/Acrylic、`SetWindowCompositionAttribute`、`WS_EX_LAYERED` 的色鍵、pywebview 的 `transparent=True`，在 WebView2 子視窗下全部量測過，出來的顏色不會跟著背後的桌布改變；`SetWindowRgn` 會裁出形狀，但被裁掉的區域合成出來是不透明的黑色。所以背景是自己畫的：把視窗底下那塊桌面擷取下來，鋪滿整個視窗，卡片內側用預先模糊過的版本，圓角外緣維持銳利——那四個角看起來才像真的鏤空。
+- **毛玻璃有兩條路。** Windows 11 22H2 以上，`DwmExtendFrameIntoClientArea`（整個 client area）加上 `DWMWA_SYSTEMBACKDROP_TYPE` 可以讓這個 WebView2 視窗真的半透明，毛玻璃交給 DWM 畫——跟得上背後任何變化、拖曳時不會延遲，而且不花我們一點 CPU。這正是 Windhawk 的 Translucent Windows 模組用的做法；那個模組六千行裡大部分是在逼應用程式畫出 alpha=0 的像素，而 WebView2 只要 `transparent=True` 就有了。
+
+- **舊版 Windows 得自己畫。** 單獨的 Mica/Acrylic、`SetWindowCompositionAttribute`、`WS_EX_LAYERED` 的色鍵，在 WebView2 子視窗下全部量測過，出來的顏色不會跟著背後的桌布改變。所以背景是自己畫的：把視窗底下那塊桌面擷取下來，鋪滿整個視窗，卡片內側用預先模糊過的版本，圓角外緣維持銳利——那四個角看起來才像真的鏤空。設定裡的「毛玻璃來源」就是在這兩條路之間選。
 
 - **擷取要夠便宜。** 直接從螢幕 DC `BitBlt` 比 `PrintWindow` 快五倍，但前提是自己的視窗要先用 `WDA_EXCLUDEFROMCAPTURE` 從畫面擷取中排除，否則會把自己讀進去變成無限鏡像。代價是這個 widget 不會出現在截圖和錄影裡（設定裡可以關掉）。
 
-- **只有四個角需要銳利。** 卡片蓋滿整個視窗，所以整張擷取裡真正看得到的只有圓角外的四個楔形。它們被打包成一張小方圖傳給頁面，bitmap 只有原本的 1/22——這是讓取樣維持在每幀 6ms 的主要原因。
+- **只有四個角需要銳利。** 卡片蓋滿整個視窗，所以整張擷取裡真正看得到的只有圓角外的四個楔形。它們被打包成一張小方圖傳給頁面，bitmap 只有原本的 1/22——這是讓取樣維持在每幀 6ms 的主要原因。系統毛玻璃模式下，剩下要擷取的就只有這四個角（想只讀那四小塊反而更慢：一次螢幕 blit 不管大小都要約 5ms，四次小的量到 20ms，整個視窗一次只要 8ms）。
 
 - **每個視窗獨立。** 二級菜單、設定、工作列面板各自是一個 WebView2 視窗，載入同一個頁面的不同 hash。三個視窗共用一個 renderer process（`--process-per-site`），而且不需要 GPU（`--disable-gpu`）——量測下來軟體路徑反而更省 CPU，也省掉 300MB。
 

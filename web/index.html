@@ -112,6 +112,24 @@
               <option value="6">6</option>
             </select>
           </label>
+          <label class="chip-select">
+            <span>工作列面板</span>
+            <select id="panel-theme-select">
+              <option value="follow">同上</option>
+              <option value="auto">跟隨系統</option>
+              <option value="light">淺色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+        </div>
+        <div class="slider-block">
+          <div class="slider-label"><span>毛玻璃來源</span></div>
+          <select id="glass-mode-select" class="wide-select">
+            <option value="system">系統繪製 (最省資源，即時)</option>
+            <option value="fast">畫面擷取 (widget 不出現在截圖／錄影)</option>
+            <option value="compat">相容模式 (較耗資源，會出現在截圖)</option>
+          </select>
+          <div class="slider-hint">系統繪製交給 Windows 的毛玻璃，跟得上背後任何變化且幾乎不耗資源；擷取模式是自己把桌面畫下來再模糊。</div>
         </div>
         <div class="slider-block">
           <div class="slider-label"><span>縮放比例</span><span id="zoom-value">100%</span></div>
@@ -142,10 +160,6 @@
           </div>
           <input id="dim-after-range" type="range" min="10" max="600" step="10">
         </div>
-        <label class="check-row">
-          <input id="fast-glass-check" type="checkbox">
-          <span>流暢毛玻璃 (widget 不會出現在截圖／錄影)</span>
-        </label>
         <label class="check-row">
           <input id="start-on-boot-check" type="checkbox">
           <span>開機時自動啟動</span>
