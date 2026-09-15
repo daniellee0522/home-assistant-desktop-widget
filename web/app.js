@@ -285,6 +285,13 @@ function showView(name) {
 let resizeRaf = null;
 let resizeSeq = 0;
 
+// The tray panel's own scale, deliberately not the widget's. The zoom
+// setting is about how big the widget should look sitting on the desktop,
+// which has nothing to do with how big a panel hanging off the taskbar
+// should be - and the panel wants to be compact, like the ones Windows
+// puts there.
+const FLYOUT_ZOOM = 0.5;
+
 function applyZoom() {
   // Settings is never scaled. The zoom setting is there to size the
   // *widget* against the desktop; applying it here too meant that turning
@@ -292,7 +299,9 @@ function applyZoom() {
   // size as well.
   const z = IS_SETTINGS_WINDOW
     ? 1
-    : Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
+    : IS_FLYOUT_WINDOW
+      ? FLYOUT_ZOOM
+      : Math.max(50, Math.min(200, Number(CONFIG.zoom) || 100)) / 100;
   document.documentElement.style.zoom = String(z);
   currentZoom = z;
 }
@@ -860,9 +869,19 @@ function requestPopover(tile) {
 window.__flyoutEnter = function () {
   const view = document.getElementById('view-grid');
   if (!view) return;
-  view.classList.remove('flyout-enter');
+  view.classList.remove('flyout-enter', 'flyout-leave');
   void view.offsetWidth;
   view.classList.add('flyout-enter');
+};
+
+// ...and to play it backwards on the way out. Python waits out the
+// animation before it actually hides the window (see hide_flyout).
+window.__flyoutLeave = function () {
+  const view = document.getElementById('view-grid');
+  if (!view) return;
+  view.classList.remove('flyout-enter');
+  void view.offsetWidth;
+  view.classList.add('flyout-leave');
 };
 
 // Pushed from Python (see Api.open_popover in main.py) once the popover

@@ -144,6 +144,10 @@ class Api:
         # Whether both windows are currently hidden from screen capture,
         # which is what makes the cheap backdrop path safe to use.
         self._capture_excluded = False
+        # The window kinds currently hidden from screen captures, which is
+        # exactly the set that may read the screen for their own backdrop
+        # (see _apply_capture_exclusion).
+        self._excluded_kinds = set()
         # Which overlay windows are open. While any of them is, the grid
         # window is deliberately left capturable, because it is part of
         # what is behind them and so part of their frosted backdrop.
@@ -573,18 +577,40 @@ class Api:
             pass
         self.hide_flyout()
 
+    # How long the panel's leaving animation runs for, in seconds; keep
+    # in step with .flyout-leave in style.css.
+    _FLYOUT_LEAVE_S = 0.16
+
     def hide_flyout(self):
         if not self._flyout_open:
             return
         self._flyout_open = False
         self.close_popover()
-        if self._flyout_window:
-            try:
-                self._flyout_window.hide()
-            except Exception:
-                pass
+        window = self._flyout_window
         self._overlays_open.discard("flyout")
         self._apply_capture_exclusion()
+        if not window:
+            return
+
+        def fade_then_hide():
+            # Let it play its way out before the window actually goes.
+            # On a thread because this is called from the UI thread as
+            # well (the window's own Deactivate, and on_closing), and
+            # evaluate_js from there deadlocks - see
+            # on_popover_deactivate for that story.
+            try:
+                window.evaluate_js("window.__flyoutLeave && window.__flyoutLeave()")
+            except Exception:
+                pass
+            time.sleep(self._FLYOUT_LEAVE_S)
+            if self._flyout_open:
+                return          # opened again mid-fade; leave it alone
+            try:
+                window.hide()
+            except Exception:
+                pass
+
+        threading.Thread(target=fade_then_hide, daemon=True).start()
 
     def _watch_flyout_focus(self):
         """Backstop for the Deactivate handler in main().
@@ -864,10 +890,14 @@ class Api:
             # from screen capture as well, so it has to be drawn back in;
             # in the slow path only the desktop was rendered to begin with.
             over = ()
-            if window_kind in ("popover", "settings") and self._window:
-                main_hwnd = _get_hwnd(self._window)
-                if main_hwnd:
-                    over = (main_hwnd,)
+            if window_kind in ("popover", "settings"):
+                below = []
+                for kind in ("main", "flyout"):
+                    win = self._window_for(kind)
+                    h = _get_hwnd(win) if win else None
+                    if h and _user32.IsWindowVisible(h):
+                        below.append(h)
+                over = tuple(below)
             # Reading the screen only shows what this process has not
             # excluded from capture, so which window is excluded decides
             # what a read is good for:
@@ -884,9 +914,7 @@ class Api:
             # first and does not work: display affinity is applied by DWM
             # when it next composes, so a read taken immediately after
             # clearing it still shows the window missing.
-            can_read_screen = self._capture_excluded and (
-                window_kind != "main" or not self._overlays_open
-            )
+            can_read_screen = self._capture_excluded and window_kind in self._excluded_kinds
             raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
             if raw is None:
                 # Either the fast path is off or unusable here, or it
@@ -1000,23 +1028,48 @@ class Api:
     # ---------------------------------------------------------------
 
     def _apply_capture_exclusion(self):
-        """Turn the cheap backdrop path on or off for both windows.
+        """Decide, for each window, whether it is hidden from screen
+        captures - which is what makes the cheap backdrop path usable.
 
-        Only claims it is on if the OS actually accepted it on the main
-        window - on an older build the call fails and the slower
+        A window has to be hidden from capture to read the screen for its
+        own backdrop, or it reads itself back in: an infinite mirror. But
+        it has to be *visible* to capture for anything drawn on top of it
+        to include it in theirs - and a window excluded from capture does
+        not simply vanish from a screen read, it comes back black. That is
+        where the black edge around the detail card came from when it was
+        opened over the tray panel.
+
+        So: a window is excluded unless something of ours is currently on
+        top of it. The grid has the panel and the card above it; the panel
+        has the card above it but is itself not above the grid in any way
+        that matters; the card and Settings are always the topmost thing
+        we have.
+
+        Only claims the mode is on if the OS actually accepted it on the
+        main window - on an older build the call fails and the slower
         PrintWindow path has to keep being used, silently rather than
         showing the widget its own reflection.
         """
         wanted = bool(self._cfg.get("fast_glass", True))
+        above_panel = bool(self._overlays_open - {"flyout"})
+        excluded = {
+            "main": wanted and not self._overlays_open,
+            "flyout": wanted and not above_panel,
+            "popover": wanted,
+            "settings": wanted,
+        }
         ok = False
         if self._window:
-            # Not while an overlay is up: it needs to see this window.
-            ok = _set_capture_exclusion(self._window, wanted and not self._overlays_open)
+            ok = _set_capture_exclusion(self._window, excluded["main"])
             if self._overlays_open:
                 ok = True          # the mode is still on, just suspended here
-        for win in (self._popover_window, self._settings_window, self._flyout_window):
+        for kind in ("popover", "settings", "flyout"):
+            win = self._window_for(kind)
             if win:
-                _set_capture_exclusion(win, wanted)
+                _set_capture_exclusion(win, excluded[kind])
+        # Which windows may read the screen for their own backdrop: the
+        # ones that are not in it.
+        self._excluded_kinds = {k for k, v in excluded.items() if v}
         self._capture_excluded = wanted and ok
 
     def _push_prefs(self):
