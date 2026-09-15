@@ -588,6 +588,19 @@ function refreshBackdropSoon(delay) {
   backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 60 : delay);
 }
 
+// The pace is decided at the end of each frame, so a window that has
+// spent the last while skipping - which every hidden one does - has
+// already booked its next look for a second away. Coming back on screen
+// has to tear that up, or the backdrop sits frozen for the rest of that
+// second while the card animates in over it.
+function restartBackdropTicker() {
+  clearTimeout(backdropTimer);
+  backdropTimer = null;
+  backdropSkipMs = 0;
+  backdropStill = 0;
+  startBackdropTicker();
+}
+
 function startBackdropTicker() {
   if (backdropTimer) return;
   // Chained rather than setInterval: each frame waits for the previous one
@@ -932,6 +945,7 @@ window.__flyoutPrepare = function () {
 };
 
 window.__flyoutEnter = function () {
+  restartBackdropTicker();
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter', 'flyout-leave');
     void el.offsetWidth;
