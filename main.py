@@ -834,6 +834,12 @@ class Api:
             pass
         self._apply_capture_exclusion()
         _bring_to_front(self._popover_window)
+        # Its entrance played while it was still hidden; run it again now
+        # that there is someone to see it.
+        try:
+            self._popover_window.evaluate_js("window.__popoverEnter && window.__popoverEnter()")
+        except Exception:
+            pass
 
     def open_settings_window(self):
         """Bring up Settings, centred on whichever screen the widget is on.

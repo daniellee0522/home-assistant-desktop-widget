@@ -972,6 +972,17 @@ window.__flyoutLeave = function () {
   }
 };
 
+// The card is rendered while its window is still hidden, so by the time
+// anyone can see it its entrance has already played to itself. Python
+// replays it once the window is actually up.
+window.__popoverEnter = function () {
+  const popover = document.getElementById('detail-popover');
+  if (!popover) return;
+  popover.classList.remove('show');
+  void popover.offsetWidth;
+  popover.classList.add('show');
+};
+
 // Pushed from Python (see Api.open_popover in main.py) once the popover
 // window has been moved into position for a given tile.
 window.__showPopoverForTile = function (tileId) {
