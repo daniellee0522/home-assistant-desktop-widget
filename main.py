@@ -1085,11 +1085,14 @@ class Api:
         where the black edge around the detail card came from when it was
         opened over the tray panel.
 
-        So: a window is excluded unless something of ours is currently on
-        top of it. The grid has the panel and the card above it; the panel
-        has the card above it but is itself not above the grid in any way
-        that matters; the card and Settings are always the topmost thing
-        we have.
+        So: a window is excluded unless one of ours that can sit above it
+        is actually overlapping it (_WINDOWS_ABOVE). Overlapping, not
+        merely open - the panel lives in a screen corner and the widget
+        usually sits nowhere near it, and lifting the widget's exclusion
+        every time the panel opened put the widget on the fallback path
+        for as long as it was up, which changes what its glass is a
+        picture of. That reads as the widget distorting the moment the
+        panel is summoned.
 
         Only claims the mode is on if the OS actually accepted it on the
         main window - on an older build the call fails and the slower
@@ -1097,17 +1100,19 @@ class Api:
         showing the widget its own reflection.
         """
         wanted = bool(self._cfg.get("fast_glass", True))
-        above_panel = bool(self._overlays_open - {"flyout"})
-        excluded = {
-            "main": wanted and not self._overlays_open,
-            "flyout": wanted and not above_panel,
-            "popover": wanted,
-            "settings": wanted,
-        }
+        rects = {kind: _visible_rect(self._window_for(kind))
+                 for kind in ("main", "flyout", "popover", "settings")}
+        excluded = {}
+        for kind, above in _WINDOWS_ABOVE.items():
+            mine = rects.get(kind)
+            covered = bool(mine) and any(
+                rects.get(other) and _rects_overlap(mine, rects[other]) for other in above
+            )
+            excluded[kind] = wanted and not covered
         ok = False
         if self._window:
             ok = _set_capture_exclusion(self._window, excluded["main"])
-            if self._overlays_open:
+            if not excluded["main"]:
                 ok = True          # the mode is still on, just suspended here
         for kind in ("popover", "settings", "flyout"):
             win = self._window_for(kind)
@@ -1793,6 +1798,35 @@ def _set_window_size(hwnd, w, h):
 
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND = 1
+
+
+# Which of this app's windows can end up on top of which. A window has
+# to come out of hiding from screen captures only for the ones above it,
+# and only when one of those is actually overlapping it.
+_WINDOWS_ABOVE = {
+    "main": ("flyout", "popover", "settings"),
+    "flyout": ("popover", "settings"),
+    "popover": (),
+    "settings": (),
+}
+
+
+def _visible_rect(window):
+    """This window's screen rectangle, or None if it is not on screen."""
+    hwnd = _get_hwnd(window) if window else None
+    if not hwnd or not _user32.IsWindowVisible(hwnd):
+        return None
+    try:
+        r = (ctypes.c_long * 4)()
+        if not _user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        return (r[0], r[1], r[2], r[3])
+    except Exception:
+        return None
+
+
+def _rects_overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
 def _set_capture_exclusion(window, excluded):
