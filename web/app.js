@@ -540,6 +540,14 @@ function cardGeometry() {
   return null;
 }
 
+// How often the frosted copy is refreshed, against every frame for the
+// sharp corners. The corners sit against the live desktop along the
+// window's edge, so anything stale there shows as a seam; the frosted
+// copy sits under the card, where a blur of a blur of a frame ago is
+// indistinguishable from a blur of this one.
+const BLUR_EVERY_MS = 60;
+let lastBlurAt = 0;
+
 function paintBackdrop(sharp, blurred, w, h, corner) {
   const sys = systemGlass();
   const ctx = backdropContext(sys);
@@ -585,6 +593,11 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
     return;
   }
   if (!glass) return;
+  // No frosted copy with this frame: this was one of the frames that only
+  // wanted the corners. What is already on the glass canvas is a few tens
+  // of milliseconds old and stays exactly where it is - clearing it would
+  // make the card flicker between frosted and bare.
+  if (!blurred) return;
   // The card's frosted fill, on its own layer above that: it belongs to
   // the card and has to be able to come and go with it. Clipped to the
   // card's own rounded rectangle here rather than set as its CSS
@@ -597,7 +610,7 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
   } else {
     gctx.clearRect(0, 0, w, h);
   }
-  const card = blurred ? cardGeometry() : null;
+  const card = cardGeometry();
   if (!card) return;
   gctx.save();
   gctx.beginPath();
@@ -645,10 +658,13 @@ function refreshBackdrop() {
     && document.getElementById('view-grid').getAnimations().length);
   const cornersAreEnough = !IS_FLYOUT_WINDOW || systemGlass() || !animating;
   const corner = (card && card.fills && cornersAreEnough) ? Math.ceil(card.radius) : 0;
+  const wantBlur = !corner || (startedAt - lastBlurAt) >= BLUR_EVERY_MS;
+  if (wantBlur) lastBlurAt = startedAt;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
-                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null)
+                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null,
+                          wantBlur)
     .then((shot) => {
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a

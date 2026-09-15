@@ -997,7 +997,7 @@ class Api:
         return True
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             want_corner=0, at_x=None, at_y=None):
+                             want_corner=0, at_x=None, at_y=None, want_blur=True):
         """A JPEG of whatever is behind this window, base64'd.
 
         The page draws it edge to edge and blurs it behind the card (see
@@ -1167,8 +1167,14 @@ class Api:
             # (see _set_system_glass): then the only thing the page still
             # wants from here is the sharp corners, and a blurred copy
             # would be painted over the real thing.
+            # The blurred copy is only asked for every few frames (see
+            # BLUR_EVERY_MS in app.js). Behind the card it is blurred past
+            # the point where being a frame or two old can be seen, and
+            # leaving it out is most of what a frame costs here - which
+            # buys back latency for the corners, where staleness is the
+            # one thing that *is* visible.
             blur_buf = None
-            if not self._system_glass_on(window_kind):
+            if want_blur and not self._system_glass_on(window_kind):
                 small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
                 small = small.filter(ImageFilter.GaussianBlur(radius=4))
                 blur_buf = io.BytesIO()
