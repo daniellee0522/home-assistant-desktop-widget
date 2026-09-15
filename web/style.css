@@ -1283,7 +1283,10 @@ input[type="range"]::-webkit-slider-thumb {
    Both directions are carried by the transitions on the elements
    themselves, since it is colours that move now and not a layer. */
 html.is-dimmed:not(.is-flyout-window) {
-  --panel: rgba(220, 232, 244, 0.20);
+  /* Darker than the widget's own tint rather than lighter: faded out it
+     should read as settling into the desktop, and on a pale wallpaper a
+     pale tint just made it glare. */
+  --panel: rgba(104, 120, 140, 0.26);
   /* An "on" tile keeps its lead over an "off" one - it is still the thing
      that is on - but as a shade of the same pale glass rather than as a
      solid white card. Both carry the same near-white type, which is what

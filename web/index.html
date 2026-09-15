@@ -129,7 +129,7 @@
             <option value="fast">畫面擷取 (widget 不出現在截圖／錄影)</option>
             <option value="compat">相容模式 (較耗資源，會出現在截圖)</option>
           </select>
-          <div class="slider-hint">系統繪製交給 Windows 的毛玻璃，跟得上背後任何變化且幾乎不耗資源；擷取模式是自己把桌面畫下來再模糊。</div>
+          <div class="slider-hint">毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。</div>
         </div>
         <div class="slider-block">
           <div class="slider-label"><span>縮放比例</span><span id="zoom-value">100%</span></div>
@@ -152,11 +152,11 @@
         </label>
         <label class="check-row">
           <input id="dim-idle-check" type="checkbox">
-          <span>閒置時淡化 (全螢幕時也淡化，點一下恢復)</span>
+          <span>離開桌面時淡化 (全螢幕時立刻淡化，回到桌面或點一下恢復)</span>
         </label>
         <div class="slider-block" id="dim-after-block">
           <div class="slider-label">
-            <span>閒置多久後淡化</span><span id="dim-after-value">2 分鐘</span>
+            <span>離開桌面多久後淡化</span><span id="dim-after-value">2 分鐘</span>
           </div>
           <input id="dim-after-range" type="range" min="10" max="600" step="10">
         </div>

@@ -51,14 +51,16 @@ DEFAULT_CONFIG = {
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
     "opacity": 85,            # percent; whole-window translucency (see main.py)
     # Who draws the frosted glass, and at what price:
-    #   "system"  - DWM does it (Windows 11 22H2+), cheapest and always in
-    #               step with what is behind the window
     #   "fast"    - captured from the screen, which needs the widget to be
     #               hidden from screen capture to avoid reading itself back
     #   "compat"  - captured the slow way, with the widget visible to
     #               screenshots and screen recording
+    #   "system"  - DWM draws it. Off unless HA_WIDGET_SYSTEM_GLASS is set:
+    #               it works in a window of its own but not in this app,
+    #               and the note above _SYSTEM_GLASS_SUPPORTED in main.py
+    #               says exactly how far it got.
     # See _set_system_glass and _set_capture_exclusion in main.py.
-    "glass_mode": "system",
+    "glass_mode": "fast",
     # How often the frosted backdrop is re-read from the screen, in
     # frames per second. The ceiling rather than the rate: a still
     # wallpaper backs off to a look every few seconds on its own, and a
@@ -70,11 +72,13 @@ DEFAULT_CONFIG = {
     # like the widget is - it sits over whatever was open - so what reads
     # well there is often the opposite. "follow" takes the widget's.
     "panel_theme": "follow",
-    # Fade the widget back into the desktop when nobody has touched the
-    # machine for a while, or while something is running full screen, and
-    # bring it back on the first click. It is a gadget that lives on the
+    # Fade the widget back into the desktop once the desktop itself has
+    # been out of sight for this long - something else in front of it,
+    # or something running full screen - and bring it back when the
+    # desktop returns or it is clicked. It is a gadget that lives on the
     # desktop all day; there is no reason for it to be at full strength
-    # while nobody is there.
+    # behind somebody's browser. dim_after_sec is how long the desktop
+    # has to have been covered, not how long the machine has been idle.
     "dim_when_idle": True,
     "dim_after_sec": 120,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height

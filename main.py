@@ -147,8 +147,10 @@ class Api:
         # the thread watching for the moments it should be - see
         # _watch_for_idle.
         self._dimmed = False
-        # When someone last asked for it back (see wake).
+        # When someone last asked for it back (see wake), and since when
+        # the desktop has been out of sight (see _watch_for_idle).
         self._woke_at = 0.0
+        self._off_desktop_since = 0.0
         self._dim_stop = threading.Event()
 
         # The detail popover lives in its own separate OS window (see the
@@ -691,6 +693,7 @@ class Api:
         # Above everything while it is open, the way the volume and
         # network flyouts are; put back on the way out (see hide_flyout).
         _bring_to_front(window, stay_on_top=True)
+        self._apply_system_glass("flyout")
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
         try:
@@ -915,6 +918,7 @@ class Api:
             pass
         self._apply_capture_exclusion()
         _bring_to_front(self._popover_window)
+        self._apply_system_glass("popover")
         # Its entrance played while it was still hidden; run it again now
         # that there is someone to see it.
         try:
@@ -1284,7 +1288,7 @@ class Api:
         # Everything but the compatibility mode wants the fast path: the
         # system-glass mode still reads the four corners off the screen,
         # and reading the screen means being out of it.
-        wanted = self._cfg.get("glass_mode", "fast") != "compat"
+        wanted = self._cfg.get("glass_mode", "fast") == "fast"   # TEMP probe
         # A window being armed is already sitting at the rectangle it is
         # about to appear in - it is only the showing that has not
         # happened yet - so it counts as present here. Left out, the
@@ -1335,11 +1339,23 @@ class Api:
             return False
         return kind is None or kind in self._SYSTEM_GLASS_KINDS
 
-    def _apply_system_glass(self):
-        for kind in self._SYSTEM_GLASS_KINDS:
-            win = self._window_for(kind)
+    def _apply_system_glass(self, kind=None):
+        """(Re-)ask DWM for the glass, for one window or for all of them.
+
+        Has to be done again after every show: DWM drops a window's blur
+        region when it is hidden, and drops it again whenever the extended
+        styles are rewritten underneath it (which _hide_from_taskbar and
+        _set_noactivate both do). Granted and then silently revoked, what
+        was left was the form's own background colour - a flat near-white
+        that looked exactly like glass that had failed to be transparent.
+        """
+        kinds = (kind,) if kind else self._SYSTEM_GLASS_KINDS
+        for k in kinds:
+            if k not in self._SYSTEM_GLASS_KINDS:
+                continue
+            win = self._window_for(k)
             if win:
-                _set_system_glass(win, self._system_glass_on(kind))
+                _set_system_glass(win, self._system_glass_on(k))
 
     def debug_capturable(self, on=True):
         """Put the windows back into screen captures, for development.
@@ -1369,6 +1385,7 @@ class Api:
         # of a long quiet spell and the idle counter was still reading
         # minutes.
         self._woke_at = time.monotonic()
+        self._off_desktop_since = 0.0
         if self._dimmed:
             self._dimmed = False
             self._push_dim()
@@ -1386,13 +1403,20 @@ class Api:
             pass
 
     def _watch_for_idle(self):
-        """Fade the widget down when the machine goes quiet, and back up
-        the moment anything happens.
+        """Fade the widget down once the desktop has been out of sight for
+        long enough, and bring it back when the desktop returns.
 
-        Polled once a second rather than hooked: GetLastInputInfo is a
-        counter, there is no event for "nothing has happened", and a
-        second either way does not matter for something measured in
-        minutes.
+        Not on the input clock. A widget lying on the desktop is only
+        worth looking at when the desktop is what you are looking at, and
+        whether someone is typing says nothing about that: they can be
+        busy in a browser for an hour, in which case it should fade, or
+        sitting still looking straight at it, in which case it should not.
+        So the thing being timed is how long something else has been in
+        front, and the desktop coming back is what ends it.
+
+        Polled once a second rather than hooked: there is no event for
+        "still not the desktop", and a second either way does not matter
+        for something measured in minutes.
         """
         def loop():
             while not self._dim_stop.wait(1.0):
@@ -1402,20 +1426,21 @@ class Api:
                     else:
                         after = max(10, int(self._cfg.get("dim_after_sec", 120)))
                         mine = self._own_hwnds()
-                        wanted = (_idle_seconds() >= after
-                                  or _fullscreen_app_present(mine))
-                        if wanted and (time.monotonic() - self._woke_at) < after:
-                            wanted = False          # asked for, recently
-                        # Coming back up is not the same question as going
-                        # down. Input alone is not a reason: someone
-                        # answering mail has not asked to see the widget,
-                        # and a widget that brightens behind their window
-                        # every time they touch the keyboard is exactly the
-                        # thing fading it was meant to stop. It comes back
-                        # for the desktop, or for a click on itself (which
-                        # arrives through wake(), not through here).
-                        if self._dimmed and not wanted and not _desktop_is_front(mine):
+                        now = time.monotonic()
+                        if _desktop_is_front(mine):
+                            # Home. The clock stops and resets, and
+                            # anything faded comes back.
+                            self._off_desktop_since = 0.0
+                            wanted = False
+                        else:
+                            if not self._off_desktop_since:
+                                self._off_desktop_since = now
+                            wanted = (now - self._off_desktop_since) >= after
+                        # Something full screen is not a matter of time.
+                        if _fullscreen_app_present(mine):
                             wanted = True
+                        elif wanted and (now - self._woke_at) < after:
+                            wanted = False          # asked for, recently
                     if wanted != self._dimmed:
                         self._dimmed = wanted
                         self._push_dim()
@@ -1723,6 +1748,11 @@ _gdi32.GetDIBits.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
 ]
 _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+# A region handle is pointer-sized; undeclared, ctypes would hand back a
+# truncated 32-bit int and the handle would be freed from the wrong place.
+_gdi32.CreateRectRgn.restype = ctypes.c_void_p
+_dwmapi.DwmEnableBlurBehindWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_dwmapi.DwmEnableBlurBehindWindow.restype = ctypes.c_long
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 _user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
@@ -1735,9 +1765,6 @@ _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
 _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.GetAncestor.restype = ctypes.c_void_p
 _user32.GetForegroundWindow.restype = ctypes.c_void_p
-_user32.GetLastInputInfo.argtypes = [ctypes.c_void_p]
-_kernel32 = ctypes.WinDLL("kernel32")
-_kernel32.GetTickCount.restype = ctypes.c_uint32
 _user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
@@ -2157,9 +2184,76 @@ DWMSBT_TRANSIENTWINDOW = 3          # acrylic: a blur of whatever is behind
 DWMWA_BORDER_COLOR = 34
 DWMWA_COLOR_NONE = 0xFFFFFFFE
 
-# DWMWA_SYSTEMBACKDROP_TYPE arrived in Windows 11 22H2. Below that the
-# call fails harmlessly and the captured backdrop does all the work.
-_SYSTEM_GLASS_SUPPORTED = sys.getwindowsversion().build >= 22621
+# The other way to ask DWM for glass, through the undocumented accent
+# policy that every Windows customisation tool uses. It is the one worth
+# having, because it takes the tint as an argument: DWMWA_SYSTEMBACKDROP_TYPE
+# comes with the system's own recipe, and in light mode that recipe is
+# nearly white - measured on this widget, bare glass over a wallpaper at
+# RGB(103,106,152) came out at (238,239,242), which is not a window you
+# can see through. The same measurement with an accent tint of zero alpha
+# leaves the colour where the wallpaper had it and only blurs.
+WCA_ACCENT_POLICY = 19
+ACCENT_ENABLE_BLURBEHIND = 3
+ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+ACCENT_FLAG_MODERN_ACRYLIC_RECIPE = 1 << 1      # Windows 11 22H2+
+DWM_BB_ENABLE = 0x01
+DWM_BB_BLURREGION = 0x02
+DWM_BB_TRANSITIONONMAXIMIZED = 0x04
+
+
+class _ACCENT_POLICY(ctypes.Structure):
+    _fields_ = [
+        ("AccentState", ctypes.c_uint), ("AccentFlags", ctypes.c_uint),
+        ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_uint),
+    ]
+
+
+class _WINCOMPATTRDATA(ctypes.Structure):
+    _fields_ = [
+        ("Attrib", ctypes.c_uint), ("pvData", ctypes.c_void_p),
+        ("cbData", ctypes.c_size_t),
+    ]
+
+
+class _DWM_BLURBEHIND(ctypes.Structure):
+    _fields_ = [
+        ("dwFlags", ctypes.c_uint), ("fEnable", ctypes.c_int),
+        ("hRgnBlur", ctypes.c_void_p), ("fTransitionOnMaximized", ctypes.c_int),
+    ]
+
+
+_SetWindowCompositionAttribute = getattr(_user32, "SetWindowCompositionAttribute", None)
+if _SetWindowCompositionAttribute is not None:
+    _SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _SetWindowCompositionAttribute.restype = ctypes.c_int
+
+# DWMWA_SYSTEMBACKDROP_TYPE arrived in Windows 11 22H2, and in a window
+# of its own it works: a bare pywebview window with transparent=True, an
+# extended frame and this attribute shows a live blur of the pattern
+# behind it, measured (74.7, 88.2, 81.1 against a pattern averaging 74.6,
+# 86.2, 78.0 - the colour of what is behind, blurred).
+#
+# It does not work in *this* app, and what stops it is the WinForms form
+# the page sits on. Established by painting that form red: the middle of
+# the card turned red, so the page and the WebView2 surface above it are
+# genuinely transparent and what shows through is the form, which paints
+# its own opaque background over whatever DWM drew. Black there - the
+# trick that makes GDI painting read as alpha zero inside an extended
+# frame, which is what Windhawk's mod forces apps into - gives a black
+# card instead of glass. Ruled out along the way: the capture exclusion,
+# the no-activate and tool-window styles, the corner and transition
+# attributes, hiding and re-showing, bottom-pinning, the browser flags,
+# which window is pywebview's master, and the accent-policy blur (opaque
+# on its own).
+#
+# So the mode stays off unless it is asked for by name. Everything below
+# it - the glass_mode setting, the page's corners-only painting, the
+# backdrop that never has to be captured - is in place and works the
+# moment the form stops painting over it.
+_SYSTEM_GLASS_SUPPORTED = (
+    sys.getwindowsversion().build >= 22621
+    and bool(os.environ.get("HA_WIDGET_SYSTEM_GLASS"))
+)
 
 
 def _set_system_glass(window, on):
@@ -2183,6 +2277,10 @@ def _set_system_glass(window, on):
     read of the screen because DWM's backdrop fills the window's whole
     rectangle and knows nothing about the card's rounded outline.
 
+    The blur comes from the accent policy rather than from
+    DWMWA_SYSTEMBACKDROP_TYPE, because that one brings its own tint and in
+    light mode the tint is nearly white.
+
     Left alone deliberately: the window's shape. SetWindowRgn does work
     now (it is the opaque surface, not WebView2, that used to composite
     the cut-away corners to black), but a region is one bit per pixel and
@@ -2197,11 +2295,22 @@ def _set_system_glass(window, on):
         with _hwnd_lock:
             try:
                 # -1 on every side is "the frame is the whole window", the
-                # sheet-of-glass form. Without it the backdrop is drawn
-                # only under the (nonexistent) frame of this frameless
-                # window, which is nowhere.
+                # sheet-of-glass form. Without it there is nothing for a
+                # backdrop to be drawn under: this window has no frame.
                 m = _MARGINS(-1, -1, -1, -1) if on else _MARGINS(0, 0, 0, 0)
-                _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                hr_frame = _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                # Whatever WebView2 leaves transparent shows the *form*
+                # underneath, and the form paints its own background over
+                # anything DWM put there. Asking for a transparent one
+                # throws on a top-level form and painting it black gets a
+                # black card rather than glass, so it is left alone - and
+                # this is as far as the system backdrop gets here (see the
+                # note on the function).
+                try:
+                    from System.Drawing import Color as _Color
+                    window.native.browser.webview.DefaultBackgroundColor = _Color.Transparent
+                except Exception:
+                    pass
                 v = ctypes.c_uint(DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
                 _dwmapi.DwmSetWindowAttribute(
                     hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(v), ctypes.sizeof(v),
@@ -2309,39 +2418,15 @@ _user32.WindowFromPoint.restype = ctypes.c_void_p
 GA_ROOT = 2
 
 
-class _LASTINPUTINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.c_uint32), ("dwTime", ctypes.c_uint32)]
-
-
-def _idle_seconds():
-    """How long since the last keyboard or mouse input, anywhere.
-
-    Deliberately the whole machine's idle time rather than this window's:
-    the widget is furniture, and "nobody is here" is the question, not
-    "nobody has touched the widget".
-    """
-    try:
-        info = _LASTINPUTINFO()
-        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
-        if not _user32.GetLastInputInfo(ctypes.byref(info)):
-            return 0.0
-        # Both halves are 32-bit and wrap together every 49 days; the
-        # subtraction is done in that width so a wrap cancels out.
-        return ((_kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
-    except Exception:
-        return 0.0
-
-
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
 
 
 def _desktop_is_front(ours=()):
     """True when what has the user's attention is the desktop itself.
 
-    Which is the only place a widget lying on the desktop is worth waking
-    up for. Anything else in front - a browser, an editor - means the
-    typing and clicking that GetLastInputInfo is reporting was meant for
-    that, not for this.
+    Which is the only place a widget lying on the desktop is worth being
+    at full strength for: anything else in front - a browser, an editor -
+    is what the person is actually looking at.
     """
     try:
         fg = _user32.GetForegroundWindow()
@@ -2795,7 +2880,6 @@ def main():
     def on_shown():
         _apply_window_shape(window)
         api._apply_capture_exclusion()
-        api._apply_system_glass()
         _set_noactivate(window, True)
         # Position it before _hide_from_taskbar, which hides and re-shows
         # the window: that way the correction happens while it is hidden
@@ -2809,6 +2893,14 @@ def main():
                 )
         _hide_from_taskbar(window)
         _send_to_bottom(window)
+        # Last, and it has to be last. Everything above rewrites the
+        # window's extended styles or hides and re-shows it, and DWM drops
+        # a window's blur region and backdrop when that happens - so
+        # applied any earlier this was being granted and then quietly
+        # taken away again, and the card came back as the form's own
+        # background colour: the flat near-white that looked like the
+        # glass simply not being transparent.
+        api._apply_system_glass()
         threading.Thread(
             target=_bottom_pin_loop, args=(window, bottom_pin_stop, api._pin_enabled), daemon=True,
         ).start()
@@ -2882,9 +2974,9 @@ def main():
     def on_popover_shown():
         _apply_window_shape(popover_window)
         api._apply_capture_exclusion()
-        api._apply_system_glass()
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
+        api._apply_system_glass()          # after the style surgery, not before
         # .native only exists once the underlying native window has
         # actually been created, which happens right before this event
         # fires - not yet at the point create_window() above returns.
@@ -2988,7 +3080,6 @@ def main():
 
     def on_flyout_shown():
         _apply_window_shape(flyout_window)
-        api._apply_system_glass()
         api._apply_capture_exclusion()
         _hide_from_taskbar(flyout_window)
         try:
@@ -3013,6 +3104,7 @@ def main():
             settings_window.hide()
         else:
             window.show()
+            api._apply_system_glass("main")
         api._desktop_visible = not api._desktop_visible
 
     def activate(icon=None, item=None):
@@ -3022,6 +3114,7 @@ def main():
     def open_settings(icon=None, item=None):
         if not api._desktop_visible:
             window.show()
+            api._apply_system_glass("main")
             api._desktop_visible = True
         api.open_settings_window()
 
