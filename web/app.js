@@ -426,10 +426,22 @@ let glassCtx = null;
 // margin - the whole frame has to come back sharp.
 const CARD_SNAP_PX = 4;
 
+// The card's resting geometry, remembered from the last moment nothing
+// was animating. The frosted fill is painted into a canvas that carries
+// the *same* entrance animation as the card, so it has to be painted
+// where the card rests: measure the card mid-animation and its transform
+// is applied twice - once in the numbers the clip is cut from, once by
+// the canvas's own animation - which is the picture visibly warping until
+// the animation settles.
+let restingCard = null;
+
 function cardGeometry() {
   const cv = document.getElementById('backdrop');
   if (!cv) return null;
   const dpr = window.devicePixelRatio || 1;
+  const view = document.getElementById('view-grid');
+  const animating = !!(view && view.getAnimations && view.getAnimations().length);
+  if (animating && restingCard) return restingCard;
   for (const card of document.querySelectorAll('.card-bg')) {
     const r = card.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) continue;        // a view that is not showing
@@ -446,6 +458,7 @@ function cardGeometry() {
       box.h = cv.height;
       box.fills = true;
     }
+    if (!animating) restingCard = box;
     return box;
   }
   return null;
@@ -515,9 +528,13 @@ function refreshBackdrop() {
   const dpr = window.devicePixelRatio || 1;
   // Only the wedges outside the card's corners are ever seen sharp, so
   // that is all that has to come back at full size - as long as the card
-  // really does cover the window.
+  // really does cover the window, and goes on covering it. The tray panel
+  // is the exception: its card scales out of the corner and back into it,
+  // and everything it uncovers on the way is canvas nobody has painted
+  // since the last full frame. That stale middle showing through the
+  // animation is what the panel looked like it was warping through.
   const card = cardGeometry();
-  const corner = (card && card.fills) ? Math.ceil(card.radius) : 0;
+  const corner = (card && card.fills && !IS_FLYOUT_WINDOW) ? Math.ceil(card.radius) : 0;
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr), corner)
