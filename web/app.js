@@ -129,7 +129,7 @@ function climateBadge(state, on) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', columns: 4, tiles: [],
+  ha_url: '', ha_token: '', theme: 'auto', columns: 4, tiles: [], sample_fps: 16,
   lock_position: false, start_on_boot: false,
   zoom: 100, fixed_size: false, fixed_width: 400, fixed_height: 300,
 };
@@ -387,7 +387,18 @@ new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 // machine thins itself out instead of pinning a core. A blurred backdrop
 // hides a low frame rate well, so this is a cheap trade.
 const BACKDROP_DUTY = 4;              // wait this many times the capture cost
-const BACKDROP_MIN_MS = 60;           // ...but never busier than this
+// ...but never busier than the rate the user asked for. Theirs to set,
+// because the right answer depends on what their wallpaper is doing: a
+// still one needs almost nothing, Wallpaper Engine at 60fps will take
+// whatever it is given.
+const SAMPLE_FPS_MIN = 2;
+const SAMPLE_FPS_MAX = 30;
+
+function backdropFloorMs() {
+  const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
+    Number(CONFIG.sample_fps) || 16));
+  return Math.round(1000 / fps);
+}
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 const BACKDROP_STILL_BEFORE_IDLE = 8;
 let backdropPending = false;
@@ -398,7 +409,7 @@ let backdropStill = 0;
 // hidden, or completely covered); it replaces the pacing below for as
 // long as that lasts - see refreshBackdrop.
 let backdropSkipMs = 0;
-let backdropFrameMs = BACKDROP_MIN_MS;
+let backdropFrameMs = 60;
 
 // The interval is derived from what a capture costs, so a single slow
 // frame must not be allowed to set the pace: capture time spikes whenever
@@ -615,7 +626,7 @@ function startBackdropTicker() {
     const wait = backdropSkipMs
       || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
         ? BACKDROP_IDLE_MS
-        : Math.max(BACKDROP_MIN_MS, Math.round(backdropFrameMs * BACKDROP_DUTY)));
+        : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY)));
     backdropTimer = setTimeout(() => {
       (document.hidden ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
     }, wait);
@@ -1546,6 +1557,7 @@ function openSettingsView() {
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
+  setSampleFpsSlider(CONFIG.sample_fps || 16);
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
   document.getElementById('fast-glass-check').checked = CONFIG.fast_glass !== false;
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
@@ -1557,6 +1569,12 @@ function openSettingsView() {
   renderTileList();
   updateConnDot();
   showView('view-settings');
+}
+
+function setSampleFpsSlider(fps) {
+  const v = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX, Number(fps) || 16));
+  document.getElementById('sample-fps-range').value = String(v);
+  document.getElementById('sample-fps-value').textContent = v + ' fps';
 }
 
 function setZoomSlider(pct) {
@@ -1575,7 +1593,7 @@ async function savePrefs() {
   try {
     await window.pywebview.api.save_prefs(CONFIG.theme, CONFIG.columns, CONFIG.lock_position,
       CONFIG.zoom, CONFIG.fixed_size, CONFIG.fixed_width, CONFIG.fixed_height,
-      CONFIG.opacity, CONFIG.fast_glass);
+      CONFIG.opacity, CONFIG.fast_glass, CONFIG.sample_fps);
   } catch (e) { /* ignore */ }
 }
 
@@ -1800,13 +1818,23 @@ function init() {
     await savePrefs();
     // The capture path changed underneath us, so the pacing estimate and
     // the held frame are both about the old one.
-    backdropFrameMs = BACKDROP_MIN_MS;
+    backdropFrameMs = backdropFloorMs();
     refreshBackdropSoon(0);
   });
   // The number follows the thumb while it is being dragged, but the
   // widget is only re-laid-out on release: every step in between would
   // save the config and put the grid window through a relayout and a
   // fresh desktop capture, which is a lot of work to throw away 5% later.
+  const fpsRange = document.getElementById('sample-fps-range');
+  fpsRange.addEventListener('input', (e) => {
+    document.getElementById('sample-fps-value').textContent = e.target.value + ' fps';
+  });
+  fpsRange.addEventListener('change', async (e) => {
+    CONFIG.sample_fps = Number(e.target.value);
+    setSampleFpsSlider(CONFIG.sample_fps);
+    await savePrefs();
+  });
+
   const zoomRange = document.getElementById('zoom-range');
   zoomRange.addEventListener('input', (e) => {
     document.getElementById('zoom-value').textContent = e.target.value + '%';

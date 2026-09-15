@@ -54,6 +54,13 @@ DEFAULT_CONFIG = {
     # screen capture - which also hides it from screenshots. See
     # _set_capture_exclusion in main.py.
     "fast_glass": True,
+    # How often the frosted backdrop is re-read from the screen, in
+    # frames per second. The ceiling rather than the rate: a still
+    # wallpaper backs off to a look every few seconds on its own, and a
+    # machine that cannot keep up thins itself out (see BACKDROP_DUTY in
+    # app.js). Higher tracks an animated wallpaper more closely and costs
+    # proportionally more.
+    "sample_fps": 16,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,

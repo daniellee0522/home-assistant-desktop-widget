@@ -271,6 +271,7 @@ class Api:
                 "fixed_height": self._cfg.get("fixed_height", 300),
                 "opacity": self._cfg.get("opacity", 100),
                 "fast_glass": bool(self._cfg.get("fast_glass", True)),
+                "sample_fps": int(self._cfg.get("sample_fps", 16)),
                 "tiles": tiles,
             },
             "connected": self._connected,
@@ -358,7 +359,7 @@ class Api:
 
     def save_prefs(self, theme, columns, lock_position=None,
                    zoom=None, fixed_size=None, fixed_width=None, fixed_height=None,
-                   opacity=None, fast_glass=None):
+                   opacity=None, fast_glass=None, sample_fps=None):
         self._cfg["theme"] = theme or "auto"
         try:
             self._cfg["columns"] = max(2, min(8, int(columns)))
@@ -385,6 +386,15 @@ class Api:
                 pass
         if fast_glass is not None:
             self._cfg["fast_glass"] = bool(fast_glass)
+        if sample_fps is not None:
+            # How often the desktop behind the widget is re-read, in
+            # frames a second. The page paces itself from what a frame
+            # actually costs (see BACKDROP_DUTY in app.js); this is the
+            # ceiling on that pace.
+            try:
+                self._cfg["sample_fps"] = max(2, min(30, int(sample_fps)))
+            except Exception:
+                pass
             self._apply_capture_exclusion()
         if opacity is not None:
             try:
@@ -1271,6 +1281,7 @@ class Api:
             "lock_position": bool(self._cfg.get("lock_position", False)),
             "opacity": self._cfg.get("opacity", 100),
             "fast_glass": bool(self._cfg.get("fast_glass", True)),
+            "sample_fps": int(self._cfg.get("sample_fps", 16)),
             "tiles": self._cfg.get("tiles", []),
         }, ensure_ascii=False)
         script = "window.__applyPrefs && window.__applyPrefs(%s)" % payload
