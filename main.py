@@ -94,8 +94,16 @@ import config as cfgmod
 from ha_client import HAClient
 from tray import build_tray_icon
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.join(BASE_DIR, "web")
+# Where this program's own files are. Frozen, that is the folder the
+# executable sits in - PyInstaller puts the bundled data under _internal
+# beside it, and __file__ points inside the bundle rather than at
+# anything on disk.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    WEB_DIR = os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "web")
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    WEB_DIR = os.path.join(BASE_DIR, "web")
 
 TILE_W, TILE_H, GAP, PAD = 152, 146, 12, 20
 
@@ -1374,6 +1382,10 @@ class Api:
 # ---------------------------------------------------------------------
 
 def _startup_command():
+    if getattr(sys, "frozen", False):
+        # An installed build is its own executable; there is no
+        # interpreter to name and no script to hand it.
+        return '"%s"' % sys.executable
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):
         pythonw = sys.executable

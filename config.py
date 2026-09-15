@@ -2,10 +2,33 @@
 
 import json
 import os
+import sys
 import tempfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "ha_widgets_config.json")
+
+
+def _config_path():
+    """Where the settings live.
+
+    Beside the source when running from a checkout, which keeps a
+    development copy self-contained. Installed, that folder belongs to the
+    program and may not even be writable, so the settings go where
+    Windows keeps per-user application data.
+    """
+    if getattr(sys, "frozen", False):
+        base = os.path.join(
+            os.environ.get("APPDATA") or os.path.expanduser("~"), "HA Widgets",
+        )
+        try:
+            os.makedirs(base, exist_ok=True)
+        except Exception:
+            base = BASE_DIR
+        return os.path.join(base, "ha_widgets_config.json")
+    return os.path.join(BASE_DIR, "ha_widgets_config.json")
+
+
+CONFIG_FILE = _config_path()
 
 # Domains we know how to render/control. Anything else configured manually
 # still works as a read-only tile (falls back to the generic renderer).
