@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 ha_widgets_config.json
 desktop.ini
+
+# Debug traces written when HA_WIDGET_DEBUG is set.
+*_trace.txt
+backdrop_err.txt
+run_log.txt
