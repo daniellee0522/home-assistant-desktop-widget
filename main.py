@@ -168,6 +168,13 @@ class Api:
         # per resize: the pointer is over the tray at the moment of the
         # click and somewhere else entirely a second later.
         self._flyout_anchor = None
+        # The size its page last asked for. The window's own rectangle is
+        # not a reliable answer while it is hidden: WinForms holds a
+        # pending size back until the form is shown, so a freshly created
+        # panel still measures at its creation size right up until the
+        # moment it appears - and the backdrop captured for it in that
+        # moment is of the wrong piece of screen.
+        self._flyout_size = None
         # When it was last put on screen. Windows shuffles activation
         # around while a window is being shown, and the Deactivate that
         # comes out of that churn is not the user clicking away.
@@ -440,6 +447,7 @@ class Api:
         )
 
     def resize_flyout_window(self, phys_w, phys_h, seq=None):
+        self._flyout_size = (max(MIN_WINDOW_W, int(phys_w)), max(MIN_WINDOW_H, int(phys_h)))
         # The flyout is anchored to a screen corner rather than to a
         # top-left position, so growing it has to move it as well - hence
         # its own origin function, exactly as the detail popover has.
@@ -544,11 +552,18 @@ class Api:
         # `shown` only fires once that has already happened.
         _apply_window_shape(window)
         self._flyout_anchor = self._tray_corner()
-        r = (ctypes.c_long * 4)()
-        _user32.GetWindowRect(hwnd, ctypes.byref(r))
-        at = self._flyout_origin(r[2] - r[0], r[3] - r[1])
+        size = self._flyout_size
+        if not size:
+            r = (ctypes.c_long * 4)()
+            _user32.GetWindowRect(hwnd, ctypes.byref(r))
+            size = (r[2] - r[0], r[3] - r[1])
+        at = self._flyout_origin(size[0], size[1])
         if at:
-            _run_on_ui_thread(window, lambda: _set_window_pos(hwnd, at[0], at[1]))
+            # Position *and* size, so the window is exactly where and what
+            # it is about to be before anything is captured for it.
+            _run_on_ui_thread(
+                window, lambda: _set_window_rect(hwnd, at[0], at[1], size[0], size[1]),
+            )
         # Registered as an overlay for the same reason the popover is: it
         # sits over whatever is on screen, so the widget below has to stay
         # capturable to appear in its frosted backdrop.

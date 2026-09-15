@@ -897,8 +897,21 @@ window.__flyoutPrepare = function () {
       window.pywebview.api.flyout_ready().catch(() => {});
     }
   };
-  invalidateBackdrop();
-  Promise.resolve(refreshBackdrop()).then(done, done);
+  // Two things have to settle before the capture is worth taking. The
+  // window was just moved and resized under the page, so it needs a frame
+  // to take that in - measure before it has and the capture is of the old
+  // size. And a capture already in flight is of the old *place*:
+  // refreshBackdrop would hand that one back as if it were this one, and
+  // the panel would open showing wherever it used to be.
+  const attempt = (tries) => {
+    if (backdropPending && tries > 0) {
+      setTimeout(() => attempt(tries - 1), 16);
+      return;
+    }
+    invalidateBackdrop();
+    Promise.resolve(refreshBackdrop()).then(done, done);
+  };
+  requestAnimationFrame(() => attempt(12));
 };
 
 window.__flyoutEnter = function () {
