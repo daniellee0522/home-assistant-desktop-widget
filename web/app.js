@@ -761,9 +761,18 @@ function startBackdropTicker() {
       });
       return;
     }
+    // Backing off for three seconds is right for the widget: it sits on a
+    // wallpaper, and a wallpaper that has stopped moving will still be
+    // stopped in three seconds. It is wrong for the panel, which sits
+    // over other people's windows - four identical frames there means a
+    // browser that happens to be still, and the moment it scrolls the
+    // glass is frozen until the backoff expires. That wait is the panel
+    // "getting stuck". While it is open it never sleeps for more than a
+    // fifth of a second; it is open for seconds at a time.
+    const idleMs = (IS_FLYOUT_WINDOW && flyoutOpen) ? 200 : BACKDROP_IDLE_MS;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
       || (backdropStill >= BACKDROP_STILL_BEFORE_IDLE
-        ? BACKDROP_IDLE_MS
+        ? idleMs
         : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY))));
     backdropRaf = null;
     backdropTimer = setTimeout(again, wait);

@@ -81,9 +81,12 @@ if sys.platform == "win32":
 #                            software path is also *cheaper* on CPU here
 #                            (17% of a core against 19%).
 # Chromium's flags reach QtWebEngine through its own variable. Software
-# rendering for the same reason as before: measured, the GPU path costs
-# more CPU here than it saves and ~300MB of working set, and there is
-# nothing in this page a GPU is needed for.
+# rendering, as in the WebView2 build and for the same reason: measured
+# here with everything else equal, the GPU path costs 29% of a core and
+# 666MB against 27.5% and 634MB, so it buys nothing. It does silence the
+# "failed to create GLES3 context" lines this prints on startup, which
+# are Chromium trying the GPU anyway and falling back - noise, not a
+# fault. Neither path affects the transparency; both were checked.
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
 import qtshell as webview

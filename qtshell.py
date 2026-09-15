@@ -94,6 +94,13 @@ class _Events:
 class _Handler(SimpleHTTPRequestHandler):
     """Serves web/ and, at /api/<name>, the js_api object behind it."""
 
+    # HTTP/1.1, so the pages keep one connection each instead of opening a
+    # new one per call. The backdrop asks about twenty times a second per
+    # window, and on HTTP/1.0 every one of those was a fresh TCP connection
+    # *and* a fresh thread in the threading server - which is a lot of
+    # churn to pay for a call that crosses no process boundary.
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=_web_dir, **kw)
 
