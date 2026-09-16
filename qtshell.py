@@ -29,13 +29,15 @@ deliberately not pywebview's:
 """
 
 import ctypes
+import faulthandler
 import json
 import os
 import threading
+import time
 import traceback
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -46,6 +48,100 @@ _windows = []
 _server = None
 _server_port = 0
 _web_dir = None
+
+
+# ---------------------------------------------------------------------
+# Staying alive across a suspend, and saying so when it does not
+# ---------------------------------------------------------------------
+# Windows kills a program whose GUI thread stops answering its message
+# queue, and reports it as a hang rather than a crash: no exception, no
+# dump, nothing in the process to say what happened. That is how this
+# program went away a minute after the machine woke up, and with no
+# record of it there was nothing to fix but a guess.
+#
+# So the GUI thread signs a register every half second, and a thread that
+# is not it watches the dates. If the register goes cold, every Python
+# stack in the process is written out - including the GUI thread's, which
+# is the one that matters - before Windows gets around to closing it.
+_LOG_PATH = None
+_alive_at = [0.0]
+_hang_logged = [False]
+_resume_hooks = []
+
+# How long the GUI thread may go without answering before it counts as
+# stuck. Windows' own patience is five seconds; this is longer, because a
+# GUI thread busy for five seconds is a bad frame and one busy for ten is
+# not coming back.
+_STALL_SECS = 10.0
+# A watchdog tick that took this much longer than it asked for did not
+# oversleep - the machine was suspended underneath it.
+_SUSPEND_SECS = 20.0
+
+
+def log(line):
+    """A line in the program's own log, timestamped. Never raises."""
+    try:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        if _LOG_PATH:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write("%s  %s\n" % (stamp, line))
+        else:
+            print("%s  %s" % (stamp, line))
+    except Exception:
+        pass
+
+
+def on_resume(fn):
+    """Call fn after the machine has been suspended and come back.
+
+    Detected by the clock rather than by WM_POWERBROADCAST: a watchdog
+    tick that asked for one second and got thirty was not slow, it was
+    asleep. That reads the same for every kind of suspend, needs no native
+    event filter in the message loop, and cannot itself be the thing that
+    breaks the message loop.
+    """
+    _resume_hooks.append(fn)
+
+
+def _dump_stacks(why):
+    try:
+        with open(_LOG_PATH or "hang_report.txt", "a", encoding="utf-8") as f:
+            f.write("\n==== %s  %s ====\n" % (why, time.strftime("%Y-%m-%d %H:%M:%S")))
+            faulthandler.dump_traceback(file=f, all_threads=True)
+            f.flush()
+    except Exception:
+        traceback.print_exc()
+
+
+def _watchdog():
+    last = time.monotonic()
+    while True:
+        time.sleep(1.0)
+        now = time.monotonic()
+        slept = now - last
+        last = now
+        if slept > _SUSPEND_SECS:
+            # Asleep, not slow. Anything cached from before is cached
+            # against a machine that no longer exists in the same shape -
+            # a different set of monitors, most of the time.
+            log("resumed after %.0fs suspended" % slept)
+            _alive_at[0] = now
+            _hang_logged[0] = False
+            for fn in list(_resume_hooks):
+                try:
+                    fn()
+                except Exception:
+                    log("resume hook failed: " + traceback.format_exc())
+            continue
+        stalled = now - _alive_at[0]
+        if stalled > _STALL_SECS:
+            if not _hang_logged[0]:
+                _hang_logged[0] = True
+                log("GUI thread has not answered for %.0fs - dumping stacks" % stalled)
+                _dump_stacks("GUI THREAD STALLED %.0fs" % stalled)
+        elif _hang_logged[0]:
+            _hang_logged[0] = False
+            log("GUI thread answering again")
 
 
 # ---------------------------------------------------------------------
@@ -193,12 +289,41 @@ class _WebWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.loadFinished.connect(self._on_load)
         self._shown_once = False
+        # The HWND, read once here on the GUI thread and kept.
+        #
+        # Everything around this program addresses windows by handle from
+        # whatever thread the API call arrived on (see Window.hwnd), and
+        # the obvious implementation of that - ask the widget, every time -
+        # is a QWidget touched off the GUI thread, tens of times a second.
+        # QWidget is not thread-safe, winId() least of all: it creates the
+        # native window if there is not one yet, and Qt destroys and
+        # recreates these when the display configuration changes - which is
+        # exactly what waking from sleep does. Reading the handle while the
+        # GUI thread is in the middle of replacing it is a race with the
+        # widget's own internals, and the program was observed wedged
+        # solid a minute after a resume, killed by Windows for not
+        # answering its message queue.
+        #
+        # So the handle is cached on the thread that owns it, and Qt says
+        # when it changes: WinIdChange is delivered to the widget for
+        # exactly that.
+        self._hwnd = 0
+        self._cache_hwnd()
+
+    def _cache_hwnd(self):
+        """GUI thread only."""
+        try:
+            self._hwnd = int(self.winId())
+        except Exception:
+            self._hwnd = 0
+        return self._hwnd
 
     def _on_load(self, ok):
         self._window.events.loaded.fire()
 
     def showEvent(self, e):
         super().showEvent(e)
+        self._cache_hwnd()
         if not self._shown_once:
             self._shown_once = True
             # After the event loop has settled, so anything the handler
@@ -221,10 +346,15 @@ class _WebWindow(QMainWindow):
             e.accept()
 
     def event(self, e):
+        t = e.type()
         # WindowDeactivate is Qt's version of the native Deactivate the
         # popover and the tray panel dismiss themselves on.
-        if e.type() == e.Type.WindowDeactivate:
+        if t == QEvent.Type.WindowDeactivate:
             self._window.events.deactivated.fire()
+        elif t == QEvent.Type.WinIdChange:
+            # Qt has thrown the native window away and made another. Every
+            # handle anyone outside is holding is now a handle to nothing.
+            self._cache_hwnd()
         return super().event(e)
 
 
@@ -255,8 +385,15 @@ class Window:
         return self._native
 
     def hwnd(self):
+        # The cached one, from any thread (see _WebWindow.__init__). The
+        # marshalled read below is only for the moment before the first
+        # cache, and it goes to the GUI thread like everything else that
+        # touches the widget.
+        h = self._native._hwnd
+        if h:
+            return h
         try:
-            return int(self._native.winId())
+            return _invoke(self._native, self._native._cache_hwnd, wait=True) or None
         except Exception:
             return None
 
@@ -390,13 +527,34 @@ def start(func=None, web_dir=None, api=None, **kw):
     app.exec()
 
 
-def prepare(web_dir, api):
+def prepare(web_dir, api, log_dir=None):
     """Create the application and the bridge, before any window exists."""
-    global _app, _marshal
+    global _app, _marshal, _LOG_PATH
+    if log_dir:
+        _LOG_PATH = os.path.join(log_dir, "widget.log")
+        try:
+            # A hard crash - an access violation in Qt or in one of the
+            # ctypes calls around it - leaves nothing behind either. This
+            # writes the Python side of it to the same place.
+            faulthandler.enable(open(_LOG_PATH, "a", encoding="utf-8"))
+        except Exception:
+            pass
     _app = QApplication.instance() or QApplication([])
     _app.setQuitOnLastWindowClosed(False)
     # Created here, on the GUI thread, which is what gives it the thread
     # affinity that makes the queued connection land in the right place.
     _marshal = _Marshal()
+    _alive_at[0] = time.monotonic()
+    # The register the watchdog reads. It is a plain timestamp rather than
+    # a round trip, so watching costs the GUI thread one assignment twice
+    # a second and cannot itself queue behind whatever is wrong.
+    global _heartbeat
+    _heartbeat = QTimer()
+    _heartbeat.timeout.connect(lambda: _alive_at.__setitem__(0, time.monotonic()))
+    _heartbeat.start(500)
+    threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
     _start_server(web_dir, api)
     return _server_port
+
+
+_heartbeat = None

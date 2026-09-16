@@ -1401,6 +1401,34 @@ class Api:
             return None
         return win.evaluate_js_result(script)
 
+    def debug_stall(self, seconds=12.0, kind="main"):
+        """Block the GUI thread, on purpose, for this project's testing.
+
+        The watchdog in qtshell.py is only worth having if it fires, and
+        the thing it is meant to catch - the GUI thread going away while
+        the machine wakes up - is not something that can be asked for.
+        This is the same shape: a GUI thread that stops answering.
+        """
+        if not os.environ.get("HA_WIDGET_DEBUG"):
+            return None
+        win = self._window_for(kind)
+        if not win:
+            return None
+        threading.Thread(
+            target=lambda: win.run_on_ui_thread(lambda: time.sleep(float(seconds))),
+            daemon=True,
+        ).start()
+        return True
+
+    def debug_resume(self):
+        """Run the resume hooks without suspending the machine."""
+        if not os.environ.get("HA_WIDGET_DEBUG"):
+            return None
+        import qtshell
+        for fn in list(qtshell._resume_hooks):
+            fn()
+        return True
+
     # ---- fading out while nobody is there --------------------------------
 
     def wake(self):
@@ -2000,6 +2028,32 @@ class _DesktopCapture:
                     break
         self._surface = chosen
         return chosen
+
+    def reset(self):
+        """Throw away every cached DC and bitmap.
+
+        They are compatible with a screen that existed when they were
+        made. Waking from sleep is routinely waking to a different set of
+        monitors - a laptop that slept docked, a display that renegotiated
+        its mode - and a bitmap made compatible with the old one reads
+        back as garbage or as nothing at all, silently. Cheap to rebuild:
+        the next capture makes what it needs.
+        """
+        with self._lock:
+            for dc, bmp in (("_dc", "_bmp"), ("_out_dc", "_out_bmp"), ("_ov_dc", "_ov_bmp")):
+                try:
+                    if getattr(self, bmp):
+                        _gdi32.DeleteObject(getattr(self, bmp))
+                    if getattr(self, dc):
+                        _gdi32.DeleteDC(getattr(self, dc))
+                except Exception:
+                    pass
+                setattr(self, dc, None)
+                setattr(self, bmp, None)
+            self._size = self._out_size = self._ov_size = (0, 0)
+            # Which window under Progman actually holds the wallpaper is
+            # also a fact about the old display arrangement.
+            self._surface = None
 
     # -- the capture itself ----------------------------------------------
 
@@ -2831,7 +2885,7 @@ def main():
     # The application and the page's own origin, before any window exists:
     # windows are loaded from that origin so the bridge is same-origin
     # (see qtshell.py).
-    webview.prepare(WEB_DIR, api)
+    webview.prepare(WEB_DIR, api, log_dir=BASE_DIR)
 
     # Only the *first* size, used for the moment between the window
     # appearing and the page's own first syncWindowSize measuring the real
@@ -3129,6 +3183,57 @@ def main():
 
     def quit_action(icon=None, item=None):
         api._quit()
+
+    def on_resume():
+        """Put back everything a suspend invalidates.
+
+        Called from the watchdog thread once the machine has been away
+        (see qtshell.on_resume). None of this is about the widget's state -
+        that is all in the config and the websocket, which look after
+        themselves - and all of it is about handles: GDI objects made
+        against the old display, DWM attributes that a window may have
+        been recreated without, and the capture exclusion that makes the
+        whole backdrop work.
+        """
+        _desktop_capture.reset()
+        for kind in ("main", "popover", "settings", "flyout"):
+            win = api._window_for(kind)
+            if not win:
+                continue
+            try:
+                _apply_window_shape(win)
+            except Exception:
+                pass
+        try:
+            api._apply_capture_exclusion()
+        except Exception:
+            pass
+        # The websocket to Home Assistant is almost certainly dead: a TCP
+        # connection that was open when the machine went to sleep is
+        # usually half-open when it comes back - the other end gave up and
+        # said so to nobody - and recv() on one of those blocks until the
+        # OS gets bored, which is minutes. Dropping it here makes the
+        # reconnect loop start over now rather than then, which is the
+        # difference between tiles that are live when the screen comes on
+        # and tiles that are live a few minutes later.
+        try:
+            api._client._kick()
+        except Exception:
+            pass
+        # Every page is holding a backdrop of a screen that has since been
+        # switched off and on again, and comparing new captures against
+        # its hash. Tell them to start over.
+        for kind in ("main", "popover", "settings", "flyout"):
+            win = api._window_for(kind)
+            if not win:
+                continue
+            try:
+                win.evaluate_js(
+                    "window.__invalidateBackdrop && window.__invalidateBackdrop()")
+            except Exception:
+                pass
+
+    webview.on_resume(on_resume)
 
     api._watch_for_idle()
 

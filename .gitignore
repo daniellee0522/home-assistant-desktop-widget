@@ -8,6 +8,11 @@ desktop.ini
 backdrop_err.txt
 run_log.txt
 
+# The program's own log: what it was doing when it last went away, and
+# every Python stack in it if the GUI thread ever stops answering.
+widget.log
+hang_report.txt
+
 # Build output
 build/
 dist/

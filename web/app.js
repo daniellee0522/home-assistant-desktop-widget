@@ -779,6 +779,17 @@ function invalidateBackdrop() {
   backdropStill = 0;
 }
 
+// Called from Python after the machine has come back from a suspend (see
+// on_resume in main.py). Everything this page is holding - the frame on
+// the glass, the hash it compares new ones against, the pacing it learned
+// from how long a capture used to take - is about a screen that has since
+// been switched off and on again.
+window.__invalidateBackdrop = function () {
+  invalidateBackdrop();
+  backdropFrameMs = 60;
+  restartBackdropTicker();
+};
+
 // Coalesced: a resize or a drag produces a burst of these, and each one is
 // a full desktop render on the Python side.
 let backdropSoonTimer = null;
