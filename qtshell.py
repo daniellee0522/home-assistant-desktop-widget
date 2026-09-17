@@ -178,6 +178,17 @@ class _Events:
         self.loaded = _Event()
         self.closing = _Event()
         self.moved = _Event()
+        # Not pywebview's, and not `shown` either: this one fires on
+        # every show, where `shown` fires once. Showing a window is what
+        # puts Windows' own attributes back on it - measured here, a
+        # hidden and re-shown Qt window comes back with
+        # DWMWA_WINDOW_CORNER_PREFERENCE returned to DWMWCP_ROUND, and a
+        # rounded window is a window DWM draws a border and a shadow
+        # around. Whatever undoes that has to run again every time (see
+        # _apply_window_shape in main.py), and has to run inside the show
+        # rather than after it, or the first frame of a panel that is
+        # only ever on screen for a second is the frame with the border.
+        self.showing = _Event()
         # Not pywebview's. It exposes this as the native form's own
         # Deactivate; a Qt window has no equivalent to reach into, so the
         # shell raises it instead - see focusOutEvent below.
@@ -324,6 +335,10 @@ class _WebWindow(QMainWindow):
     def showEvent(self, e):
         super().showEvent(e)
         self._cache_hwnd()
+        # Synchronously, before the event loop gets a chance to present
+        # anything: by the time show() has returned, the window is back
+        # to the shape it is supposed to have (see events.showing).
+        self._window.events.showing.fire()
         if not self._shown_once:
             self._shown_once = True
             # After the event loop has settled, so anything the handler

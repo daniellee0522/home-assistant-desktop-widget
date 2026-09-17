@@ -58,11 +58,13 @@ if sys.platform == "win32":
         _set_ctx = ctypes.WinDLL("user32").SetProcessDpiAwarenessContext
         _set_ctx.argtypes = [ctypes.c_void_p]
         _set_ctx.restype = ctypes.c_int
-        if not _set_ctx(ctypes.c_void_p(-4)):  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if not _set_ctx(ctypes.c_void_p(-4)):
             raise OSError("SetProcessDpiAwarenessContext failed")
     except Exception:
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            ctypes.windll.shcore.SetProcessDpiAwareness(
+                2)  # PROCESS_PER_MONITOR_DPI_AWARE
         except Exception:
             pass
 
@@ -89,11 +91,15 @@ if sys.platform == "win32":
 # fault. Neither path affects the transparency; both were checked.
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
-import qtshell as webview
+# Below the two blocks above, not with the rest of the imports at the top:
+# importing this imports Qt, and Qt reads both the DPI awareness and
+# QTWEBENGINE_CHROMIUM_FLAGS as it comes up. A formatter that sorts
+# imports will move this back, and moving it back is the bug.
+import qtshell as webview  # noqa: E402
 
-import config as cfgmod
-from ha_client import HAClient
-from tray import build_tray_icon
+import config as cfgmod  # noqa: E402
+from ha_client import HAClient  # noqa: E402
+from tray import build_tray_icon  # noqa: E402
 
 # Where this program's own files are. Frozen, that is the folder the
 # executable sits in - PyInstaller puts the bundled data under _internal
@@ -225,12 +231,14 @@ class Api:
         self._settings_resize_lock = threading.Lock()
         self._settings_last_resize_seq = -1
 
-        self._client = HAClient(on_event=self._on_ha_event, on_status=self._on_ha_status)
+        self._client = HAClient(
+            on_event=self._on_ha_event, on_status=self._on_ha_status)
         self._client.configure(
             self._cfg.get("ha_url", ""), self._cfg.get("ha_token", ""),
             self._cfg.get("poll_fallback_sec", 30),
         )
-        self._client.set_entities([t["entity"] for t in self._cfg.get("tiles", []) if t.get("entity")])
+        self._client.set_entities(
+            [t["entity"] for t in self._cfg.get("tiles", []) if t.get("entity")])
         self._client.start()
 
     def _bind_window(self, window):
@@ -345,7 +353,8 @@ class Api:
         self._cfg["ha_token"] = token or ""
         cfgmod.save_config(self._cfg)
         self._client.configure(
-            self._cfg["ha_url"], self._cfg["ha_token"], self._cfg.get("poll_fallback_sec", 30),
+            self._cfg["ha_url"], self._cfg["ha_token"], self._cfg.get(
+                "poll_fallback_sec", 30),
         )
         return True
 
@@ -437,7 +446,8 @@ class Api:
             )
             try:
                 if enabled:
-                    winreg.SetValueEx(key, "HAWidgets", 0, winreg.REG_SZ, _startup_command())
+                    winreg.SetValueEx(key, "HAWidgets", 0,
+                                      winreg.REG_SZ, _startup_command())
                 else:
                     try:
                         winreg.DeleteValue(key, "HAWidgets")
@@ -485,7 +495,8 @@ class Api:
         limit = 240
         if len(points) > limit:
             step = len(points) / float(limit)
-            points = [points[min(len(points) - 1, int(i * step))] for i in range(limit)]
+            points = [points[min(len(points) - 1, int(i * step))]
+                      for i in range(limit)]
         return {"ok": True, "points": points, "hours": hours}
 
     def call_service(self, domain, service, entity_id, extra):
@@ -527,7 +538,8 @@ class Api:
         )
 
     def resize_flyout_window(self, phys_w, phys_h, seq=None):
-        self._flyout_size = (max(MIN_WINDOW_W, int(phys_w)), max(MIN_WINDOW_H, int(phys_h)))
+        self._flyout_size = (max(MIN_WINDOW_W, int(phys_w)),
+                             max(MIN_WINDOW_H, int(phys_h)))
         # The flyout is anchored to a screen corner rather than to a
         # top-left position, so growing it has to move it as well - hence
         # its own origin function, exactly as the detail popover has.
@@ -581,7 +593,8 @@ class Api:
         # this synchronous with the relayout instead of racing it.
         at = origin(w, h) if origin else None
         if at:
-            _run_on_ui_thread(window, lambda: _set_window_rect(hwnd, at[0], at[1], w, h))
+            _run_on_ui_thread(window, lambda: _set_window_rect(
+                hwnd, at[0], at[1], w, h))
         else:
             _run_on_ui_thread(window, lambda: _set_window_size(hwnd, w, h))
 
@@ -629,7 +642,8 @@ class Api:
         self._arming_kind = kind
         self._armed.clear()
         try:
-            window.evaluate_js("window.__armBackdrop && window.__armBackdrop()")
+            window.evaluate_js(
+                "window.__armBackdrop && window.__armBackdrop()")
         except Exception:
             pass
         # The page calls backdrop_armed when it has painted it; the
@@ -654,11 +668,6 @@ class Api:
         if not hwnd:
             return
         self._flyout_open = True
-        # Idempotent, and worth doing here as well as on `shown`: the
-        # attributes it sets (no DWM rounding, no system show animation)
-        # have to be on before the *first* time this window appears, and
-        # `shown` only fires once that has already happened.
-        _apply_window_shape(window)
         self._flyout_anchor = self._tray_corner()
         size = self._flyout_size
         if not size:
@@ -670,7 +679,8 @@ class Api:
             # Position *and* size, so the window is exactly where and what
             # it is about to be before anything is captured for it.
             _run_on_ui_thread(
-                window, lambda: _set_window_rect(hwnd, at[0], at[1], size[0], size[1]),
+                window, lambda: _set_window_rect(
+                    hwnd, at[0], at[1], size[0], size[1]),
             )
         # Registered as an overlay for the same reason the popover is: it
         # sits over whatever is on screen, so the widget below has to stay
@@ -678,27 +688,48 @@ class Api:
         self._overlays_open.add("flyout")
         self._arming_kind = "flyout"
         self._apply_capture_exclusion()
-        # Take the backdrop *before* it is on screen. It has been moved
-        # into place but is still hidden, so a read of the screen there is
-        # exactly what it is about to cover - and it cannot read itself
-        # in. Shown first, the panel arrives carrying a frosted picture of
-        # wherever it was last time, which is replaced a frame or two
-        # later: that is the flash, and the lag behind it.
-        self._arm_backdrop("flyout", window)
-        self._flyout_shown_at = time.monotonic()
+        # On screen first, and the backdrop afterwards - the other way
+        # round from the widget and the popover, and deliberately.
+        #
+        # _arm_backdrop blocks for up to a third of a second waiting for
+        # the page to say it has painted the capture, and that wait is in
+        # front of the panel appearing at all: the tray icon is clicked
+        # and nothing happens, which is the stutter. What it buys is the
+        # first frame being a picture of the right place rather than of
+        # wherever the panel was last time. Measured against each other
+        # here, the stale frame lasts a frame or two and the wait lasts
+        # 300ms, so the panel opens now and corrects itself.
         try:
             window.show()
         except Exception:
             pass
+        # A moment for Qt to finish the resize and DWM to compose it, so
+        # what follows is applied to the window's real rectangle.
+        time.sleep(0.05)
+        # Which is why the rect goes on again here: the size the page
+        # asked for may have landed while the window was still hidden.
+        size = self._flyout_size
+        if size:
+            at = self._flyout_origin(size[0], size[1])
+            if at:
+                _run_on_ui_thread(
+                    window, lambda: _set_window_rect(
+                        hwnd, at[0], at[1], size[0], size[1]),
+                )
         self._apply_capture_exclusion()
-        # Above everything while it is open, the way the volume and
-        # network flyouts are; put back on the way out (see hide_flyout).
-        _bring_to_front(window, stay_on_top=True)
         self._apply_system_glass("flyout")
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
+        self._arm_backdrop("flyout", window)
+        # HWND_TOP, not HWND_TOPMOST. Topmost keeps the panel over
+        # everything while it is open, but it is a state the window has to
+        # be talked back out of on the way out (see hide_flyout), and
+        # leaving it out is what keeps the glass from hitching as the card
+        # scales in.
+        _bring_to_front(window, stay_on_top=False)
         try:
-            window.evaluate_js("window.__flyoutEnter && window.__flyoutEnter()")
+            window.evaluate_js(
+                "window.__flyoutEnter && window.__flyoutEnter()")
         except Exception:
             pass
 
@@ -751,7 +782,8 @@ class Api:
             # evaluate_js from there deadlocks - see
             # on_popover_deactivate for that story.
             try:
-                window.evaluate_js("window.__flyoutLeave && window.__flyoutLeave()")
+                window.evaluate_js(
+                    "window.__flyoutLeave && window.__flyoutLeave()")
             except Exception:
                 pass
             time.sleep(self._FLYOUT_LEAVE_S)
@@ -761,9 +793,10 @@ class Api:
                 window.hide()
             except Exception:
                 pass
-            # Out of the topmost band it was put in to open (see
-            # show_flyout), so a hidden panel is not still outranking
-            # everything the next time something asks about z-order.
+            # show_flyout does not put it in the topmost band any more,
+            # so this is only here to get it out of one it was left in -
+            # a hidden panel outranking everything the next time
+            # something asks about z-order. A no-op otherwise.
             _drop_topmost(window)
 
         threading.Thread(target=fade_then_hide, daemon=True).start()
@@ -863,7 +896,8 @@ class Api:
             # card appears to grow out of what was pressed. Near a screen
             # edge that would push it off, so it flips to align with the
             # tile's opposite edge instead - see _place_against.
-            self._popover_anchor = (int(screen_x), int(screen_y), int(tile_w), int(tile_h))
+            self._popover_anchor = (int(screen_x), int(
+                screen_y), int(tile_w), int(tile_h))
             # This window is still collapsed to its minimum right now (it
             # shrinks when it closes, and its page only reports a size once
             # it has rendered the tile), so asking the OS how big it is
@@ -908,7 +942,8 @@ class Api:
         # tile it was opened on last - the flash.
         try:
             self._popover_window.evaluate_js(
-                "window.__showPopoverForTile && window.__showPopoverForTile(%s)" % json.dumps(tile_id)
+                "window.__showPopoverForTile && window.__showPopoverForTile(%s)" % json.dumps(
+                    tile_id)
             )
         except Exception:
             pass
@@ -923,7 +958,8 @@ class Api:
         # Its entrance played while it was still hidden; run it again now
         # that there is someone to see it.
         try:
-            self._popover_window.evaluate_js("window.__popoverEnter && window.__popoverEnter()")
+            self._popover_window.evaluate_js(
+                "window.__popoverEnter && window.__popoverEnter()")
         except Exception:
             pass
 
@@ -942,7 +978,8 @@ class Api:
             pos = _centre_on_window_monitor(self._window, hwnd)
             if pos:
                 _run_on_ui_thread(
-                    self._settings_window, lambda: _set_window_pos(hwnd, pos[0], pos[1]),
+                    self._settings_window, lambda: _set_window_pos(
+                        hwnd, pos[0], pos[1]),
                 )
         # Same reasoning as the popover: Settings sits over the widget, so
         # the widget is part of its backdrop and has to stay capturable
@@ -1142,7 +1179,8 @@ class Api:
             # so four small ones measured 20ms against 8ms for one blit of
             # the whole 512x258 window. One blit, then; what the corners
             # save is in what gets encoded and sent, below.
-            raw = _desktop_capture.grab_screen(x, y, w, h) if can_read_screen else None
+            raw = _desktop_capture.grab_screen(
+                x, y, w, h) if can_read_screen else None
             if raw is None:
                 # Either the fast path is off or unusable here, or it
                 # failed - the slow one always works.
@@ -1153,7 +1191,8 @@ class Api:
             cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
                 return {"unchanged": True, "hash": digest, "ms": cost_ms}
-            img = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
+            img = Image.frombuffer("RGBA", (w, h), raw,
+                                   "raw", "BGRA", 0, 1).convert("RGB")
 
             # The frosted copy is blurred here rather than by the page.
             # backdrop-filter did it on the GPU every frame, over the whole
@@ -1177,7 +1216,8 @@ class Api:
             # one thing that *is* visible.
             blur_buf = None
             if want_blur and not self._system_glass_on(window_kind):
-                small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+                small = img.resize(
+                    (max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
                 small = small.filter(ImageFilter.GaussianBlur(radius=4))
                 blur_buf = io.BytesIO()
                 small.save(blur_buf, format="JPEG", quality=80)
@@ -1190,7 +1230,8 @@ class Api:
                 atlas.paste(img.crop((0, 0, corner, corner)), (0, 0))
                 atlas.paste(img.crop((w - corner, 0, w, corner)), (corner, 0))
                 atlas.paste(img.crop((0, h - corner, corner, h)), (0, corner))
-                atlas.paste(img.crop((w - corner, h - corner, w, h)), (corner, corner))
+                atlas.paste(
+                    img.crop((w - corner, h - corner, w, h)), (corner, corner))
                 img = atlas
 
             sharp_buf = None
@@ -1203,10 +1244,12 @@ class Api:
                 img.save(sharp_buf, format="JPEG", quality=88, subsampling=0)
             return {
                 "url": ("data:image/jpeg;base64,"
-                        + base64.b64encode(sharp_buf.getvalue()).decode("ascii")
+                        + base64.b64encode(sharp_buf.getvalue()
+                                           ).decode("ascii")
                         ) if sharp_buf else None,
                 "blur_url": ("data:image/jpeg;base64,"
-                             + base64.b64encode(blur_buf.getvalue()).decode("ascii")
+                             + base64.b64encode(blur_buf.getvalue()
+                                                ).decode("ascii")
                              ) if blur_buf else None,
                 "w": w,
                 "h": h,
@@ -1249,7 +1292,8 @@ class Api:
         if not hwnd:
             return
         _run_on_ui_thread(
-            window, lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
+            window, lambda: _set_window_pos(
+                hwnd, int(screen_x), int(screen_y)),
         )
 
     def get_window_pos(self, window_kind="main"):
@@ -1415,7 +1459,8 @@ class Api:
         if not win:
             return None
         threading.Thread(
-            target=lambda: win.run_on_ui_thread(lambda: time.sleep(float(seconds))),
+            target=lambda: win.run_on_ui_thread(
+                lambda: time.sleep(float(seconds))),
             daemon=True,
         ).start()
         return True
@@ -1479,7 +1524,8 @@ class Api:
                     if not self._cfg.get("dim_when_idle", True):
                         wanted = False
                     else:
-                        after = max(10, int(self._cfg.get("dim_after_sec", 120)))
+                        after = max(
+                            10, int(self._cfg.get("dim_after_sec", 120)))
                         mine = self._own_hwnds()
                         now = time.monotonic()
                         if _desktop_is_front(mine):
@@ -1561,7 +1607,8 @@ class Api:
         # something.
         if self._popover_window:
             try:
-                self._popover_window.evaluate_js("window.__haPushBatch(%s)" % payload)
+                self._popover_window.evaluate_js(
+                    "window.__haPushBatch(%s)" % payload)
             except Exception:
                 pass
 
@@ -1578,7 +1625,8 @@ class Api:
         self._connected = connected
         if self._window and self._ui_ready:
             try:
-                self._window.evaluate_js("window.__haStatus(%s)" % json.dumps(bool(connected)))
+                self._window.evaluate_js(
+                    "window.__haStatus(%s)" % json.dumps(bool(connected)))
             except Exception:
                 pass
 
@@ -1606,7 +1654,8 @@ class Api:
         self._cfg["window_y"] = int(y)
         if self._move_timer:
             self._move_timer.cancel()
-        self._move_timer = threading.Timer(0.6, lambda: cfgmod.save_config(self._cfg))
+        self._move_timer = threading.Timer(
+            0.6, lambda: cfgmod.save_config(self._cfg))
         self._move_timer.daemon = True
         self._move_timer.start()
 
@@ -1774,7 +1823,8 @@ _user32.SetWindowPos.restype = ctypes.c_int
 _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _user32.GetWindowLongW.restype = ctypes.c_long
-_user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+_user32.SetWindowLongW.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
 _user32.SetWindowLongW.restype = ctypes.c_long
 _user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
 _user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -1784,13 +1834,15 @@ _user32.GetDC.restype = ctypes.c_void_p
 _user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
 _user32.FindWindowW.restype = ctypes.c_void_p
-_user32.PrintWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+_user32.PrintWindow.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
 _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 
 _gdi32 = ctypes.WinDLL("gdi32")
 _gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
 _gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
-_gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+_gdi32.CreateCompatibleBitmap.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
 _gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
 _gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _gdi32.SelectObject.restype = ctypes.c_void_p
@@ -1809,8 +1861,10 @@ _gdi32.CreateRectRgn.restype = ctypes.c_void_p
 _dwmapi.DwmEnableBlurBehindWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _dwmapi.DwmEnableBlurBehindWindow.restype = ctypes.c_long
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
-_user32.EnumChildWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
-_user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+_user32.EnumChildWindows.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_user32.GetClassNameW.argtypes = [
+    ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 _user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.MonitorFromWindow.restype = ctypes.c_void_p
 _user32.MonitorFromPoint.restype = ctypes.c_void_p
@@ -1825,7 +1879,8 @@ _dwmapi.DwmSetWindowAttribute.argtypes = [
     ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
 ]
 _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
-_dwmapi.DwmExtendFrameIntoClientArea.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_dwmapi.DwmExtendFrameIntoClientArea.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p]
 _dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
 
 
@@ -1836,7 +1891,8 @@ class _MARGINS(ctypes.Structure):
     ]
 
 
-_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 PW_RENDERFULLCONTENT = 0x00000002
@@ -1909,7 +1965,8 @@ class _DesktopCapture:
         self._ov_dc = None
         self._ov_bmp = None
         self._ov_size = (0, 0)
-        self._surface = None          # (hwnd, x, y, w, h) of the surface we render
+        # (hwnd, x, y, w, h) of the surface we render
+        self._surface = None
 
     # -- scratch surfaces ------------------------------------------------
 
@@ -1983,7 +2040,8 @@ class _DesktopCapture:
             return None
         if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
             return None
-        _gdi32.BitBlt(self._out_dc, 0, 0, w, h, self._dc, x - sx, y - sy, SRCCOPY)
+        _gdi32.BitBlt(self._out_dc, 0, 0, w, h,
+                      self._dc, x - sx, y - sy, SRCCOPY)
         hdr = _BITMAPINFOHEADER(
             ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
         )
@@ -2012,7 +2070,7 @@ class _DesktopCapture:
         if self._surface:
             hwnd = self._surface[0]
             r = (ctypes.c_long * 4)()
-            if _user32.IsWindowVisible(hwnd) and _user32.GetWindowRect(hwnd, ctypes.byref(r))                     and r[0] <= x and r[1] <= y and r[2] >= x + w and r[3] >= y + h:
+            if _user32.IsWindowVisible(hwnd) and _user32.GetWindowRect(hwnd, ctypes.byref(r)) and r[0] <= x and r[1] <= y and r[2] >= x + w and r[3] >= y + h:
                 return (hwnd, r[0], r[1], r[2] - r[0], r[3] - r[1])
             self._surface = None
         cands = self._candidates(x, y, w, h)
@@ -2124,7 +2182,8 @@ class _DesktopCapture:
                     continue
                 if not _user32.PrintWindow(hwnd, self._ov_dc, PW_RENDERFULLCONTENT):
                     continue
-                _gdi32.BitBlt(self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
+                _gdi32.BitBlt(
+                    self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
             return self._read_out(w, h)
 
     def grab(self, x, y, w, h, over=()):
@@ -2169,9 +2228,11 @@ class _DesktopCapture:
                     continue
                 if not _user32.PrintWindow(hwnd, self._ov_dc, PW_RENDERFULLCONTENT):
                     continue
-                _gdi32.BitBlt(self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
+                _gdi32.BitBlt(
+                    self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
             hdr = _BITMAPINFOHEADER(
-                ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
+                ctypes.sizeof(_BITMAPINFOHEADER), w, -
+                h, 1, 32, 0, 0, 0, 0, 0, 0,
             )
             buf = ctypes.create_string_buffer(w * h * 4)
             if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
@@ -2210,7 +2271,8 @@ def _set_window_rect(hwnd, x, y, w, h):
     """
     with _hwnd_lock:
         try:
-            _user32.SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+            _user32.SetWindowPos(hwnd, None, x, y, w, h,
+                                 SWP_NOZORDER | SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -2288,9 +2350,11 @@ class _DWM_BLURBEHIND(ctypes.Structure):
     ]
 
 
-_SetWindowCompositionAttribute = getattr(_user32, "SetWindowCompositionAttribute", None)
+_SetWindowCompositionAttribute = getattr(
+    _user32, "SetWindowCompositionAttribute", None)
 if _SetWindowCompositionAttribute is not None:
-    _SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _SetWindowCompositionAttribute.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p]
     _SetWindowCompositionAttribute.restype = ctypes.c_int
 
 # DWMWA_SYSTEMBACKDROP_TYPE arrived in Windows 11 22H2, and in a window
@@ -2364,7 +2428,8 @@ def _set_system_glass(window, on):
                 # sheet-of-glass form. Without it there is nothing for a
                 # backdrop to be drawn under: this window has no frame.
                 m = _MARGINS(-1, -1, -1, -1) if on else _MARGINS(0, 0, 0, 0)
-                hr_frame = _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                hr_frame = _dwmapi.DwmExtendFrameIntoClientArea(
+                    hwnd, ctypes.byref(m))
                 # Whatever WebView2 leaves transparent shows the *form*
                 # underneath, and the form paints its own background over
                 # anything DWM put there. Asking for a transparent one
@@ -2377,9 +2442,11 @@ def _set_system_glass(window, on):
                     window.native.browser.webview.DefaultBackgroundColor = _Color.Transparent
                 except Exception:
                     pass
-                v = ctypes.c_uint(DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
+                v = ctypes.c_uint(
+                    DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(v), ctypes.sizeof(v),
+                    hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(
+                        v), ctypes.sizeof(v),
                 )
                 # Granting a window a system backdrop also gives it the
                 # standard Windows 11 window border, which is drawn around
@@ -2389,7 +2456,8 @@ def _set_system_glass(window, on):
                 # page's.
                 border = ctypes.c_uint(DWMWA_COLOR_NONE)
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border),
+                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(
+                        border), ctypes.sizeof(border),
                 )
             except Exception:
                 pass
@@ -2484,7 +2552,8 @@ _user32.WindowFromPoint.restype = ctypes.c_void_p
 GA_ROOT = 2
 
 
-_SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
+_SHELL_CLASSES = {"Progman", "WorkerW",
+                  "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
 
 
 def _desktop_is_front(ours=()):
@@ -2578,7 +2647,8 @@ def _nothing_visible_of(hwnd, ours):
 def _work_area_at(x, y):
     """The usable screen rectangle around a point, as (l, t, r, b)."""
     try:
-        mon = _user32.MonitorFromPoint(_POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+        mon = _user32.MonitorFromPoint(
+            _POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
         if not mon:
             return None
         info = _MONITORINFO()
@@ -2616,7 +2686,8 @@ def _centre_on_window_monitor(anchor_window, hwnd_to_place):
     """
     try:
         anchor = _get_hwnd(anchor_window) if anchor_window else None
-        mon = _user32.MonitorFromWindow(anchor or hwnd_to_place, MONITOR_DEFAULTTONEAREST)
+        mon = _user32.MonitorFromWindow(
+            anchor or hwnd_to_place, MONITOR_DEFAULTTONEAREST)
         if not mon:
             return None
         info = _MONITORINFO()
@@ -2642,6 +2713,12 @@ def _apply_window_shape(window):
     note above) - this is purely about the shadow that comes attached to
     any DWM rounding. Windows 10 doesn't know the attribute and fails the
     call harmlessly; its windows are square anyway.
+
+    None of this stays put. Showing the window hands the corner
+    preference back to DWM's default, so this runs on every show and not
+    just the first - which is why it is hung off events.showing rather
+    than events.shown, and why the panel and Settings wore a border and a
+    shadow the second time they were opened and not the first.
     """
     hwnd = _get_hwnd(window)
     if not hwnd:
@@ -2659,14 +2736,16 @@ def _apply_window_shape(window):
             off = ctypes.c_int(1)
             try:
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, ctypes.byref(off), ctypes.sizeof(off),
+                    hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, ctypes.byref(
+                        off), ctypes.sizeof(off),
                 )
             except Exception:
                 pass
             v = ctypes.c_int(DWMWCP_DONOTROUND)
             try:
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(v), ctypes.sizeof(v),
+                    hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(
+                        v), ctypes.sizeof(v),
                 )
             except Exception:
                 pass
@@ -2679,7 +2758,8 @@ def _apply_window_shape(window):
             try:
                 border = ctypes.c_uint(DWMWA_COLOR_NONE)
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border),
+                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(
+                        border), ctypes.sizeof(border),
                 )
             except Exception:
                 pass
@@ -2696,7 +2776,8 @@ def _set_noactivate(window, enable):
         with _hwnd_lock:
             try:
                 style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                style = (style | WS_EX_NOACTIVATE) if enable else (style & ~WS_EX_NOACTIVATE)
+                style = (style | WS_EX_NOACTIVATE) if enable else (
+                    style & ~WS_EX_NOACTIVATE)
                 _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
             except Exception:
                 pass
@@ -2820,36 +2901,6 @@ def _hide_own_console():
         pass
 
 
-# Keep in step with --panel in web/style.css. The page paints over all of
-# this within a frame or two of starting, so these only ever show during
-# that first frame - but they are what it looks like, so it should be the
-# right colour rather than an arbitrary default.
-PANEL_COLOR = {"light": "#D2E2F0", "dark": "#24282E"}
-
-
-def _startup_background(theme):
-    if theme not in PANEL_COLOR:
-        # "auto" follows the OS, the same way the page's own
-        # prefers-color-scheme rule does.
-        theme = "light" if _os_prefers_light() else "dark"
-    return PANEL_COLOR[theme]
-
-
-def _os_prefers_light():
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        )
-        try:
-            return bool(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
-        finally:
-            winreg.CloseKey(key)
-    except Exception:
-        return True
-
-
 def _initial_window_size(cfg):
     if cfg.get("fixed_size"):
         w = max(120, int(cfg.get("fixed_width", 400) or 400))
@@ -2930,7 +2981,6 @@ def main():
     bottom_pin_stop = threading.Event()
 
     def on_shown():
-        _apply_window_shape(window)
         api._apply_capture_exclusion()
         _set_noactivate(window, True)
         # Position it before _hide_from_taskbar, which hides and re-shows
@@ -2941,7 +2991,8 @@ def main():
             hwnd = _get_hwnd(window)
             if hwnd:
                 _run_on_ui_thread(
-                    window, lambda: _set_window_pos(hwnd, int(saved_x), int(saved_y)),
+                    window, lambda: _set_window_pos(
+                        hwnd, int(saved_x), int(saved_y)),
                 )
         _hide_from_taskbar(window)
         _send_to_bottom(window)
@@ -2954,10 +3005,14 @@ def main():
         # glass simply not being transparent.
         api._apply_system_glass()
         threading.Thread(
-            target=_bottom_pin_loop, args=(window, bottom_pin_stop, api._pin_enabled), daemon=True,
+            target=_bottom_pin_loop, args=(
+                window, bottom_pin_stop, api._pin_enabled), daemon=True,
         ).start()
 
     window.events.shown += on_shown
+    # Every show, where on_shown is the first one only: showing a window
+    # is what undoes this, so this is what has to be redone.
+    window.events.showing += lambda: _apply_window_shape(window)
 
     def on_closing():
         api.hide_flyout()
@@ -3017,14 +3072,14 @@ def main():
         # webview.util.js_bridge_call).
         def _close():
             try:
-                popover_window.evaluate_js("window.closeDetail && window.closeDetail()")
+                popover_window.evaluate_js(
+                    "window.closeDetail && window.closeDetail()")
             except Exception:
                 pass
 
         threading.Thread(target=_close, daemon=True).start()
 
     def on_popover_shown():
-        _apply_window_shape(popover_window)
         api._apply_capture_exclusion()
         _set_noactivate(popover_window, True)
         _hide_from_taskbar(popover_window)
@@ -3038,6 +3093,7 @@ def main():
             pass
 
     popover_window.events.shown += on_popover_shown
+    popover_window.events.showing += lambda: _apply_window_shape(popover_window)
 
     # Belt and braces on `hidden=True`. pywebview force-shows (and
     # activates!) a form on *every* navigation start when the window was
@@ -3071,8 +3127,16 @@ def main():
         height=640,
         frameless=True,
         easy_drag=False,
-        transparent=False,
-        background_color=_startup_background(api._cfg.get("theme", "auto")),
+        # Translucent like the other three. It used to be opaque, back
+        # when the page painted its own copy of the desktop behind the
+        # card and the corners were a cutout in that; the copy went when
+        # the windows became see-through (see #backdrop in style.css) and
+        # this was the one window that did not, which left its rounded
+        # card sitting on a flat rectangle of startup colour. The panel is
+        # 90% opaque in the stylesheet by design - Settings is read, not
+        # glanced at - so what this buys is the corners and a hint of what
+        # is behind, not a form full of wallpaper.
+        transparent=True,
         shadow=False,
         confirm_close=False,
         hidden=True,
@@ -3083,11 +3147,11 @@ def main():
     def on_settings_shown():
         # No _set_noactivate here, unlike the other two: this window exists
         # to be typed into.
-        _apply_window_shape(settings_window)
         _hide_from_taskbar(settings_window)
         api._apply_capture_exclusion()
 
     settings_window.events.shown += on_settings_shown
+    settings_window.events.showing += lambda: _apply_window_shape(settings_window)
     settings_window.events.loaded += lambda: settings_window.hide()
 
     def on_settings_closing():
@@ -3127,7 +3191,6 @@ def main():
         threading.Thread(target=api.dismiss_flyout, daemon=True).start()
 
     def on_flyout_shown():
-        _apply_window_shape(flyout_window)
         api._apply_capture_exclusion()
         _hide_from_taskbar(flyout_window)
         try:
@@ -3136,6 +3199,7 @@ def main():
             pass
 
     flyout_window.events.shown += on_flyout_shown
+    flyout_window.events.showing += lambda: _apply_window_shape(flyout_window)
     flyout_window.events.loaded += lambda: flyout_window.hide()
 
     def on_flyout_closing():
@@ -3169,12 +3233,14 @@ def main():
     def toggle_theme(icon=None, item=None):
         order = ["light", "dark", "auto"]
         cur = api._cfg.get("theme", "auto")
-        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "light"
+        nxt = order[(order.index(cur) + 1) %
+                    len(order)] if cur in order else "light"
         api._cfg["theme"] = nxt
         cfgmod.save_config(api._cfg)
         api._push_prefs()
         try:
-            window.evaluate_js("window.__setThemeFromTray && window.__setThemeFromTray(%s)" % json.dumps(nxt))
+            window.evaluate_js(
+                "window.__setThemeFromTray && window.__setThemeFromTray(%s)" % json.dumps(nxt))
         except Exception:
             pass
 

@@ -1338,7 +1338,14 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-icon {
    the type around them: near-white on a lit tile, and exactly the text's
    own colour on an unlit one. */
 html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon {
-  color: rgba(255, 255, 255, 0.92) !important;
+  color: rgba(255, 255, 255, 0.95) !important;
+  background: transparent !important;
+}
+/* The climate chip is the exception: it is a filled chip by design (the
+   temperature is set *in* it, see climateBadge) and it is round, so it
+   keeps a plate - just a flattened, colourless one like everything else
+   down here. */
+html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon.is-badge {
   background: rgba(255, 255, 255, 0.12) !important;
 }
 html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon,
