@@ -1,5 +1,5 @@
 """
-HA Desktop Widgets (pywebview edition)
+HA Desktop Widgets (Qt edition)
 =======================================
 
 A borderless desktop widget that mirrors your Home Assistant accessories as
@@ -29,9 +29,8 @@ Settings also has a "start with Windows" toggle. Right-click the system tray ico
 Settings, theme switching, a manual refresh, or Quit. Closing the widget
 (Alt+F4) just hides it - use tray "Quit" to actually exit.
 
-Requires: pywebview, pystray, Pillow, websocket-client (pip install
-pywebview pystray Pillow websocket-client). On Windows these pull in
-pythonnet automatically to drive the EdgeWebView2 control.
+Requires: PySide6, pystray, Pillow, websocket-client.
+Install with: pip install -r requirements.txt
 """
 
 import base64
@@ -40,11 +39,14 @@ import datetime
 import io
 import json
 import math
+import multiprocessing
 import os
 import sys
 import threading
 import time
 import zlib
+
+from capture_worker import CaptureWorker
 
 if sys.platform == "win32":
     # Must happen before pywebview creates any window / calls its own
@@ -68,33 +70,11 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-# WebView2 reads this when its environment is created, which pywebview
-# does on the first create_window - so it has to be set before that, and
-# it is additive with whatever the caller already put there (the debug
-# port, when one is being used).
-#
-#   process-per-site       - the three windows are three pages of one
-#                            origin, and without this each gets its own
-#                            renderer process, with its own baseline.
-#   disable-gpu            - this page is a card and one image blit; it
-#                            has nothing a GPU is for. The GPU process
-#                            was holding 300MB of private memory and 100MB
-#                            of working set to do it, and measured, the
-#                            software path is also *cheaper* on CPU here
-#                            (17% of a core against 19%).
-# Chromium's flags reach QtWebEngine through its own variable. Software
-# rendering, as in the WebView2 build and for the same reason: measured
-# here with everything else equal, the GPU path costs 29% of a core and
-# 666MB against 27.5% and 634MB, so it buys nothing. It does silence the
-# "failed to create GLES3 context" lines this prints on startup, which
-# are Chromium trying the GPU anyway and falling back - noise, not a
-# fault. Neither path affects the transparency; both were checked.
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
-
-# Below the two blocks above, not with the rest of the imports at the top:
-# importing this imports Qt, and Qt reads both the DPI awareness and
-# QTWEBENGINE_CHROMIUM_FLAGS as it comes up. A formatter that sorts
-# imports will move this back, and moving it back is the bug.
+# Let Qt and Chromium negotiate their default graphics backend. Forcing
+# --disable-gpu caused repeated GLES shared-context failures on this Qt
+# build, even with QT_QUICK_BACKEND=software. Preserve caller-provided
+# graphics environment variables for diagnostics.
+# Import Qt only after setting DPI awareness above.
 import qtshell as webview  # noqa: E402
 
 import config as cfgmod  # noqa: E402
@@ -169,10 +149,16 @@ class Api:
         # Whether both windows are currently hidden from screen capture,
         # which is what makes the cheap backdrop path safe to use.
         self._capture_excluded = False
+        self._system_glass_hwnds = {}
         # The window kinds currently hidden from screen captures, which is
         # exactly the set that may read the screen for their own backdrop
         # (see _apply_capture_exclusion).
         self._excluded_kinds = set()
+        # Drop a backdrop captured while an overlay changes which of our
+        # windows are visible to screen capture. DWM applies that change
+        # on its next composition, not at the instant of the API call.
+        self._capture_epoch = 0
+        self._capture_transition_until = 0.0
         # Which overlay windows are open. While any of them is, the grid
         # window is deliberately left capturable, because it is part of
         # what is behind them and so part of their frosted backdrop.
@@ -280,6 +266,7 @@ class Api:
                 "ha_url": self._cfg.get("ha_url", ""),
                 "ha_token": self._cfg.get("ha_token", ""),
                 "theme": self._cfg.get("theme", "auto"),
+                "glass_style": self._cfg.get("glass_style", "classic"),
                 "columns": self._cfg.get("columns", 4),
                 "lock_position": bool(self._cfg.get("lock_position", False)),
                 "start_on_boot": bool(self._cfg.get("start_on_boot", False)),
@@ -290,6 +277,7 @@ class Api:
                 "opacity": self._cfg.get("opacity", 100),
                 "glass_mode": self._cfg.get("glass_mode", "fast"),
                 "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
+                "system_glass_active": self._system_glass_status(),
                 "panel_theme": self._cfg.get("panel_theme", "follow"),
                 "sample_fps": int(self._cfg.get("sample_fps", 16)),
                 "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
@@ -389,6 +377,7 @@ class Api:
     # is what "the settings don't stick" was.
     _PREF_CLEANERS = {
         "theme": lambda v: v if v in ("auto", "light", "dark") else "auto",
+        "glass_style": lambda v: v if v in ("classic", "liquid", "windows") else "classic",
         # The tray panel sits over other windows rather than on the
         # wallpaper, so what looks right there is not what looks right on
         # the desktop; "follow" means don't have an opinion.
@@ -423,7 +412,7 @@ class Api:
             except Exception:
                 continue
             touched.add(key)
-        if "glass_mode" in touched:
+        if "glass_mode" in touched or "glass_style" in touched:
             # Both of these read the mode, and both have to be told: one
             # decides which windows hide from screen capture, the other
             # who paints the glass.
@@ -591,12 +580,17 @@ class Api:
         # pywebview itself uses for every other native call - see
         # InvokeRequired/Invoke throughout platforms/winforms.py) makes
         # this synchronous with the relayout instead of racing it.
-        at = origin(w, h) if origin else None
-        if at:
-            _run_on_ui_thread(window, lambda: _set_window_rect(
-                hwnd, at[0], at[1], w, h))
-        else:
-            _run_on_ui_thread(window, lambda: _set_window_size(hwnd, w, h))
+        def apply():
+            # Request threads may queue UI work in a different order from
+            # their sequence check above. Recheck on the owning thread.
+            if seq is not None and seq != getattr(self, seq_attr):
+                return
+            at = origin(w, h) if origin else None
+            if at:
+                _set_window_rect(hwnd, at[0], at[1], w, h)
+            else:
+                _set_window_size(hwnd, w, h)
+        _run_on_ui_thread(window, apply)
 
     def quit_app(self):
         self._quit()
@@ -663,6 +657,9 @@ class Api:
             self.show_flyout()
 
     def show_flyout(self):
+        if not self._cfg.get("tiles"):
+            self.open_settings_window()
+            return
         window = self._flyout_window
         hwnd = _get_hwnd(window) if window else None
         if not hwnd:
@@ -1092,6 +1089,12 @@ class Api:
                 return {"skip": True, "retry_ms": 1000}
             if _nothing_visible_of(hwnd, self._own_hwnds()):
                 return {"skip": True, "retry_ms": 400}
+        if self._system_glass_on(window_kind):
+            return {"skip": True, "retry_ms": 1000, "system_glass": True}
+        if (window_kind == "main" and
+                time.monotonic() < self._capture_transition_until):
+            return {"skip": True, "retry_ms": 80}
+        capture_epoch = self._capture_epoch
         started = time.perf_counter()
         try:
             r = (ctypes.c_long * 4)()
@@ -1161,15 +1164,10 @@ class Api:
             # clearing it still shows the window missing.
             can_read_screen = self._capture_excluded and window_kind in self._excluded_kinds
             if window_kind == "flyout" and not can_read_screen:
-                # The panel sits over whatever the user had open, so the
-                # only truthful backdrop for it is a read of the screen.
-                # While something of ours is on top of it that read would
-                # include this window itself, and the fallback - a render
-                # of the wallpaper alone - would show the desktop straight
-                # through the windows that are actually there. Nothing
-                # behind it is moving in that moment anyway, so it keeps
-                # the frame it already has.
-                return {"skip": True, "retry_ms": 300}
+                # Compatibility mode cannot read the screen containing
+                # itself. Render intersecting windows beneath the panel
+                # back-to-front over the wallpaper instead.
+                over = _windows_below(hwnd, (x, y, x + w, y + h))
             corner = max(0, min(int(want_corner or 0), w // 2, h // 2))
             from PIL import Image, ImageFilter
             # Once DWM is drawing the glass, the four corner wedges are the
@@ -1184,13 +1182,16 @@ class Api:
             if raw is None:
                 # Either the fast path is off or unusable here, or it
                 # failed - the slow one always works.
-                raw = _desktop_capture.grab(x, y, w, h, over)
+                raw = _compat_capture.grab(x, y, w, h, over)
             if not raw:
                 return None
+            if capture_epoch != self._capture_epoch:
+                return {"skip": True, "retry_ms": 80}
             digest = zlib.crc32(raw) & 0xFFFFFFFF
             cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
-                return {"unchanged": True, "hash": digest, "ms": cost_ms}
+                return {"unchanged": True, "hash": digest, "ms": cost_ms,
+                        "system_glass": False}
             img = Image.frombuffer("RGBA", (w, h), raw,
                                    "raw", "BGRA", 0, 1).convert("RGB")
 
@@ -1218,9 +1219,26 @@ class Api:
             if want_blur and not self._system_glass_on(window_kind):
                 small = img.resize(
                     (max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
-                small = small.filter(ImageFilter.GaussianBlur(radius=4))
+                # Blur the source before it reaches Canvas. Blurring a
+                # window-sized canvas samples transparent black beyond its
+                # edges and leaves dark wedges in rounded corners.
+                blur_radius = (0.75 if self._cfg.get("glass_style") == "liquid"
+                               and not is_popover else 4)
+                small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
                 blur_buf = io.BytesIO()
                 small.save(blur_buf, format="JPEG", quality=80)
+
+            # A lens needs the actual pixels behind the pane. The normal
+            # sharp payload contains only the transparent corner wedges.
+            lens_buf = None
+            if (want_blur and not self._system_glass_on(window_kind)
+                    and self._cfg.get("glass_style") == "liquid"
+                    and not is_popover):
+                lens_buf = io.BytesIO()
+                # Preserve full chroma resolution: 4:2:0 JPEG subsampling
+                # can turn fine desktop patterns into coloured moire after
+                # the tile lens displaces them.
+                img.save(lens_buf, format="JPEG", quality=88, subsampling=0)
 
             # The sharp copy, cut down to the only part of it anyone ever
             # sees: the four wedges outside the card's rounded corners.
@@ -1242,15 +1260,21 @@ class Api:
                 # against PNG's ~4.6ms - the difference between tracking a
                 # moving wallpaper and not.
                 img.save(sharp_buf, format="JPEG", quality=88, subsampling=0)
+            if capture_epoch != self._capture_epoch:
+                return {"skip": True, "retry_ms": 80}
             return {
                 "url": ("data:image/jpeg;base64,"
                         + base64.b64encode(sharp_buf.getvalue()
                                            ).decode("ascii")
                         ) if sharp_buf else None,
+                "system_glass": False,
                 "blur_url": ("data:image/jpeg;base64,"
                              + base64.b64encode(blur_buf.getvalue()
                                                 ).decode("ascii")
                              ) if blur_buf else None,
+                "lens_url": ("data:image/jpeg;base64,"
+                             + base64.b64encode(lens_buf.getvalue()).decode("ascii")
+                             ) if lens_buf else None,
                 "w": w,
                 "h": h,
                 "corner": corner,
@@ -1340,18 +1364,27 @@ class Api:
         PrintWindow path has to keep being used, silently rather than
         showing the widget its own reflection.
         """
-        # Everything but the compatibility mode wants the fast path: the
-        # system-glass mode still reads the four corners off the screen,
-        # and reading the screen means being out of it.
-        wanted = self._cfg.get("glass_mode", "fast") == "fast"   # TEMP probe
+        # Liquid mode needs live pixels even when the user previously
+        # selected native glass. Use the fast capture path in that case;
+        # explicit compatibility mode still keeps its requested behavior.
+        mode = self._cfg.get("glass_mode", "fast")
+        wanted = mode == "fast" or (mode == "system" and
+                                    self._cfg.get("glass_style") == "liquid")
         # A window being armed is already sitting at the rectangle it is
         # about to appear in - it is only the showing that has not
         # happened yet - so it counts as present here. Left out, the
         # window it is about to cover stays hidden from capture, and the
         # backdrop taken for it in that moment has a hole where that
         # window is.
-        rects = {kind: _visible_rect(self._window_for(kind), kind == self._arming_kind)
-                 for kind in ("main", "flyout", "popover", "settings")}
+        # hide() can complete after this call. Once an overlay has been
+        # closed, its stale visible HWND must not keep the widget capturable
+        # and make the next screen grab read the widget back into itself.
+        rects = {
+            kind: (_visible_rect(self._window_for(kind), kind == self._arming_kind)
+                   if kind == "main" or kind in self._overlays_open
+                   or kind == self._arming_kind else None)
+            for kind in ("main", "flyout", "popover", "settings")
+        }
         excluded = {}
         for kind, above in _WINDOWS_ABOVE.items():
             mine = rects.get(kind)
@@ -1359,19 +1392,20 @@ class Api:
                 rects.get(other) and _rects_overlap(mine, rects[other]) for other in above
             )
             excluded[kind] = wanted and not covered
-        ok = False
-        if self._window:
-            ok = _set_capture_exclusion(self._window, excluded["main"])
-            if not excluded["main"]:
-                ok = True          # the mode is still on, just suspended here
-        for kind in ("popover", "settings", "flyout"):
+        accepted = set()
+        for kind in ("main", "popover", "settings", "flyout"):
             win = self._window_for(kind)
             if win:
-                _set_capture_exclusion(win, excluded[kind])
+                ok = _set_capture_exclusion(win, excluded[kind])
+                if ok and excluded[kind]:
+                    accepted.add(kind)
         # Which windows may read the screen for their own backdrop: the
         # ones that are not in it.
-        self._excluded_kinds = {k for k, v in excluded.items() if v}
-        self._capture_excluded = wanted and ok
+        if accepted != self._excluded_kinds:
+            self._capture_epoch += 1
+            self._capture_transition_until = time.monotonic() + 0.2
+        self._excluded_kinds = accepted
+        self._capture_excluded = bool(accepted)
 
     # ---- glass ----------------------------------------------------------
 
@@ -1390,27 +1424,32 @@ class Api:
     _SYSTEM_GLASS_KINDS = ("main", "popover", "flyout")
 
     def _system_glass_on(self, kind=None):
-        if not (_SYSTEM_GLASS_SUPPORTED and self._cfg.get("glass_mode") == "system"):
+        if not (_SYSTEM_GLASS_SUPPORTED and self._cfg.get("glass_mode") == "system"
+                and self._cfg.get("glass_style") != "liquid"):
             return False
-        return kind is None or kind in self._SYSTEM_GLASS_KINDS
+        if kind is None:
+            return any(self._system_glass_on(k) for k in self._SYSTEM_GLASS_KINDS)
+        hwnd = _get_hwnd(self._window_for(kind))
+        return bool(hwnd and self._system_glass_hwnds.get(kind) == hwnd)
+
+    def _system_glass_status(self):
+        return {k: self._system_glass_on(k) for k in self._SYSTEM_GLASS_KINDS}
 
     def _apply_system_glass(self, kind=None):
-        """(Re-)ask DWM for the glass, for one window or for all of them.
-
-        Has to be done again after every show: DWM drops a window's blur
-        region when it is hidden, and drops it again whenever the extended
-        styles are rewritten underneath it (which _hide_from_taskbar and
-        _set_noactivate both do). Granted and then silently revoked, what
-        was left was the form's own background colour - a flat near-white
-        that looked exactly like glass that had failed to be transparent.
-        """
-        kinds = (kind,) if kind else self._SYSTEM_GLASS_KINDS
-        for k in kinds:
+        desired = (_SYSTEM_GLASS_SUPPORTED and self._cfg.get("glass_mode") == "system"
+                   and self._cfg.get("glass_style") != "liquid")
+        before = dict(self._system_glass_hwnds)
+        for k in ((kind,) if kind else self._SYSTEM_GLASS_KINDS):
             if k not in self._SYSTEM_GLASS_KINDS:
                 continue
             win = self._window_for(k)
-            if win:
-                _set_system_glass(win, self._system_glass_on(k))
+            if not win:
+                continue
+            self._system_glass_hwnds.pop(k, None)
+            if _set_system_glass(win, desired) and desired:
+                self._system_glass_hwnds[k] = _get_hwnd(win)
+        if before != self._system_glass_hwnds:
+            self._push_prefs()
 
     def debug_capturable(self, on=True):
         """Put the windows back into screen captures, for development.
@@ -1563,8 +1602,11 @@ class Api:
         __applyPrefs compares before it acts, so the window that made the
         change is not disturbed by getting its own change back.
         """
+        if not self._cfg.get("tiles") and self._flyout_open:
+            self.hide_flyout()
         payload = json.dumps({
             "theme": self._cfg.get("theme", "auto"),
+            "glass_style": self._cfg.get("glass_style", "classic"),
             "columns": self._cfg.get("columns", 4),
             "zoom": self._cfg.get("zoom", 100),
             "fixed_size": bool(self._cfg.get("fixed_size", False)),
@@ -1574,6 +1616,7 @@ class Api:
             "opacity": self._cfg.get("opacity", 100),
             "glass_mode": self._cfg.get("glass_mode", "fast"),
             "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
+            "system_glass_active": self._system_glass_status(),
             "panel_theme": self._cfg.get("panel_theme", "follow"),
             "sample_fps": int(self._cfg.get("sample_fps", 16)),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
@@ -1591,24 +1634,15 @@ class Api:
                 pass
 
     def _push_batch(self, items):
-        if not self._window:
-            return
         payload = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
-        try:
-            self._window.evaluate_js("window.__haPushBatch(%s)" % payload)
-        except Exception:
-            pass
-        # The popover window keeps its own STATES copy from its own
-        # bootstrap/fetch_initial_states call, but has no live websocket of
-        # its own (it shares this Api/HAClient instance, whose push
-        # callbacks otherwise only ever target the main window) - without
-        # this it would go stale the moment something changes elsewhere
-        # while it's open. Only worth reaching if it's actually showing
-        # something.
-        if self._popover_window:
+        # Hidden pages also retain their own state for the next opening.
+        for window in (self._window, self._popover_window,
+                       self._flyout_window, self._settings_window):
+            if not window:
+                continue
             try:
-                self._popover_window.evaluate_js(
-                    "window.__haPushBatch(%s)" % payload)
+                window.evaluate_js(
+                    'if (typeof window.__haPushBatch === "function") window.__haPushBatch(%s)' % payload)
             except Exception:
                 pass
 
@@ -1622,13 +1656,19 @@ class Api:
         self._push_batch([[entity_id, new_state]])
 
     def _on_ha_status(self, connected, detail=""):
+        reconnected = connected and not self._connected
         self._connected = connected
-        if self._window and self._ui_ready:
+        for window in (self._window, self._popover_window,
+                       self._flyout_window, self._settings_window):
+            if not window or not self._ui_ready:
+                continue
             try:
-                self._window.evaluate_js(
-                    "window.__haStatus(%s)" % json.dumps(bool(connected)))
+                window.evaluate_js(
+                    'if (typeof window.__haStatus === "function") window.__haStatus(%s)' % json.dumps(bool(connected)))
             except Exception:
                 pass
+        if reconnected:
+            self._refresh_now()
 
     def _on_moved(self, x, y):
         """Remember the window's position - in physical screen pixels, and
@@ -1661,13 +1701,18 @@ class Api:
 
     def _refresh_now(self):
         def go():
-            for t in self._cfg.get("tiles", []):
-                try:
-                    st = self._client.get_state(t["entity"])
-                    if st:
-                        self._on_ha_event(t["entity"], st)
-                except Exception:
-                    pass
+            wanted = {t["entity"] for t in self._cfg.get("tiles", [])}
+            try:
+                if not self._cfg.get("ha_token"):
+                    raise RuntimeError("not configured")
+                states = {s["entity_id"]: s for s in self._client.get_states()}
+            except Exception as exc:
+                states = {}
+                self._on_ha_status(False, str(exc))
+            for entity in wanted:
+                self._on_ha_event(entity, states.get(entity) or {
+                    "entity_id": entity, "state": "unavailable", "attributes": {},
+                })
         threading.Thread(target=go, daemon=True).start()
 
     def _quit(self):
@@ -1685,6 +1730,7 @@ class Api:
                 self._window.destroy()
         except Exception:
             pass
+        _compat_capture.close()
         os._exit(0)
 
 
@@ -1734,69 +1780,10 @@ SWP_NOACTIVATE = 0x0010
 _hwnd_lock = threading.Lock()
 
 
-# Window shape and the frosted-glass backdrop.
-#
-# The widget is meant to sit on the desktop like a Rainmeter skin:
-# frosted, softly rounded, no drop shadow, no taskbar button. Only the
-# last two of those are done natively:
-#
-#   No shadow: DWMWA_WINDOW_CORNER_PREFERENCE is pinned to
-#   DWMWCP_DONOTROUND. That is not about shape - the rounded outline is
-#   the page's - but about what DWM attaches to rounding. On Windows 11
-#   asking for *any* corner rounding also gets the standard window drop
-#   shadow, and a shadow is what makes something read as an application
-#   floating above the desktop rather than a widget stuck to it. Measured
-#   on a flat grey backdrop, capturing with the window shown and hidden:
-#   rounding of either size puts a ~20px darkening ramp under the window,
-#   DONOTROUND leaves it perfectly flat. Nothing separates the two, and
-#   once DWM has granted the shadow it does not take it back when the
-#   preference changes at runtime - so anything measuring this has to
-#   compare separate runs or it will read its own leftovers.
-#
-#   No taskbar button: see _hide_from_taskbar.
-#
-# Everything visual is the page's, drawn over a live picture of the
-# desktop that _DesktopCapture takes from behind the window - except on
-# Windows 11 22H2 and later, where DWM will draw the glass itself and the
-# capture is reduced to the four sharp corners (see _set_system_glass,
-# and the glass_mode setting). What follows is why the capture had to
-# exist at all, and why it is still the fallback.
-#
-# Every one of these was measured, with the widget over a dark purple
-# region of the wallpaper and over a pink one, and the panel's colour came
-# out identical both times - the window was not see-through:
-#
-#   - DWMWA_SYSTEMBACKDROP_TYPE (Mica/Acrylic) *on its own*. This is the
-#     one that turned out to be half a solution: it does nothing without
-#     DwmExtendFrameIntoClientArea over the whole client area, and with it
-#     the window really is translucent. That pairing is what
-#     _set_system_glass does now.
-#   - SetWindowCompositionAttribute, both ACCENT_ENABLE_ACRYLICBLURBEHIND
-#     and ACCENT_ENABLE_BLURBEHIND.
-#   - pywebview's transparent=True, which composites the page's
-#     transparent pixels against the WinForms form's opaque background.
-#   - WS_EX_LAYERED colour-keyed on the page's background or the form's;
-#     the key never matches what Chromium actually paints.
-#
-# Two near misses worth recording, because they look like solutions:
-# WS_EX_LAYERED with LWA_ALPHA *does* make the window genuinely
-# translucent, but only under --disable-gpu-compositing, and only
-# uniformly - tiles and text go translucent with it. And SetWindowRgn does
-# clip the window's shape, but the area it excludes composites to opaque
-# black instead of revealing the desktop (a plain WinForms form with the
-# same region reveals it fine - it is the WebView2 child that breaks it),
-# which is where the black frame around the card came from.
-#
-# Painting the backdrop ourselves sidesteps all of it: the page draws the
-# captured desktop edge to edge, blurs it behind the card with
-# backdrop-filter, and leaves it unblurred outside the card's rounded
-# corners so those corners read as a real cutout. Tiles stay fully opaque,
-# because nothing about the window is translucent.
-#
-# And with the system backdrop the same drawing still works: the glass
-# under the card comes from DWM instead of from the capture, the corner
-# wedges are still painted over it, and the page cannot tell the
-# difference beyond not being handed a blurred frame (see paintBackdrop).
+# Qt provides transparent window corners; the page clips a pre-blurred
+# desktop image to its card. Fast mode reads the screen with the widget
+# excluded from capture. Compatibility mode uses an isolated PrintWindow
+# worker. Confirmed native DWM glass bypasses image capture entirely.
 
 
 # Declared signatures for every native call below that takes an HWND. A
@@ -1823,6 +1810,8 @@ _user32.SetWindowPos.restype = ctypes.c_int
 _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
 _user32.GetWindowLongW.restype = ctypes.c_long
+_user32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.GetWindow.restype = ctypes.c_void_p
 _user32.SetWindowLongW.argtypes = [
     ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
 _user32.SetWindowLongW.restype = ctypes.c_long
@@ -1854,6 +1843,8 @@ _gdi32.GetDIBits.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
 ]
+_gdi32.PatBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 # A region handle is pointer-sized; undeclared, ctypes would hand back a
 # truncated 32-bit int and the handle would be freed from the wrong place.
@@ -1863,6 +1854,8 @@ _dwmapi.DwmEnableBlurBehindWindow.restype = ctypes.c_long
 _gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
 _user32.EnumChildWindows.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_user32.EnumWindows.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
+_user32.IsIconic.argtypes = [ctypes.c_void_p]
 _user32.GetClassNameW.argtypes = [
     ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 _user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
@@ -1871,6 +1864,8 @@ _user32.MonitorFromPoint.restype = ctypes.c_void_p
 _user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.SetWindowDisplayAffinity.restype = ctypes.c_int
+_user32.GetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+_user32.GetWindowDisplayAffinity.restype = ctypes.c_int
 _user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 _user32.GetAncestor.restype = ctypes.c_void_p
 _user32.GetForegroundWindow.restype = ctypes.c_void_p
@@ -1967,19 +1962,14 @@ class _DesktopCapture:
         self._ov_size = (0, 0)
         # (hwnd, x, y, w, h) of the surface we render
         self._surface = None
+        self._original_bitmaps = {}
 
     # -- scratch surfaces ------------------------------------------------
 
     def _ensure(self, attr_dc, attr_bmp, attr_size, w, h):
         if getattr(self, attr_dc) and getattr(self, attr_size) == (w, h):
             return True
-        old_dc, old_bmp = getattr(self, attr_dc), getattr(self, attr_bmp)
-        if old_bmp:
-            _gdi32.DeleteObject(old_bmp)
-        if old_dc:
-            _gdi32.DeleteDC(old_dc)
-        setattr(self, attr_dc, None)
-        setattr(self, attr_bmp, None)
+        self._release(attr_dc, attr_bmp)
         setattr(self, attr_size, (0, 0))
         screen_dc = _user32.GetDC(None)
         if not screen_dc:
@@ -1993,13 +1983,30 @@ class _DesktopCapture:
                 if dc:
                     _gdi32.DeleteDC(dc)
                 return False
-            _gdi32.SelectObject(dc, bmp)
+            original = _gdi32.SelectObject(dc, bmp)
+            if not original or original == ctypes.c_void_p(-1).value:
+                _gdi32.DeleteObject(bmp)
+                _gdi32.DeleteDC(dc)
+                return False
+            self._original_bitmaps[attr_dc] = original
             setattr(self, attr_dc, dc)
             setattr(self, attr_bmp, bmp)
             setattr(self, attr_size, (w, h))
             return True
         finally:
             _user32.ReleaseDC(None, screen_dc)
+
+    def _release(self, attr_dc, attr_bmp):
+        dc, bmp = getattr(self, attr_dc), getattr(self, attr_bmp)
+        original = self._original_bitmaps.pop(attr_dc, None)
+        if dc and original:
+            _gdi32.SelectObject(dc, original)
+        if bmp:
+            _gdi32.DeleteObject(bmp)
+        if dc:
+            _gdi32.DeleteDC(dc)
+        setattr(self, attr_dc, None)
+        setattr(self, attr_bmp, None)
 
     # -- choosing which surface to render --------------------------------
 
@@ -2040,15 +2047,12 @@ class _DesktopCapture:
             return None
         if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
             return None
-        _gdi32.BitBlt(self._out_dc, 0, 0, w, h,
-                      self._dc, x - sx, y - sy, SRCCOPY)
-        hdr = _BITMAPINFOHEADER(
-            ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
-        )
-        buf = ctypes.create_string_buffer(w * h * 4)
-        if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+        if not _gdi32.PatBlt(self._out_dc, 0, 0, w, h, 0x00000042):  # BLACKNESS
             return None
-        return buf.raw
+        if not _gdi32.BitBlt(self._out_dc, 0, 0, w, h,
+                            self._dc, x - sx, y - sy, SRCCOPY):
+            return None
+        return self._read_out(w, h)
 
     @staticmethod
     def _disagreement(a, b):
@@ -2099,15 +2103,7 @@ class _DesktopCapture:
         """
         with self._lock:
             for dc, bmp in (("_dc", "_bmp"), ("_out_dc", "_out_bmp"), ("_ov_dc", "_ov_bmp")):
-                try:
-                    if getattr(self, bmp):
-                        _gdi32.DeleteObject(getattr(self, bmp))
-                    if getattr(self, dc):
-                        _gdi32.DeleteDC(getattr(self, dc))
-                except Exception:
-                    pass
-                setattr(self, dc, None)
-                setattr(self, bmp, None)
+                self._release(dc, bmp)
             self._size = self._out_size = self._ov_size = (0, 0)
             # Which window under Progman actually holds the wallpaper is
             # also a fact about the old display arrangement.
@@ -2144,6 +2140,10 @@ class _DesktopCapture:
         with self._lock:
             if not self._ensure("_out_dc", "_out_bmp", "_out_size", w, h):
                 return None
+            # Clear pixels outside the virtual screen before blurring;
+            # otherwise they contain a previous frame from this shared DC.
+            if not _gdi32.PatBlt(self._out_dc, 0, 0, w, h, 0x00000042):
+                return None
             screen_dc = _user32.GetDC(None)
             if not screen_dc:
                 return None
@@ -2160,9 +2160,16 @@ class _DesktopCapture:
             ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0,
         )
         buf = ctypes.create_string_buffer(w * h * 4)
-        if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
+        original = self._original_bitmaps["_out_dc"]
+        selected = _gdi32.SelectObject(self._out_dc, original)
+        if not selected or selected == ctypes.c_void_p(-1).value:
             return None
-        return buf.raw
+        try:
+            rows = _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h,
+                                   buf, ctypes.byref(hdr), 0)
+            return buf.raw if rows == h else None
+        finally:
+            _gdi32.SelectObject(self._out_dc, self._out_bmp)
 
     def draw_over(self, hwnds, x, y, w, h):
         """Paint `hwnds` into the last grab, at their screen positions."""
@@ -2230,17 +2237,11 @@ class _DesktopCapture:
                     continue
                 _gdi32.BitBlt(
                     self._out_dc, r[0] - x, r[1] - y, ow, oh, self._ov_dc, 0, 0, SRCCOPY)
-            hdr = _BITMAPINFOHEADER(
-                ctypes.sizeof(_BITMAPINFOHEADER), w, -
-                h, 1, 32, 0, 0, 0, 0, 0, 0,
-            )
-            buf = ctypes.create_string_buffer(w * h * 4)
-            if not _gdi32.GetDIBits(self._out_dc, self._out_bmp, 0, h, buf, ctypes.byref(hdr), 0):
-                return raw
-            return buf.raw
+            return self._read_out(w, h) or raw
 
 
 _desktop_capture = _DesktopCapture()
+_compat_capture = CaptureWorker()
 
 
 def _get_hwnd(window):
@@ -2357,29 +2358,9 @@ if _SetWindowCompositionAttribute is not None:
         ctypes.c_void_p, ctypes.c_void_p]
     _SetWindowCompositionAttribute.restype = ctypes.c_int
 
-# DWMWA_SYSTEMBACKDROP_TYPE arrived in Windows 11 22H2, and in a window
-# of its own it works: a bare pywebview window with transparent=True, an
-# extended frame and this attribute shows a live blur of the pattern
-# behind it, measured (74.7, 88.2, 81.1 against a pattern averaging 74.6,
-# 86.2, 78.0 - the colour of what is behind, blurred).
-#
-# It does not work in *this* app, and what stops it is the WinForms form
-# the page sits on. Established by painting that form red: the middle of
-# the card turned red, so the page and the WebView2 surface above it are
-# genuinely transparent and what shows through is the form, which paints
-# its own opaque background over whatever DWM drew. Black there - the
-# trick that makes GDI painting read as alpha zero inside an extended
-# frame, which is what Windhawk's mod forces apps into - gives a black
-# card instead of glass. Ruled out along the way: the capture exclusion,
-# the no-activate and tool-window styles, the corner and transition
-# attributes, hiding and re-showing, bottom-pinning, the browser flags,
-# which window is pywebview's master, and the accent-policy blur (opaque
-# on its own).
-#
-# So the mode stays off unless it is asked for by name. Everything below
-# it - the glass_mode setting, the page's corners-only painting, the
-# backdrop that never has to be captured - is in place and works the
-# moment the form stops painting over it.
+# Native glass remains opt-in until its appearance is verified with Qt
+# across supported Windows/GPU configurations. API success is tracked per
+# HWND; failures fall back to the captured background.
 _SYSTEM_GLASS_SUPPORTED = (
     sys.getwindowsversion().build >= 22621
     and bool(os.environ.get("HA_WIDGET_SYSTEM_GLASS"))
@@ -2387,83 +2368,42 @@ _SYSTEM_GLASS_SUPPORTED = (
 
 
 def _set_system_glass(window, on):
-    """Ask DWM for the frosted glass instead of painting a copy of it.
-
-    The note above records that this window cannot be see-through, which
-    was true of everything measured there - but not of this pair, which
-    was not tried: DwmExtendFrameIntoClientArea over the whole client
-    area, *and* DWMWA_SYSTEMBACKDROP_TYPE. It is the recipe Windhawk's
-    Translucent Windows mod uses (HandleEffects in
-    mods/translucent-windows.wh.cpp), and most of that mod's six thousand
-    lines are hooks that force an app to paint alpha-zero pixels so the
-    backdrop has somewhere to show through. WebView2 does that part for
-    free, because pywebview's transparent=True hands it a transparent
-    DefaultBackgroundColor.
-
-    Measured over a window painting a moving pattern behind it: the page
-    reads the pattern through the card, live, at no cost to this process -
-    DWM composes it. That is the whole of the capture loop's job for
-    everything except the four sharp corners, which still come from a
-    read of the screen because DWM's backdrop fills the window's whole
-    rectangle and knows nothing about the card's rounded outline.
-
-    The blur comes from the accent policy rather than from
-    DWMWA_SYSTEMBACKDROP_TYPE, because that one brings its own tint and in
-    light mode the tint is nearly white.
-
-    Left alone deliberately: the window's shape. SetWindowRgn does work
-    now (it is the opaque surface, not WebView2, that used to composite
-    the cut-away corners to black), but a region is one bit per pixel and
-    the corners come out visibly stepped. The page's own corners are
-    anti-aliased, so they stay.
-    """
-    hwnd = _get_hwnd(window)
-    if not hwnd or not _SYSTEM_GLASS_SUPPORTED:
+    """Apply DWM glass on Qt's GUI thread; report actual API success."""
+    if not _SYSTEM_GLASS_SUPPORTED:
         return False
 
     def _apply():
+        hwnd = _get_hwnd(window)
+        if not hwnd:
+            return False
         with _hwnd_lock:
+            def set_backdrop(value):
+                v = ctypes.c_uint(value)
+                return _dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(v), ctypes.sizeof(v))
+
             try:
-                # -1 on every side is "the frame is the whole window", the
-                # sheet-of-glass form. Without it there is nothing for a
-                # backdrop to be drawn under: this window has no frame.
                 m = _MARGINS(-1, -1, -1, -1) if on else _MARGINS(0, 0, 0, 0)
-                hr_frame = _dwmapi.DwmExtendFrameIntoClientArea(
-                    hwnd, ctypes.byref(m))
-                # Whatever WebView2 leaves transparent shows the *form*
-                # underneath, and the form paints its own background over
-                # anything DWM put there. Asking for a transparent one
-                # throws on a top-level form and painting it black gets a
-                # black card rather than glass, so it is left alone - and
-                # this is as far as the system backdrop gets here (see the
-                # note on the function).
-                try:
-                    from System.Drawing import Color as _Color
-                    window.native.browser.webview.DefaultBackgroundColor = _Color.Transparent
-                except Exception:
-                    pass
-                v = ctypes.c_uint(
-                    DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
-                _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(
-                        v), ctypes.sizeof(v),
-                )
-                # Granting a window a system backdrop also gives it the
-                # standard Windows 11 window border, which is drawn around
-                # the window's *rectangle* - so it appeared as a bright
-                # hairline cutting across the card's rounded corners.
-                # Nothing here wants a frame: the visible outline is the
-                # page's.
+                frame = _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                backdrop = set_backdrop(DWMSBT_TRANSIENTWINDOW if on else DWMSBT_NONE)
+                if frame < 0 or backdrop < 0:
+                    raise OSError("DWM glass failed: frame=%s backdrop=%s" % (frame, backdrop))
                 border = ctypes.c_uint(DWMWA_COLOR_NONE)
                 _dwmapi.DwmSetWindowAttribute(
-                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(
-                        border), ctypes.sizeof(border),
-                )
-            except Exception:
-                pass
+                    hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
+                return True
+            except Exception as exc:
+                webview.log(str(exc))
+                # Undo partial activation before using the software backdrop.
+                try:
+                    set_backdrop(DWMSBT_NONE)
+                    m = _MARGINS(0, 0, 0, 0)
+                    _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+                except Exception:
+                    pass
+                return False
 
-    _run_on_ui_thread(window, _apply)
-    return True
+    return bool(window.run_on_ui_thread(_apply))
 
 
 # Which of this app's windows can end up on top of which. A window has
@@ -2495,6 +2435,35 @@ def _rects_overlap(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
+def _windows_below(target, rect):
+    """Visible intersecting top-level windows, in paint order."""
+    found = []
+    below = False
+
+    def visit(hwnd, _):
+        nonlocal below
+        if hwnd == target:
+            below = True
+            return 1
+        if not below or not _user32.IsWindowVisible(hwnd) or _user32.IsIconic(hwnd):
+            return 1
+        name = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(hwnd, name, len(name))
+        if name.value in ("Progman", "WorkerW"):
+            return 1
+        cloaked = ctypes.c_uint()
+        if (_dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked),
+                                        ctypes.sizeof(cloaked)) == 0 and cloaked.value):
+            return 1
+        bounds = (ctypes.c_long * 4)()
+        if _user32.GetWindowRect(hwnd, ctypes.byref(bounds)) and _rects_overlap(rect, bounds):
+            found.append(hwnd)
+        return 1
+
+    _user32.EnumWindows(_ENUM_WINDOWS_PROC(visit), 0)
+    return tuple(reversed(found))
+
+
 def _set_capture_exclusion(window, excluded):
     """Take this window out of (or back into) screen captures.
 
@@ -2516,8 +2485,14 @@ def _set_capture_exclusion(window, excluded):
     def _apply():
         with _hwnd_lock:
             try:
+                desired = WDA_EXCLUDEFROMCAPTURE if excluded else WDA_NONE
+                current = ctypes.c_uint()
+                if (_user32.GetWindowDisplayAffinity(hwnd, ctypes.byref(current))
+                        and current.value == desired):
+                    ok[0] = True
+                    return
                 ok[0] = bool(_user32.SetWindowDisplayAffinity(
-                    hwnd, WDA_EXCLUDEFROMCAPTURE if excluded else WDA_NONE,
+                    hwnd, desired,
                 ))
             except Exception:
                 ok[0] = False
@@ -2803,6 +2778,11 @@ def _send_to_bottom(window):
     def _apply():
         with _hwnd_lock:
             try:
+                # GW_HWNDLAST only compares windows of the same type, so
+                # a topmost window must still be demoted explicitly.
+                if (not (_user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & 0x00000008)
+                        and _user32.GetWindow(hwnd, 1) == hwnd):
+                    return
                 _user32.SetWindowPos(
                     hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 )
@@ -3262,6 +3242,7 @@ def main():
         whole backdrop work.
         """
         _desktop_capture.reset()
+        _compat_capture.close()
         for kind in ("main", "popover", "settings", "flyout"):
             win = api._window_for(kind)
             if not win:
@@ -3315,4 +3296,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

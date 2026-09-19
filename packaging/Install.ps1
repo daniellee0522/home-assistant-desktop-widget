@@ -1,62 +1,27 @@
-<#
-    Installs HA Widgets for the current user, with nothing but PowerShell.
-
-        powershell -ExecutionPolicy Bypass -File packaging\Install.ps1
-
-    Copies the build into %LOCALAPPDATA%, puts it in the Start menu, and
-    offers to start it with Windows. Per user and no elevation: this is a
-    gadget for one person's desktop, and it keeps its settings under
-    %APPDATA% anyway.
-
-    packaging\installer.iss makes a real setup.exe out of the same build
-    when Inno Setup is available; this is the path that needs no tools.
-#>
+<# Launch the current release installer. Existing startup preferences are preserved. #>
 param(
     [switch]$NoStartup,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [string]$Version
 )
-
 $ErrorActionPreference = 'Stop'
-$name    = 'HA Widgets'
-$source  = Join-Path (Split-Path -Parent $PSScriptRoot) "dist\$name"
-$target  = Join-Path $env:LOCALAPPDATA $name
-$exe     = Join-Path $target "$name.exe"
-
-if (-not (Test-Path (Join-Path $source "$name.exe"))) {
-    throw "No build found at $source - run `python packaging\build.py` first."
+$projectRoot = Split-Path -Parent $PSScriptRoot
+if (-not $Version) { $Version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim() }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be MAJOR.MINOR.PATCH.' }
+$installer = Join-Path $projectRoot "dist\$Version\HA-Widgets-Setup-$Version.exe"
+if (-not (Test-Path -LiteralPath $installer)) {
+    throw "Installer not found. Run: python packaging/build.py --version $Version --installer"
 }
-
-Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Host "Stopping the running copy..."
-    $_.Kill(); $_.WaitForExit(5000)
+$checksumFile = $installer + '.sha256'
+if (-not (Test-Path -LiteralPath $checksumFile)) {
+    throw 'The installer build is not complete or verified yet. Wait for the build to finish.'
 }
-
-Write-Host "Installing to $target"
-if (Test-Path $target) { Remove-Item -Recurse -Force $target }
-New-Item -ItemType Directory -Force -Path $target | Out-Null
-Copy-Item -Recurse -Force (Join-Path $source '*') $target
-
-function New-Shortcut($linkPath, $targetPath) {
-    $shell = New-Object -ComObject WScript.Shell
-    $link = $shell.CreateShortcut($linkPath)
-    $link.TargetPath = $targetPath
-    $link.WorkingDirectory = Split-Path -Parent $targetPath
-    $link.IconLocation = $targetPath
-    $link.Save()
+$expectedHash = ((Get-Content -LiteralPath $checksumFile -Raw).Trim() -split '\s+')[0]
+if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $expectedHash) {
+    throw 'Installer checksum mismatch. The build may still be in progress; rebuild before installing.'
 }
-
-$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-New-Shortcut (Join-Path $startMenu "$name.lnk") $exe
-Write-Host "Added to the Start menu."
-
-if (-not $NoStartup) {
-    $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
-    New-Shortcut (Join-Path $startup "$name.lnk") $exe
-    Write-Host "Set to start with Windows."
-}
-
-if (-not $NoLaunch) {
-    Start-Process $exe
-    Write-Host "Started."
-}
-Write-Host "Done. Settings live in $env:APPDATA\$name."
+$installerArgs = @('/NORESTART')
+if ($NoLaunch) { $installerArgs += '/NOLAUNCH=1' }
+# NoStartup remains accepted for older callers; this installer never adds startup entries.
+$installProcess = Start-Process -FilePath $installer -ArgumentList $installerArgs -PassThru -Wait
+if ($installProcess.ExitCode -ne 0) { throw "Installer exited with code $($installProcess.ExitCode)." }

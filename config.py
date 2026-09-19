@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "ha_url": "http://homeassistant.local:8123",
     "ha_token": "",
     "theme": "auto",          # light | dark | auto
+    "glass_style": "classic",  # classic | liquid | windows
     "columns": 4,
     "window_x": 200,
     "window_y": 200,
@@ -144,7 +145,7 @@ def _migrate(cfg, loaded):
 
 def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".ha_widgets_", dir=BASE_DIR)
+    fd, tmp_path = tempfile.mkstemp(prefix=".ha_widgets_", dir=os.path.dirname(CONFIG_FILE))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)

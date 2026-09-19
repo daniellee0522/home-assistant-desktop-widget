@@ -129,7 +129,7 @@ function climateBadge(state, on) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', columns: 4, tiles: [], sample_fps: 16,
+  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', columns: 4, tiles: [], sample_fps: 16,
   dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
   zoom: 100, fixed_size: false, fixed_width: 400, fixed_height: 300,
@@ -182,11 +182,11 @@ window.__haPushBatch = function (items) {
 // "connected" immediately, since that's never something to hide.
 let connDisconnectTimer = null;
 window.__haStatus = function (connected) {
-  if (connDisconnectTimer) { clearTimeout(connDisconnectTimer); connDisconnectTimer = null; }
   if (connected) {
+    if (connDisconnectTimer) { clearTimeout(connDisconnectTimer); connDisconnectTimer = null; }
     CONNECTED = true;
     updateConnDot();
-  } else {
+  } else if (!connDisconnectTimer) {
     connDisconnectTimer = setTimeout(() => {
       connDisconnectTimer = null;
       CONNECTED = false;
@@ -266,6 +266,8 @@ function applyTheme() {
   const panel = CONFIG.panel_theme || 'follow';
   const theme = (IS_FLYOUT_WINDOW && panel !== 'follow') ? panel : (CONFIG.theme || 'auto');
   document.documentElement.setAttribute('data-theme', theme);
+  document.documentElement.setAttribute('data-glass-style', CONFIG.glass_style || 'classic');
+  if (document.getElementById('sample-fps-range')) setSampleFpsSlider(CONFIG.sample_fps);
 }
 
 /* ============================================================
@@ -295,6 +297,7 @@ function showView(name) {
 // entirely (see resize_window in main.py).
 let resizeRaf = null;
 let resizeSeq = 0;
+let lastRequestedSize = '';
 
 // The tray panel's own scale, deliberately not the widget's. The zoom
 // setting is about how big the widget should look sitting on the desktop,
@@ -323,7 +326,7 @@ let currentZoom = 1;
 
 function applyFixedSizeConstraint() {
   const viewGrid = document.getElementById('view-grid');
-  if (CONFIG.fixed_size) {
+  if (WINDOW_ROLE === 'grid' && CONFIG.fixed_size) {
     viewGrid.style.width = Math.max(120, Number(CONFIG.fixed_width) || 400) + 'px';
     viewGrid.style.height = Math.max(90, Number(CONFIG.fixed_height) || 300) + 'px';
     viewGrid.style.overflow = 'auto';
@@ -365,30 +368,25 @@ function syncWindowSize() {
     if (!(window.pywebview && window.pywebview.api)) return;
     const dpr = window.devicePixelRatio || 1;
     const stage = document.getElementById('stage');
-    let cssW, cssH;
-    if (CONFIG.fixed_size) {
-      cssW = Math.max(120, Number(CONFIG.fixed_width) || 400);
-      cssH = Math.max(90, Number(CONFIG.fixed_height) || 300);
-    } else {
-      const rect = stage.getBoundingClientRect();
-      // The window hugs the stage exactly, with no margin: the card is
-      // anchored at the window's top-left, which is what lets the saved
-      // window position *be* the card's on-screen position and lets
-      // requestPopover() turn a tile's client rect straight into screen
-      // coordinates. The cost is that .card-bg's box-shadow, which bleeds
-      // outside the card, gets cut off at the window edge.
-      cssW = rect.width;
-      cssH = rect.height;
-    }
+    // Measure the rendered stage for every role, including CSS zoom.
+    // Fixed dimensions are applied to the desktop grid in CSS only.
+    const rect = stage.getBoundingClientRect();
+    const cssW = rect.width, cssH = rect.height;
     resizeSeq += 1;
 
     const physW = Math.ceil(cssW * dpr), physH = Math.ceil(cssH * dpr);
+    if (physW <= 0 || physH <= 0) return;
+    const sizeKey = `${physW}:${physH}`;
+    if (sizeKey === lastRequestedSize) return;
+    lastRequestedSize = sizeKey;
     const resize = IS_POPOVER_WINDOW ? window.pywebview.api.resize_popover_window
       : IS_SETTINGS_WINDOW ? window.pywebview.api.resize_settings_window
       : IS_FLYOUT_WINDOW ? window.pywebview.api.resize_flyout_window
       : window.pywebview.api.resize_window;
     const done = resize(physW, physH, resizeSeq);
-    pendingResize = Promise.resolve(done).catch(() => {});
+    pendingResize = Promise.resolve(done).catch(() => {
+      if (lastRequestedSize === sizeKey) lastRequestedSize = '';
+    });
     // The backdrop is captured at the window's size, so it is wrong the
     // moment the window changes size - re-take it once the resize lands.
     Promise.resolve(done).then(() => refreshBackdropSoon()).catch(() => {});
@@ -465,6 +463,7 @@ let backdropPending = false;
 let backdropTimer = null;
 let backdropRaf = null;
 let backdropHash = null;
+let backdropGeneration = 0;
 let backdropStill = 0;
 // Set from Python's answer when there is nothing worth capturing (window
 // hidden, or completely covered); it replaces the pacing below for as
@@ -502,7 +501,9 @@ let glassCtx = null;
 // knows nothing about, over a surface that is otherwise left clear so the
 // glass can show through it.
 function systemGlass() {
-  return CONFIG.glass_mode === 'system' && CONFIG.system_glass_ok === true
+  return CONFIG.glass_style !== 'liquid'
+    && CONFIG.glass_mode === 'system' && CONFIG.system_glass_ok === true
+    && CONFIG.system_glass_active?.[WINDOW_KIND] === true
     && (WINDOW_KIND === 'main' || WINDOW_KIND === 'popover'
         || WINDOW_KIND === 'flyout');
 }
@@ -602,7 +603,262 @@ function viewportBox() {
 const BLUR_EVERY_MS = 60;
 let lastBlurAt = 0;
 
-function paintBackdrop(sharp, blurred, w, h, corner) {
+// Port of KMPLiquidGlass's Skia Lens.kt sampling model: signed distance to
+// a rounded rectangle, its outward normal, and the quarter-circle falloff.
+// The untouched interior is already drawn from the same sharp capture.
+let lensSourceCanvas = null;
+let lensOutputCanvas = null;
+let liquidGpu = null;
+let liquidGpuUnavailable = false;
+
+function initLiquidGpu() {
+  if (liquidGpu || liquidGpuUnavailable) return liquidGpu;
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl2', {
+    alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true,
+  });
+  if (!gl) { liquidGpuUnavailable = true; return null; }
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return null;
+    return shader;
+  };
+  const vertex = compile(gl.VERTEX_SHADER, `#version 300 es
+    void main() {
+      vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+      gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+    }`);
+  const fragment = compile(gl.FRAGMENT_SHADER, `#version 300 es
+    precision highp float;
+    uniform sampler2D backdrop;
+    uniform vec2 canvasSize;
+    uniform vec4 cardRect;
+    uniform float cornerRadius;
+    uniform float refractionHeight;
+    uniform float refractionAmount;
+    uniform float lensSoftness;
+    uniform float lensOpacity;
+    out vec4 color;
+    void main() {
+      vec2 coord = vec2(gl_FragCoord.x, canvasSize.y - gl_FragCoord.y);
+      vec2 center = cardRect.xy + cardRect.zw * 0.5;
+      vec2 halfSize = cardRect.zw * 0.5;
+      vec2 p = coord - center;
+      float radius = min(cornerRadius, min(halfSize.x, halfSize.y));
+      vec2 q = abs(p) - (halfSize - vec2(radius));
+      float sd = length(max(q, 0.0)) - radius + min(max(q.x, q.y), 0.0);
+      if (sd > 0.0) { color = vec4(0.0); return; }
+      if (-sd >= refractionHeight) {
+        color = vec4(0.0);
+        return;
+      }
+      // Lens.kt: quarter-circle falloff from signed distance, followed by
+      // the negative rounded-rectangle normal and an inward texture sample.
+      float t = 1.0 + sd / refractionHeight;
+      float strength = 1.0 - sqrt(max(0.0, 1.0 - t * t));
+      float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
+      vec2 gq = abs(p) - (halfSize - vec2(gradRadius));
+      vec2 outer = max(gq, 0.0);
+      vec2 normal = dot(outer, outer) > 0.0
+        ? sign(p) * normalize(outer)
+        : sign(p) * (gq.x > gq.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+      vec2 sampled = clamp(coord - normal * strength * refractionAmount,
+        vec2(0.5), canvasSize - vec2(0.5));
+      vec2 uv = vec2(sampled.x / canvasSize.x, 1.0 - sampled.y / canvasSize.y);
+      vec2 blurStep = vec2(lensSoftness / canvasSize.x,
+        lensSoftness / canvasSize.y);
+      // Centre-weighted 3x3 Gaussian. Four diagonal taps alone create a
+      // repeating diamond pattern on fine desktop textures behind tiles.
+      color = texture(backdrop, uv) * 0.25
+        + (texture(backdrop, uv + vec2(-blurStep.x, 0.0))
+          + texture(backdrop, uv + vec2(blurStep.x, 0.0))
+          + texture(backdrop, uv + vec2(0.0, -blurStep.y))
+          + texture(backdrop, uv + vec2(0.0, blurStep.y))) * 0.125
+        + (texture(backdrop, uv + vec2(-blurStep.x, -blurStep.y))
+          + texture(backdrop, uv + vec2(blurStep.x, -blurStep.y))
+          + texture(backdrop, uv + vec2(-blurStep.x, blurStep.y))
+          + texture(backdrop, uv + vec2(blurStep.x, blurStep.y))) * 0.0625;
+      // A narrow refracted rim: RGB samples separate only at the outer
+      // edge. The inner region retains the ordinary lens sample.
+      float rim = 1.0 - smoothstep(0.5, 4.0, -sd);
+      vec2 split = normal * (2.5 * rim);
+      vec2 redCoord = clamp(sampled - split, vec2(0.5), canvasSize - vec2(0.5));
+      vec2 blueCoord = clamp(sampled + split, vec2(0.5), canvasSize - vec2(0.5));
+      float red = texture(backdrop, vec2(redCoord.x / canvasSize.x,
+        1.0 - redCoord.y / canvasSize.y)).r;
+      float blue = texture(backdrop, vec2(blueCoord.x / canvasSize.x,
+        1.0 - blueCoord.y / canvasSize.y)).b;
+      color.r = mix(color.r, red, rim);
+      color.b = mix(color.b, blue, rim);
+      float line = 1.0 - smoothstep(0.0, 1.8, abs(-sd - 1.4));
+      color.rgb = mix(color.rgb, vec3(1.0), line * 0.16);
+      color.a = lensOpacity * (1.0 - smoothstep(max(0.0, refractionHeight - 8.0),
+        refractionHeight, -sd));
+    }`);
+  if (!vertex || !fragment) { liquidGpuUnavailable = true; return null; }
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    liquidGpuUnavailable = true;
+    return null;
+  }
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const upload = document.createElement('canvas');
+  liquidGpu = { canvas, gl, program, texture, upload };
+  canvas.addEventListener('webglcontextlost', () => {
+    liquidGpu = null;
+    liquidGpuUnavailable = true;
+  });
+  return liquidGpu;
+}
+
+function paintLiquidLensGpu(ctx, image, width, height, card) {
+  const gpu = initLiquidGpu();
+  if (!gpu) return false;
+  const { canvas, gl, program, texture, upload } = gpu;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  gl.viewport(0, 0, width, height);
+  if (upload.width !== width || upload.height !== height) {
+    upload.width = width;
+    upload.height = height;
+    gpu.lastImage = null;
+  }
+  gl.useProgram(program);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  if (gpu.lastImage !== image) {
+    upload.getContext('2d').drawImage(image, 0, 0, width, height);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upload);
+    gpu.lastImage = image;
+  }
+  gl.uniform1i(gl.getUniformLocation(program, 'backdrop'), 0);
+  gl.uniform2f(gl.getUniformLocation(program, 'canvasSize'), width, height);
+  gl.uniform4f(gl.getUniformLocation(program, 'cardRect'), card.x, card.y, card.w, card.h);
+  gl.uniform1f(gl.getUniformLocation(program, 'cornerRadius'), card.radius);
+  const refractionHeight = Math.min(46, card.radius * 1.05);
+  gl.uniform1f(gl.getUniformLocation(program, 'refractionHeight'), refractionHeight);
+  gl.uniform1f(gl.getUniformLocation(program, 'refractionAmount'),
+    Math.min(58, refractionHeight * 1.45));
+  gl.uniform1f(gl.getUniformLocation(program, 'lensSoftness'), 1.2);
+  gl.uniform1f(gl.getUniformLocation(program, 'lensOpacity'), 0.78);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const x = Math.max(0, Math.floor(card.x));
+  const y = Math.max(0, Math.floor(card.y));
+  const right = Math.min(width, Math.ceil(card.x + card.w));
+  const bottom = Math.min(height, Math.ceil(card.y + card.h));
+  if (right > x && bottom > y)
+    ctx.drawImage(canvas, x, y, right - x, bottom - y,
+      x, y, right - x, bottom - y);
+  return true;
+}
+
+function paintLiquidLens(ctx, image, width, height, card) {
+  if (paintLiquidLensGpu(ctx, image, width, height, card)) return;
+  const heightPx = Math.min(46, card.radius * 1.05);
+  const amountPx = Math.min(58, heightPx * 1.45);
+  if (heightPx < 1) return;
+  if (!lensSourceCanvas) lensSourceCanvas = document.createElement('canvas');
+  if (!lensOutputCanvas) lensOutputCanvas = document.createElement('canvas');
+  for (const canvas of [lensSourceCanvas, lensOutputCanvas]) {
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+  }
+  const sourceCtx = lensSourceCanvas.getContext('2d', { willReadFrequently: true });
+  const outputCtx = lensOutputCanvas.getContext('2d');
+  sourceCtx.filter = 'blur(1.2px)';
+  sourceCtx.drawImage(image, 0, 0, width, height);
+  sourceCtx.filter = 'none';
+  const source = sourceCtx.getImageData(0, 0, width, height).data;
+  const result = outputCtx.createImageData(width, height);
+  const dest = result.data;
+  const cx = card.x + card.w / 2, cy = card.y + card.h / 2;
+  const halfW = card.w / 2, halfH = card.h / 2;
+  const radius = Math.min(card.radius, halfW, halfH);
+  const x0 = Math.max(0, Math.floor(card.x));
+  const y0 = Math.max(0, Math.floor(card.y));
+  const x1 = Math.min(width, Math.ceil(card.x + card.w));
+  const y1 = Math.min(height, Math.ceil(card.y + card.h));
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const px = x + .5 - cx, py = y + .5 - cy;
+      const qx = Math.abs(px) - (halfW - radius);
+      const qy = Math.abs(py) - (halfH - radius);
+      const ox = Math.max(qx, 0), oy = Math.max(qy, 0);
+      const sd = Math.hypot(ox, oy) - radius + Math.min(Math.max(qx, qy), 0);
+      const inside = -sd;
+      if (inside <= 0 || inside >= heightPx) continue;
+      const t = 1 - inside / heightPx;
+      const intensity = 1 - Math.sqrt(Math.max(0, 1 - t * t));
+      const gradRadius = Math.min(radius * 1.5, halfW, halfH);
+      const gx = Math.abs(px) - (halfW - gradRadius);
+      const gy = Math.abs(py) - (halfH - gradRadius);
+      const gox = Math.max(gx, 0), goy = Math.max(gy, 0);
+      let nx, ny;
+      if (gox || goy) {
+        const length = Math.hypot(gox, goy);
+        nx = Math.sign(px) * gox / length;
+        ny = Math.sign(py) * goy / length;
+      } else if (gx > gy) {
+        nx = Math.sign(px); ny = 0;
+      } else {
+        nx = 0; ny = Math.sign(py);
+      }
+      // Lens.kt negates the SDF normal: sample farther inside the pane.
+      const sx = Math.max(0, Math.min(width - 1, x - nx * intensity * amountPx));
+      const sy = Math.max(0, Math.min(height - 1, y - ny * intensity * amountPx));
+      const ix = Math.floor(sx), iy = Math.floor(sy);
+      const fx = sx - ix, fy = sy - iy;
+      const to = (y * width + x) * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        const a = source[(iy * width + ix) * 4 + channel];
+        const b = source[(iy * width + Math.min(ix + 1, width - 1)) * 4 + channel];
+        const c = source[(Math.min(iy + 1, height - 1) * width + ix) * 4 + channel];
+        const d = source[(Math.min(iy + 1, height - 1) * width + Math.min(ix + 1, width - 1)) * 4 + channel];
+        dest[to + channel] = (a * (1 - fx) + b * fx) * (1 - fy)
+          + (c * (1 - fx) + d * fx) * fy;
+      }
+      const rim = Math.max(0, Math.min(1, (4 - inside) / 3.5));
+      const rx = Math.max(0, Math.min(width - 1, Math.round(sx - nx * 2.5 * rim)));
+      const ry = Math.max(0, Math.min(height - 1, Math.round(sy - ny * 2.5 * rim)));
+      const bx = Math.max(0, Math.min(width - 1, Math.round(sx + nx * 2.5 * rim)));
+      const by = Math.max(0, Math.min(height - 1, Math.round(sy + ny * 2.5 * rim)));
+      dest[to] = dest[to] * (1 - rim) + source[(ry * width + rx) * 4] * rim;
+      dest[to + 2] = dest[to + 2] * (1 - rim)
+        + source[(by * width + bx) * 4 + 2] * rim;
+      const line = Math.max(0, 1 - Math.abs(inside - 1.4) / 1.8) * 0.16;
+      for (let channel = 0; channel < 3; channel++)
+        dest[to + channel] = dest[to + channel] * (1 - line) + 255 * line;
+      const fadeStart = Math.max(0, heightPx - 8);
+      const fade = Math.max(0, Math.min(1, (heightPx - inside) / (heightPx - fadeStart)));
+      dest[to + 3] = Math.round(255 * 0.78 * fade * fade * (3 - 2 * fade));
+    }
+  }
+  outputCtx.putImageData(result, 0, 0);
+  ctx.drawImage(lensOutputCanvas, x0, y0, x1 - x0, y1 - y0,
+    x0, y0, x1 - x0, y1 - y0);
+}
+
+function clipRoundedGlass(ctx, shape) {
+  ctx.beginPath();
+  ctx.roundRect(shape.x, shape.y, shape.w, shape.h, shape.radius);
+  ctx.clip();
+}
+
+function paintBackdrop(sharp, blurred, lens, w, h, corner) {
   const sys = systemGlass();
   const ctx = backdropContext(sys);
   const cv = document.getElementById('backdrop');
@@ -655,7 +911,7 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
   // wanted the corners. What is already on the glass canvas is a few tens
   // of milliseconds old and stays exactly where it is - clearing it would
   // make the card flicker between frosted and bare.
-  if (!blurred) return;
+  if (!blurred && !lens) return;
   // The card's frosted fill, on its own layer above that: it belongs to
   // the card and has to be able to come and go with it. Clipped to the
   // card's own rounded rectangle here rather than set as its CSS
@@ -671,10 +927,10 @@ function paintBackdrop(sharp, blurred, w, h, corner) {
   const card = cardGeometry();
   if (!card) return;
   gctx.save();
-  gctx.beginPath();
-  gctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
-  gctx.clip();
-  gctx.drawImage(blurred, 0, 0, w, h);
+  clipRoundedGlass(gctx, card);
+  gctx.drawImage(blurred || lens, 0, 0, w, h);
+  if (CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW && lens)
+    paintLiquidLens(gctx, lens, w, h, card);
   gctx.restore();
 }
 
@@ -688,6 +944,7 @@ function decodeShot(url) {
 function refreshBackdrop() {
   if (backdropPending || !(window.pywebview && window.pywebview.api)) return Promise.resolve();
   backdropPending = true;
+  const generation = backdropGeneration;
   const startedAt = performance.now();
   // Ask for exactly the number of device pixels this will be drawn at, so
   // the image lands 1:1 and is never resampled (see get_desktop_backdrop).
@@ -724,6 +981,16 @@ function refreshBackdrop() {
                           backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null,
                           true, false)
     .then((shot) => {
+      if (generation !== backdropGeneration) { backdropPending = false; return; }
+      if (shot && typeof shot.system_glass === 'boolean') {
+        const previous = systemGlass();
+        CONFIG.system_glass_active = Object.assign({}, CONFIG.system_glass_active,
+          { [WINDOW_KIND]: shot.system_glass });
+        if (previous !== systemGlass()) {
+          applySystemGlass();
+          backdropHash = null;
+        }
+      }
       // shot.ms is the capture's own cost; the rest of the round trip is
       // the bridge waiting, and pacing off that throttled this to a
       // quarter of the rate the CPU budget actually allows.
@@ -740,8 +1007,7 @@ function refreshBackdrop() {
       if (!shot) { backdropPending = false; return; }
       if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
       backdropStill = 0;
-      backdropHash = shot.hash;
-      if (!shot.url && !shot.blur_url) { backdropPending = false; return; }
+      if (!shot.url && !shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
       // A capture is of a window of a particular size, and by the time it
       // has been encoded, carried over the bridge and decoded, the window
       // may not be that size any more - the page resizes it to fit its own
@@ -759,22 +1025,41 @@ function refreshBackdrop() {
         refreshBackdropSoon(0);
         return;
       }
-      return Promise.all([
+      return Promise.allSettled([
         shot.url ? decodeShot(shot.url) : null,
         shot.blur_url ? decodeShot(shot.blur_url) : null,
-      ]).then(([sharp, blurred]) => {
-        paintBackdrop(sharp, blurred, shot.w, shot.h, shot.corner || 0);
-        if (sharp) sharp.close();
-        if (blurred) blurred.close();
-        backdropPending = false;
-      }, () => { backdropPending = false; });
+        shot.lens_url ? decodeShot(shot.lens_url) : null,
+      ]).then((results) => {
+        const [sharp, blurred, lens] = results.map(result =>
+          result.status === 'fulfilled' ? result.value : null);
+        try {
+          const failure = results.find(result => result.status === 'rejected');
+          if (failure) throw failure.reason;
+          const current = viewportBox();
+          const ratio = window.devicePixelRatio || 1;
+          if (generation !== backdropGeneration ||
+              Math.abs(shot.w - Math.round(current.width * ratio)) > 3 ||
+              Math.abs(shot.h - Math.round(current.height * ratio)) > 3) {
+            backdropHash = null;
+            return;
+          }
+          paintBackdrop(sharp, blurred, lens, shot.w, shot.h, shot.corner || 0);
+          backdropHash = shot.hash;
+        } finally {
+          if (sharp) sharp.close();
+          if (blurred) blurred.close();
+          if (lens) lens.close();
+          backdropPending = false;
+        }
+      });
     })
-    .catch(() => { backdropPending = false; });
+    .catch(() => { backdropHash = null; backdropPending = false; });
 }
 
 // Anything that changes *which* pixels are behind the window invalidates
 // the comparison as well as the image.
 function invalidateBackdrop() {
+  backdropGeneration += 1;
   backdropHash = null;
   backdropStill = 0;
 }
@@ -827,7 +1112,8 @@ function restartBackdropTicker() {
 // that costs 12ms of it, sixty times a second, is 12ms the panel's
 // animation does not get.
 function backdropTicksOnVsync() {
-  return false;
+  return CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW &&
+    !document.hidden && !flyoutAnimating;
 }
 
 function startBackdropTicker() {
@@ -1330,7 +1616,7 @@ function renderGrid() {
   document.documentElement.style.setProperty('--cols', cols);
   if (!tiles.length) {
     grid.hidden = true;
-    emptyHint.hidden = false;
+    emptyHint.hidden = IS_FLYOUT_WINDOW;
   } else {
     grid.hidden = false;
     emptyHint.hidden = true;
@@ -1879,9 +2165,11 @@ window.__enterSettings = function () {
 };
 
 function openSettingsView() {
+  SettingsSelect.close();
   document.getElementById('ha-url').value = CONFIG.ha_url || '';
   document.getElementById('ha-token').value = CONFIG.ha_token || '';
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
+  document.getElementById('glass-style-select').value = CONFIG.glass_style || 'classic';
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
   setSampleFpsSlider(CONFIG.sample_fps || 16);
@@ -1905,6 +2193,7 @@ function openSettingsView() {
   renderTileList();
   updateConnDot();
   showView('view-settings');
+  SettingsSelect.sync();
 }
 
 function setDimAfterSlider(sec) {
@@ -1916,8 +2205,11 @@ function setDimAfterSlider(sec) {
 
 function setSampleFpsSlider(fps) {
   const v = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX, Number(fps) || 16));
-  document.getElementById('sample-fps-range').value = String(v);
-  document.getElementById('sample-fps-value').textContent = v + ' fps';
+  const range = document.getElementById('sample-fps-range');
+  range.value = String(v);
+  range.disabled = CONFIG.glass_style === 'liquid';
+  document.getElementById('sample-fps-value').textContent =
+    range.disabled ? '跟隨螢幕' : v + ' fps';
 }
 
 function setZoomSlider(pct) {
@@ -2124,6 +2416,7 @@ function showToast(msg) {
  * Static wiring
  * ============================================================ */
 function init() {
+  if (IS_SETTINGS_WINDOW) SettingsSelect.install();
   document.getElementById('empty-add-btn').addEventListener('click', openSettings);
   document.getElementById('add-tile-btn').addEventListener('click', openPicker);
   document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
@@ -2146,8 +2439,14 @@ function init() {
   document.getElementById('close-settings-btn').addEventListener('click', closeSettingsAndSave);
   document.getElementById('quit-btn').addEventListener('click', () => { window.pywebview.api.quit_app(); });
   document.getElementById('theme-select').addEventListener('change', async (e) => {
-    applyTheme();
     await savePref({ theme: e.target.value });
+    applyTheme();
+  });
+  document.getElementById('glass-style-select').addEventListener('change', async (e) => {
+    await savePref({ glass_style: e.target.value });
+    applyTheme();
+    invalidateBackdrop();
+    refreshBackdropSoon(0);
   });
   document.getElementById('columns-select').addEventListener('change', async (e) => {
     await savePref({ columns: Number(e.target.value) });
@@ -2288,8 +2587,9 @@ window.__applyPrefs = function (cfg) {
   // acting: re-rendering the grid or the tile list underneath someone who
   // is mid-edit is worse than doing nothing.
   const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
-  const themeChanged = cfg.theme !== CONFIG.theme;
-  const glassChanged = cfg.glass_mode !== CONFIG.glass_mode;
+  const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
+  const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
+    JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
   const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
   const layoutChanged = cfg.zoom !== CONFIG.zoom || cfg.columns !== CONFIG.columns ||
     cfg.fixed_size !== CONFIG.fixed_size || cfg.fixed_width !== CONFIG.fixed_width ||
@@ -2311,7 +2611,10 @@ window.__applyPrefs = function (cfg) {
     return;
   }
   CONFIG = Object.assign({}, CONFIG, cfg);
-  if (themeChanged) applyTheme();
+  if (themeChanged) {
+    applyTheme();
+    invalidateBackdrop();
+  }
   if (layoutChanged) { applyZoom(); applyFixedSizeConstraint(); }
   if (tilesChanged && !IS_POPOVER_WINDOW) renderGrid();
   if (tilesChanged && !document.getElementById('view-settings').hidden) renderTileList();

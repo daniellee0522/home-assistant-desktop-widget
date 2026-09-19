@@ -159,7 +159,8 @@ class HAClient:
         backoff = 2
         while not self._stop.is_set():
             if not self.url or not self.token:
-                time.sleep(1)
+                self._set_status(False, "not configured")
+                self._stop.wait(1)
                 continue
             try:
                 ws = websocket.create_connection(self._ws_url(), timeout=10)
@@ -184,6 +185,7 @@ class HAClient:
                     while not self._stop.is_set():
                         raw = ws.recv()
                         if raw is None or raw == "":
+                            self._set_status(False, "disconnected")
                             break
                         msg = json.loads(raw)
                         if msg.get("type") != "event":
@@ -205,8 +207,10 @@ class HAClient:
                         # no-op.
                         if entity_id not in self._entity_set:
                             continue
-                        if new_state and self.on_event:
-                            self.on_event(entity_id, new_state)
+                        if self.on_event:
+                            self.on_event(entity_id, new_state or {
+                                "entity_id": entity_id, "state": "unavailable", "attributes": {},
+                            })
                 finally:
                     try:
                         ws.close()

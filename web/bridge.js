@@ -8,18 +8,22 @@
 // and no channel library, and is the same transport in both directions.
 (function () {
   function call(name, args) {
+    const controller = new AbortController();
+    const timeout = name === 'get_desktop_backdrop'
+      ? setTimeout(() => controller.abort(), 12000) : null;
     return fetch('/api/' + name, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
       cache: 'no-store',
+      signal: controller.signal,
     }).then(function (r) {
       if (!r.ok) throw new Error(name + ': HTTP ' + r.status);
       return r.json();
     }).then(function (r) {
       if (r && r.error) throw new Error(name + ': ' + r.error);
       return r ? r.value : null;
-    });
+    }).finally(() => { if (timeout !== null) clearTimeout(timeout); });
   }
 
   // A proxy rather than a fixed list, so adding a method to the Python

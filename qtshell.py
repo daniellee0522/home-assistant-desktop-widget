@@ -35,6 +35,7 @@ import os
 import threading
 import time
 import traceback
+from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
@@ -298,8 +299,12 @@ class _WebWindow(QMainWindow):
         s.setAttribute(QWebEngineSettings.ShowScrollBars, False)
         s.setAttribute(QWebEngineSettings.FocusOnNavigationEnabled, False)
         self.setCentralWidget(self.view)
+        self.view.loadStarted.connect(self._on_load_started)
         self.view.loadFinished.connect(self._on_load)
+        page.renderProcessTerminated.connect(self._on_renderer_terminated)
         self._shown_once = False
+        self._renderer_failures = 0
+        self._renderer_reload_pending = False
         # The HWND, read once here on the GUI thread and kept.
         #
         # Everything around this program addresses windows by handle from
@@ -329,7 +334,36 @@ class _WebWindow(QMainWindow):
             self._hwnd = 0
         return self._hwnd
 
+    def _on_load_started(self):
+        self._window._page_loaded = False
+
+    def _on_renderer_terminated(self, status, exit_code):
+        self._window._page_loaded = False
+        log("Renderer terminated: %s status=%s exit=%s" % (
+            self._window.title, getattr(status, 'name', str(status)), exit_code))
+        if self._renderer_reload_pending:
+            return
+        self._renderer_reload_pending = True
+        self._renderer_failures += 1
+        delay = min(1000 * (2 ** min(self._renderer_failures - 1, 4)), 16000)
+        QTimer.singleShot(delay, self._reload_renderer)
+
+    def _reload_renderer(self):
+        self._renderer_reload_pending = False
+        if self._window.url:
+            log("Reloading renderer: " + self._window.title)
+            self.view.load(QUrl(self._window.url))
+
     def _on_load(self, ok):
+        self._window._page_loaded = bool(ok)
+        if not ok:
+            log("Page load failed: " + self._window.title)
+            return
+        self._renderer_failures = 0
+        # Each page loads independently. Another window's ui_ready signal
+        # does not mean this page has installed its JavaScript handlers.
+        while self._window._pending_scripts:
+            self.view.page().runJavaScript(self._window._pending_scripts.popleft())
         self._window.events.loaded.fire()
 
     def showEvent(self, e):
@@ -385,6 +419,8 @@ class Window:
         self.transparent = transparent
         self.background_color = background_color
         self.events = _Events()
+        self._page_loaded = False
+        self._pending_scripts = deque(maxlen=512)
         self._native = _WebWindow(self)
         self._native.setWindowTitle(title)
         self._native.resize(int(width), int(height))
@@ -422,7 +458,12 @@ class Window:
         _invoke(self._native, self._native.close)
 
     def evaluate_js(self, script):
-        _invoke(self._native, lambda: self._native.view.page().runJavaScript(script))
+        def run():
+            if self._page_loaded:
+                self._native.view.page().runJavaScript(script)
+            else:
+                self._pending_scripts.append(script)
+        _invoke(self._native, run)
         return None
 
     def evaluate_js_result(self, script, timeout=4.0):
@@ -556,6 +597,9 @@ def prepare(web_dir, api, log_dir=None):
             pass
     _app = QApplication.instance() or QApplication([])
     _app.setQuitOnLastWindowClosed(False)
+    log("Started pid=%s" % os.getpid())
+    _app.screenAdded.connect(lambda screen: log("Display added: " + screen.name()))
+    _app.screenRemoved.connect(lambda screen: log("Display removed: " + screen.name()))
     # Created here, on the GUI thread, which is what gives it the thread
     # affinity that makes the queued connection land in the right place.
     _marshal = _Marshal()

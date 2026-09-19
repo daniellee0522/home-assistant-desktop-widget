@@ -280,6 +280,132 @@ html.is-system-glass #backdrop-glass {
   display: none;
 }
 
+/* Clear captured backdrop, refracted bevel, translucent tint, and directional
+   highlight follow the layered glass recipe used by KMPLiquidGlass. */
+html[data-glass-style="liquid"] {
+  --radius-tile: 28px;
+  --radius-panel: 48px;
+  --panel: rgba(226, 239, 248, 0.18);
+  --tile-off: rgba(39, 55, 73, 0.3);
+  --tile-off-hover: rgba(48, 66, 86, 0.4);
+  --tile-on: rgba(245, 251, 255, 0.44);
+  --glass-edge: rgba(255, 255, 255, 0.42);
+  --glass-edge-top: rgba(255, 255, 255, 0.72);
+  --text-on-1: #16222e;
+  --text-on-2: #405566;
+}
+html[data-glass-style="liquid"] .card-bg {
+  background-image: none;
+  background-color: var(--panel);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+html[data-glass-style="liquid"] .card-bg::before {
+  content: none;
+}
+html[data-glass-style="liquid"] .card-bg::after {
+  content: none;
+}
+/* Light travels along the rounded rim, fading toward the middle of each
+   side. The mask keeps the light on the edge instead of tinting the pane. */
+html[data-glass-style="liquid"] #view-grid .card-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 2px;
+  border-radius: inherit;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.82) 0%,
+    rgba(235, 249, 255, 0.4) 10%,
+    transparent 28%,
+    transparent 72%,
+    rgba(166, 222, 255, 0.28) 90%,
+    rgba(222, 247, 255, 0.62) 100%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+html[data-glass-style="liquid"] #view-grid .card-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(245, 252, 255, 0.065) 12%,
+    transparent 28%,
+    transparent 72%,
+    rgba(188, 231, 255, 0.05) 88%,
+    rgba(166, 222, 255, 0.11) 100%);
+  pointer-events: none;
+}
+html[data-glass-style="liquid"] .tile {
+  background-image: none;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+html[data-glass-style="liquid"] .tile:not(.is-on) {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.48),
+    inset 0 0 0 1px rgba(255,255,255,.2);
+}
+html[data-glass-style="liquid"] .tile.is-on {
+  background: var(--tile-on);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.7),
+    inset 0 0 0 1px rgba(255,255,255,.35);
+}
+html[data-glass-style="windows"] {
+  --radius-tile: 12px;
+  --panel: rgba(231, 237, 244, 0.72);
+  --tile-off: rgba(58, 68, 81, 0.66);
+  --tile-off-hover: rgba(70, 82, 98, 0.74);
+  --glass-edge: rgba(255,255,255,.42);
+  --glass-edge-top: rgba(255,255,255,.62);
+}
+html[data-glass-style="windows"] .card-bg {
+  box-shadow: inset 0 0 0 1px var(--glass-edge), 0 8px 24px rgba(0,0,0,.18);
+}
+html[data-glass-style="windows"] .tile {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.2);
+}
+html[data-theme="dark"][data-glass-style="windows"] {
+  --panel: rgba(33, 38, 46, 0.76);
+}
+html[data-theme="dark"][data-glass-style="liquid"] {
+  --panel: rgba(26, 29, 34, 0.7);
+  --tile-off: rgba(18, 26, 37, 0.54);
+  --tile-off-hover: rgba(25, 35, 49, 0.64);
+  --tile-on: rgba(232, 242, 250, 0.68);
+  --text-on-1: #f7fcff;
+  --text-on-2: #d7eaf1;
+}
+html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::before {
+  opacity: 0.72;
+}
+html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
+  opacity: 0.75;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"][data-glass-style="windows"] { --panel: rgba(33, 38, 46, 0.76); }
+  html[data-theme="auto"][data-glass-style="liquid"] {
+    --panel: rgba(26, 29, 34, 0.7);
+    --tile-off: rgba(18, 26, 37, 0.54);
+    --tile-off-hover: rgba(25, 35, 49, 0.64);
+    --tile-on: rgba(232, 242, 250, 0.68);
+    --text-on-1: #f7fcff;
+    --text-on-2: #d7eaf1;
+  }
+  html[data-theme="auto"][data-glass-style="liquid"] #view-grid .card-bg::before {
+    opacity: 0.72;
+  }
+  html[data-theme="auto"][data-glass-style="liquid"] #view-grid .card-bg::after {
+    opacity: 0.75;
+  }
+}
+
 /* ================= Grid view ================= */
 
 #view-grid {
@@ -931,7 +1057,7 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 12px;
   color: var(--text-on-2);
 }
-.field input, .search-input, select {
+.field input, .search-input, select, .settings-select {
   pointer-events: auto;
   border: 1px solid var(--input-border);
   background: var(--input-bg);
@@ -943,6 +1069,37 @@ input[type="range"]::-webkit-slider-thumb {
   font-family: inherit;
 }
 .field input:focus, .search-input:focus, select:focus { border-color: var(--accent-blue); }
+
+.settings-select { text-align: left; cursor: pointer; }
+.settings-select:focus-visible { outline: 2px solid var(--accent-blue); }
+.settings-select-menu {
+  position: fixed;
+  z-index: 100;
+  padding: 4px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  overflow-y: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: var(--panel-solid);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
+}
+.settings-select-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-on-1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-select-menu button[aria-selected="true"] { background: var(--btn-fill); }
+.settings-select-menu button:hover,
+.settings-select-menu button:focus { background: var(--btn-fill-strong); outline: none; }
 
 .row { display: flex; align-items: center; flex-wrap: wrap; }
 .row.gap { gap: 10px; }
@@ -1129,6 +1286,21 @@ input[type="range"]::-webkit-slider-thumb {
   position: relative;
   left: auto;
   top: auto;
+  transform: none;
+  transition: opacity 0.15s ease;
+}
+/* Detail is a quiet frosted pane; the liquid lens belongs to the widget. */
+html.is-popover-window[data-glass-style="liquid"] .detail-popover .card-bg {
+  background-color: rgba(226, 239, 248, 0.38);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-popover .card-bg {
+  background-color: rgba(26, 29, 34, 0.72);
+}
+@media (prefers-color-scheme: dark) {
+  html.is-popover-window[data-theme="auto"][data-glass-style="liquid"] .detail-popover .card-bg {
+    background-color: rgba(26, 29, 34, 0.72);
+  }
 }
 .popover-header {
   /* Far enough in to clear the card's corner arc, and to not read as
@@ -1311,6 +1483,24 @@ html.is-dimmed:not(.is-flyout-window) {
   --text-off-2: rgba(255, 255, 255, 0.64);
   --glass-edge: rgba(255, 255, 255, 0.14);
   --glass-edge-on: rgba(255, 255, 255, 0.22);
+}
+html.is-dimmed:not(.is-flyout-window)[data-theme="dark"][data-glass-style="liquid"] {
+  --panel: rgba(26, 29, 34, 0.52);
+  --tile-on: rgba(53, 63, 76, 0.52);
+  --tile-on-text-1: rgba(255, 255, 255, 0.9);
+  --tile-on-text-2: rgba(226, 235, 242, 0.72);
+  --tile-off: rgba(18, 26, 37, 0.4);
+  --tile-off-hover: rgba(18, 26, 37, 0.4);
+}
+@media (prefers-color-scheme: dark) {
+  html.is-dimmed:not(.is-flyout-window)[data-theme="auto"][data-glass-style="liquid"] {
+    --panel: rgba(26, 29, 34, 0.52);
+    --tile-on: rgba(53, 63, 76, 0.52);
+    --tile-on-text-1: rgba(255, 255, 255, 0.9);
+    --tile-on-text-2: rgba(226, 235, 242, 0.72);
+    --tile-off: rgba(18, 26, 37, 0.4);
+    --tile-off-hover: rgba(18, 26, 37, 0.4);
+  }
 }
 html:not(.is-flyout-window) .card-bg,
 html:not(.is-flyout-window) .tile,
