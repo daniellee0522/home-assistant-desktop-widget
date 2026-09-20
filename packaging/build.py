@@ -31,7 +31,7 @@ def compiler_path(override):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', default=(ROOT /
-                        'VERSION').read_text().strip())
+                        'VERSION').read_text(encoding='utf-8-sig').strip())
     parser.add_argument('--installer', action='store_true')
     parser.add_argument('--iscc')
     args = parser.parse_args()
@@ -93,7 +93,8 @@ def main():
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'capture_worker.py',
-                                    ROOT / 'web/app.js', ROOT / 'web/bridge.js']},
+                                    ROOT / 'web/app.js', ROOT / 'web/bridge.js',
+                                    ROOT / 'web/i18n.js', ROOT / 'web/mdi-paths.js']},
     }, indent=2), encoding='utf-8')
 
     if compiler:

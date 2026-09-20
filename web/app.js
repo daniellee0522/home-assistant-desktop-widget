@@ -45,7 +45,12 @@ const ICON_PREV = '<path d="M6 6h2v12H6zM20 6L10 12l10 6z"/>';
 const ICON_NEXT = '<path d="M16 6h2v12h-2zM4 6l10 6-10 6z"/>';
 
 function svgIcon(name) {
-  return '<svg viewBox="0 0 24 24">' + (ICON_PATHS[name] || ICON_PATHS.sensor) + '</svg>';
+  const legacyMdi = { climate: 'air-conditioner', cover: 'blinds', curtain: 'curtains',
+    vacuum: 'robot-vacuum', scene: 'palette', automation: 'robot' };
+  const mdiName = typeof name === 'string' && name.startsWith('mdi:') ? name.slice(4) : legacyMdi[name];
+  const mdiPath = mdiName && window.MDI_PATHS && window.MDI_PATHS[mdiName];
+  const fallback = ICON_PATHS[name] || ICON_PATHS.sensor;
+  return '<svg viewBox="0 0 24 24" aria-hidden="true">' + (mdiPath ? '<path d="' + mdiPath + '"/>' : fallback) + '</svg>';
 }
 
 /* ============================================================
@@ -55,15 +60,15 @@ const DOMAIN_META = {
   light: { icon: 'light', expand: true },
   switch: { icon: 'switch', expand: true },
   input_boolean: { icon: 'switch', expand: true },
-  climate: { icon: 'climate', expand: true },
+  climate: { icon: 'mdi:air-conditioner', expand: true },
   fan: { icon: 'fan', expand: true },
-  cover: { icon: 'cover', expand: true },
+  cover: { icon: 'mdi:blinds', expand: true },
   media_player: { icon: 'media', expand: true },
   lock: { icon: 'lock' },
-  vacuum: { icon: 'vacuum', expand: true },
-  scene: { icon: 'scene', momentary: true },
+  vacuum: { icon: 'mdi:robot-vacuum', expand: true },
+  scene: { icon: 'mdi:palette', momentary: true },
   script: { icon: 'script', momentary: true },
-  automation: { icon: 'automation', momentary: true },
+  automation: { icon: 'mdi:robot', momentary: true },
   sensor: { icon: 'sensor', readonly: true },
   binary_sensor: { icon: 'sensor', readonly: true },
   default: { icon: 'sensor', readonly: true },
@@ -75,11 +80,6 @@ const DOMAIN_LABELS = {
   sensor: '感測器', binary_sensor: '感測器 (開關型)',
 };
 const HVAC_LABELS = { off: '關閉', cool: '冷氣', heat: '暖氣', heat_cool: '自動', auto: '自動', dry: '除濕', fan_only: '送風' };
-const LIGHT_PALETTE = [
-  [255, 255, 255], [255, 214, 153], [255, 159, 67], [255, 94, 87],
-  [255, 107, 181], [142, 111, 255], [72, 159, 255], [93, 222, 140],
-];
-
 function domainMeta(domain) { return DOMAIN_META[domain] || DOMAIN_META.default; }
 
 // A tile's icon is normally fixed by its domain (or overridden by hand),
@@ -87,6 +87,9 @@ function domainMeta(domain) { return DOMAIN_META[domain] || DOMAIN_META.default;
 // glyph rather than just a second colour. A hand-picked icon always wins.
 function iconNameFor(tile, state) {
   if (tile.icon) return tile.icon;
+  const haIcon = state && state.attributes && state.attributes.icon;
+  if (typeof haIcon === 'string' && haIcon.startsWith('mdi:') &&
+      window.MDI_PATHS && window.MDI_PATHS[haIcon.slice(4)]) return haIcon;
   if (tile.domain === 'lock' && state && state.state !== 'locked') return 'lock-open';
   // A sensor's generic dot says nothing; Home Assistant already tells us
   // what it measures, so use it rather than making people pick by hand.
@@ -97,32 +100,6 @@ function iconNameFor(tile, state) {
     if (attrs.device_class === 'humidity' || unit === '%') return 'humidity';
   }
   return domainMeta(tile.domain).icon;
-}
-
-// --- climate: the icon *is* the reading -------------------------------------
-// A thermostat's one interesting number is the temperature it is set to,
-// so the icon slot shows it directly instead of a glyph that says
-// "this is an air conditioner" next to the same number written again.
-const HVAC_COLORS = {
-  cool: '#3fa9f5',
-  heat: '#ff7a45',
-  heat_cool: '#34c759',
-  auto: '#34c759',
-  dry: '#f0b429',
-  fan_only: '#8e9aaf',
-};
-
-function climateBadge(state, on) {
-  const attrs = (state && state.attributes) || {};
-  const temp = attrs.temperature != null ? attrs.temperature : attrs.current_temperature;
-  if (temp == null) return null;
-  return {
-    text: String(Math.round(Number(temp) * 10) / 10) + '°',
-    // Off is a plain white chip with dark text - it reads as "not doing
-    // anything". Running, it takes the colour of what it is doing.
-    background: on ? (HVAC_COLORS[state.state] || 'var(--accent-cyan)') : '#ffffff',
-    color: on ? '#ffffff' : '#1d1d1f',
-  };
 }
 
 /* ============================================================
@@ -206,6 +183,7 @@ async function boot() {
   } catch (e) {
     /* keep defaults, still render an empty widget */
   }
+  setInterfaceLanguage(CONFIG.language);
   applyTheme();
   applySystemGlass();
   applyZoom();
@@ -648,7 +626,11 @@ function initLiquidGpu() {
       vec2 p = coord - center;
       float radius = min(cornerRadius, min(halfSize.x, halfSize.y));
       vec2 q = abs(p) - (halfSize - vec2(radius));
-      float sd = length(max(q, 0.0)) - radius + min(max(q.x, q.y), 0.0);
+      vec2 outside = max(q, 0.0);
+      const float exponent = 4.0; // CSS superellipse(2), C3 at straight edges
+      float superNorm = pow(pow(outside.x, exponent) +
+        pow(outside.y, exponent), 1.0 / exponent);
+      float sd = superNorm - radius + min(max(q.x, q.y), 0.0);
       if (sd > 0.0) { color = vec4(0.0); return; }
       if (-sd >= refractionHeight) {
         color = vec4(0.0);
@@ -662,7 +644,7 @@ function initLiquidGpu() {
       vec2 gq = abs(p) - (halfSize - vec2(gradRadius));
       vec2 outer = max(gq, 0.0);
       vec2 normal = dot(outer, outer) > 0.0
-        ? sign(p) * normalize(outer)
+        ? sign(p) * normalize(pow(outer, vec2(exponent - 1.0)))
         : sign(p) * (gq.x > gq.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
       vec2 sampled = clamp(coord - normal * strength * refractionAmount,
         vec2(0.5), canvasSize - vec2(0.5));
@@ -788,6 +770,8 @@ function paintLiquidLens(ctx, image, width, height, card) {
   const cx = card.x + card.w / 2, cy = card.y + card.h / 2;
   const halfW = card.w / 2, halfH = card.h / 2;
   const radius = Math.min(card.radius, halfW, halfH);
+  const exponent = 4;
+  const normalPower = exponent - 1;
   const x0 = Math.max(0, Math.floor(card.x));
   const y0 = Math.max(0, Math.floor(card.y));
   const x1 = Math.min(width, Math.ceil(card.x + card.w));
@@ -798,7 +782,8 @@ function paintLiquidLens(ctx, image, width, height, card) {
       const qx = Math.abs(px) - (halfW - radius);
       const qy = Math.abs(py) - (halfH - radius);
       const ox = Math.max(qx, 0), oy = Math.max(qy, 0);
-      const sd = Math.hypot(ox, oy) - radius + Math.min(Math.max(qx, qy), 0);
+      const sd = Math.pow(ox ** exponent + oy ** exponent, 1 / exponent) - radius +
+        Math.min(Math.max(qx, qy), 0);
       const inside = -sd;
       if (inside <= 0 || inside >= heightPx) continue;
       const t = 1 - inside / heightPx;
@@ -809,9 +794,9 @@ function paintLiquidLens(ctx, image, width, height, card) {
       const gox = Math.max(gx, 0), goy = Math.max(gy, 0);
       let nx, ny;
       if (gox || goy) {
-        const length = Math.hypot(gox, goy);
-        nx = Math.sign(px) * gox / length;
-        ny = Math.sign(py) * goy / length;
+        const length = Math.hypot(gox ** normalPower, goy ** normalPower);
+        nx = Math.sign(px) * gox ** normalPower / length;
+        ny = Math.sign(py) * goy ** normalPower / length;
       } else if (gx > gy) {
         nx = Math.sign(px); ny = 0;
       } else {
@@ -852,9 +837,31 @@ function paintLiquidLens(ctx, image, width, height, card) {
     x0, y0, x1 - x0, y1 - y0);
 }
 
-function clipRoundedGlass(ctx, shape) {
+function traceSuperellipse(ctx, shape) {
+  const { x, y, w, h } = shape;
+  const r = Math.max(0, Math.min(shape.radius, w / 2, h / 2));
+  const curvePower = 0.5;
   ctx.beginPath();
-  ctx.roundRect(shape.x, shape.y, shape.w, shape.h, shape.radius);
+  if (!r) { ctx.rect(x, y, w, h); return; }
+  const corner = (cx, cy, start) => {
+    for (let i = 0; i <= 16; i++) {
+      const angle = start + i * Math.PI / 32;
+      const c = Math.cos(angle), s = Math.sin(angle);
+      const px = cx + r * Math.sign(c) * Math.pow(Math.abs(c), curvePower);
+      const py = cy + r * Math.sign(s) * Math.pow(Math.abs(s), curvePower);
+      ctx.lineTo(px, py);
+    }
+  };
+  ctx.moveTo(x + r, y);
+  corner(x + w - r, y + r, -Math.PI / 2);
+  corner(x + w - r, y + h - r, 0);
+  corner(x + r, y + h - r, Math.PI / 2);
+  corner(x + r, y + r, Math.PI);
+  ctx.closePath();
+}
+
+function clipRoundedGlass(ctx, shape) {
+  traceSuperellipse(ctx, shape);
   ctx.clip();
 }
 
@@ -898,8 +905,7 @@ function paintBackdrop(sharp, blurred, lens, w, h, corner) {
     if (card) {
       ctx.save();
       ctx.globalCompositeOperation = 'destination-out';
-      ctx.beginPath();
-      ctx.roundRect(card.x, card.y, card.w, card.h, card.radius);
+      traceSuperellipse(ctx, card);
       ctx.fill();
       ctx.restore();
     }
@@ -1112,7 +1118,8 @@ function restartBackdropTicker() {
 // that costs 12ms of it, sixty times a second, is 12ms the panel's
 // animation does not get.
 function backdropTicksOnVsync() {
-  return CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW &&
+  return CONFIG.glass_style === 'liquid' &&
+    (!IS_POPOVER_WINDOW || !!currentDetailTileId) &&
     !document.hidden && !flyoutAnimating;
 }
 
@@ -1267,6 +1274,22 @@ function iconColorFor(domain, state, on) {
   }
 }
 
+const HVAC_COLORS = {
+  cool: '#3fa9f5', heat: '#ff7a45', heat_cool: '#34c759',
+  auto: '#34c759', dry: '#f0b429', fan_only: '#8e9aaf',
+};
+
+function climateBadge(state, on) {
+  const attrs = (state && state.attributes) || {};
+  const temp = attrs.temperature != null ? attrs.temperature : attrs.current_temperature;
+  if (temp == null || !Number.isFinite(Number(temp))) return null;
+  return {
+    text: String(Math.round(Number(temp) * 10) / 10) + '°',
+    background: on ? (HVAC_COLORS[state.state] || 'var(--accent-cyan)') : '#ffffff',
+    color: on ? '#ffffff' : '#1d1d1f',
+  };
+}
+
 function valueTextFor(domain, state) {
   if (!state) return '';
   const attrs = state.attributes || {};
@@ -1306,7 +1329,7 @@ function tileEl(tile) {
 
   const iconWrap = document.createElement('div');
   iconWrap.className = 'tile-icon';
-  const badge = (domain === 'climate' && ok && !tile.icon) ? climateBadge(state, on) : null;
+  const badge = domain === 'climate' && ok && !tile.icon ? climateBadge(state, on) : null;
   if (badge) {
     iconWrap.classList.add('is-badge');
     iconWrap.textContent = badge.text;
@@ -1318,9 +1341,7 @@ function tileEl(tile) {
   }
   div.appendChild(iconWrap);
 
-  // The badge above already is the temperature; printing it again as the
-  // tile's headline would just be the same number twice.
-  const valueText = (ok && !badge) ? valueTextFor(domain, state) : '';
+  const valueText = ok && !badge ? valueTextFor(domain, state) : '';
   if (valueText) {
     const v = document.createElement('div');
     v.className = 'tile-value';
@@ -1594,6 +1615,7 @@ window.__popoverEnter = function () {
   popover.classList.remove('show');
   void popover.offsetWidth;
   popover.classList.add('show');
+  restartBackdropTicker();
 };
 
 // Pushed from Python (see Api.open_popover in main.py) once the popover
@@ -1754,7 +1776,12 @@ function openDetail(tile) {
   // whatever backdrop it last captured is of somewhere else entirely -
   // and while it was hidden it will have booked its next look a second
   // out, which is a second of the card sitting on a still picture.
-  restartBackdropTicker();
+  // Python arms one correctly positioned frame before showing the window.
+  // Stop the background ticker so an older in-flight sample cannot race it.
+  clearTimeout(backdropTimer);
+  if (backdropRaf) cancelAnimationFrame(backdropRaf);
+  backdropTimer = null;
+  backdropRaf = null;
   if (window.pywebview && window.pywebview.api) {
     window.pywebview.api.set_popover_activatable(true).catch(() => {});
   }
@@ -1795,10 +1822,18 @@ function renderDetailBody() {
 
 /* ---- per-tile edit sub-panel (icon / name / category) ---- */
 const ICON_CHOICES = [
-  'light', 'switch', 'climate', 'fan', 'cover', 'curtain', 'media', 'monitor',
-  'lock', 'door', 'vacuum', 'scene', 'script', 'automation',
+  'light', 'switch', 'mdi:air-conditioner', 'fan', 'mdi:blinds', 'mdi:curtains', 'media', 'monitor',
+  'lock', 'door', 'mdi:robot-vacuum', 'mdi:palette', 'script', 'mdi:robot',
   'thermometer', 'humidity', 'sensor',
 ];
+const ICON_LABELS = {
+  light: '燈', switch: '插座', fan: '風扇', media: '音樂', monitor: '螢幕',
+  lock: '門鎖', door: '門', script: '腳本', thermometer: '溫度',
+  humidity: '濕度', sensor: '感測器',
+  'mdi:air-conditioner': '冷氣', 'mdi:blinds': '百葉窗',
+  'mdi:curtains': '窗簾', 'mdi:robot-vacuum': '掃地機',
+  'mdi:palette': '場景', 'mdi:robot': '自動化',
+};
 
 function showEditMode(show) {
   document.getElementById('detail-body').hidden = show;
@@ -1811,6 +1846,7 @@ function populateEditForm() {
   if (!tile) return;
   document.getElementById('edit-room-input').value = tile.room || '';
   document.getElementById('edit-label-input').value = tile.label || '';
+  document.getElementById('edit-mdi-input').value = tile.icon && tile.icon.startsWith('mdi:') ? tile.icon : '';
   renderIconPicker(tile);
 }
 
@@ -1821,9 +1857,12 @@ function renderIconPicker(tile) {
   for (const name of ICON_CHOICES) {
     const b = document.createElement('button');
     b.className = 'icon-swatch' + (name === current ? ' active' : '');
+    b.title = ICON_LABELS[name] || name;
+    b.setAttribute('aria-label', b.title);
     b.innerHTML = svgIcon(name);
     b.addEventListener('click', async () => {
       tile.icon = name;
+      document.getElementById('edit-mdi-input').value = name.startsWith('mdi:') ? name : '';
       renderIconPicker(tile);
       await persistTiles();
     });
@@ -1898,16 +1937,21 @@ function segBtnEl(text, onClick, active) {
   const b = document.createElement('button'); b.className = 'seg-btn' + (active ? ' active' : '');
   b.textContent = text; b.addEventListener('click', onClick); return b;
 }
-function sameRgb(a, b) { return Array.isArray(a) && Array.isArray(b) && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]; }
-function colorSwatches(currentRgb, onPick) {
-  const wrap = document.createElement('div'); wrap.className = 'color-swatches';
-  for (const rgb of LIGHT_PALETTE) {
-    const s = document.createElement('button');
-    s.className = 'swatch' + (sameRgb(rgb, currentRgb) ? ' active' : '');
-    s.style.background = 'rgb(' + rgb.join(',') + ')';
-    s.addEventListener('click', () => onPick(rgb));
-    wrap.appendChild(s);
-  }
+function rgbHex(rgb) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return '#ffffff';
+  return '#' + rgb.slice(0, 3).map(v => Math.max(0, Math.min(255, Number(v) || 0))
+    .toString(16).padStart(2, '0')).join('');
+}
+function colorPicker(currentRgb, onPick) {
+  const wrap = document.createElement('label'); wrap.className = 'color-picker-row';
+  const label = document.createElement('span'); label.textContent = '顏色';
+  const input = document.createElement('input'); input.type = 'color';
+  input.value = rgbHex(currentRgb);
+  input.addEventListener('change', () => {
+    const hex = input.value;
+    onPick([1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)));
+  });
+  wrap.appendChild(label); wrap.appendChild(input);
   return wrap;
 }
 function mediaBtn(iconPath, onClick, big) {
@@ -2027,13 +2071,17 @@ const DETAIL_BUILDERS = {
     if ('brightness' in attrs && attrs.brightness != null) {
       body.appendChild(sliderBlock('亮度', pct, 1, 100, '%', (v) => callService('light', 'turn_on', tile.entity, { brightness_pct: Number(v) }), 1));
     }
-    if (attrs.color_temp_kelvin || attrs.min_color_temp_kelvin) {
-      const min = attrs.min_color_temp_kelvin || 2000, max = attrs.max_color_temp_kelvin || 6500;
-      const val = attrs.color_temp_kelvin || Math.round((min + max) / 2);
-      body.appendChild(sliderBlock('色溫', val, min, max, 'K', (v) => callService('light', 'turn_on', tile.entity, { color_temp_kelvin: Number(v) }), 100));
+    const modes = Array.isArray(attrs.supported_color_modes) ? attrs.supported_color_modes : [];
+    if (modes.includes('color_temp')) {
+      const min = Number(attrs.min_color_temp_kelvin), max = Number(attrs.max_color_temp_kelvin);
+      if (Number.isFinite(min) && Number.isFinite(max) && min > 0 && max > min) {
+        const current = Number(attrs.color_temp_kelvin);
+        const val = Number.isFinite(current) && current >= min && current <= max ? current : Math.round((min + max) / 2);
+        body.appendChild(sliderBlock('色溫', val, min, max, 'K', (v) => callService('light', 'turn_on', tile.entity, { color_temp_kelvin: Number(v) }), 1));
+      }
     }
-    if (Array.isArray(attrs.rgb_color)) {
-      body.appendChild(colorSwatches(attrs.rgb_color, (rgb) => callService('light', 'turn_on', tile.entity, { rgb_color: rgb })));
+    if (modes.some(mode => ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(mode))) {
+      body.appendChild(colorPicker(attrs.rgb_color, (rgb) => callService('light', 'turn_on', tile.entity, { rgb_color: rgb })));
     }
   },
   fan(body, tile, state) {
@@ -2169,6 +2217,7 @@ function openSettingsView() {
   document.getElementById('ha-url').value = CONFIG.ha_url || '';
   document.getElementById('ha-token').value = CONFIG.ha_token || '';
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
+  document.getElementById('language-select').value = CONFIG.language || 'zh-TW';
   document.getElementById('glass-style-select').value = CONFIG.glass_style || 'classic';
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
@@ -2304,7 +2353,7 @@ function renderTileList() {
 function renameTileRoom(tile, el) {
   const input = document.createElement('input');
   input.value = tile.room || '';
-  input.style.cssText = 'width:100%;font-size:12.5px;padding:2px 4px;border-radius:6px;border:1px solid var(--input-border);background:var(--input-bg);color:var(--text-on-1);';
+  input.style.cssText = 'width:100%;font-size:12.5px;padding:2px 4px;border-radius:11px;border:1px solid var(--input-border);background:var(--input-bg);color:var(--text-on-1);';
   el.replaceWith(input);
   input.focus(); input.select();
   const commit = async () => {
@@ -2436,11 +2485,28 @@ function init() {
     tile.label = e.target.value.trim();
     await persistTiles();
   });
+  document.getElementById('edit-mdi-input').addEventListener('change', async (e) => {
+    const tile = findTile(currentDetailTileId);
+    if (!tile) return;
+    const value = e.target.value.trim().toLowerCase();
+    if (value && (!/^mdi:[a-z0-9-]+$/.test(value) || !window.MDI_PATHS[value.slice(4)])) {
+      showToast('找不到 MDI 圖示：' + value);
+      e.target.value = tile.icon && tile.icon.startsWith('mdi:') ? tile.icon : '';
+      return;
+    }
+    tile.icon = value;
+    renderIconPicker(tile);
+    await persistTiles();
+  });
   document.getElementById('close-settings-btn').addEventListener('click', closeSettingsAndSave);
   document.getElementById('quit-btn').addEventListener('click', () => { window.pywebview.api.quit_app(); });
   document.getElementById('theme-select').addEventListener('change', async (e) => {
     await savePref({ theme: e.target.value });
     applyTheme();
+  });
+  document.getElementById('language-select').addEventListener('change', async (e) => {
+    await savePref({ language: e.target.value });
+    setInterfaceLanguage(e.target.value);
   });
   document.getElementById('glass-style-select').addEventListener('change', async (e) => {
     await savePref({ glass_style: e.target.value });
@@ -2587,6 +2653,7 @@ window.__applyPrefs = function (cfg) {
   // acting: re-rendering the grid or the tile list underneath someone who
   // is mid-edit is worse than doing nothing.
   const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
+  const languageChanged = cfg.language !== CONFIG.language;
   const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
@@ -2608,9 +2675,11 @@ window.__applyPrefs = function (cfg) {
   }
   if (!tilesChanged && !themeChanged && !layoutChanged) {
     CONFIG = Object.assign({}, CONFIG, cfg);
+    if (languageChanged) setInterfaceLanguage(CONFIG.language);
     return;
   }
   CONFIG = Object.assign({}, CONFIG, cfg);
+  if (languageChanged) setInterfaceLanguage(CONFIG.language);
   if (themeChanged) {
     applyTheme();
     invalidateBackdrop();

@@ -176,9 +176,46 @@ class GlassTests(unittest.TestCase):
         api._apply_capture_exclusion()
         self.assertIn('main', api._excluded_kinds)
         affinity.assert_any_call(windows['main'], True)
+        epoch = api._capture_epoch
         api._overlays_open.add('popover')
         api._apply_capture_exclusion()
-        self.assertNotIn('main', api._excluded_kinds)
+        self.assertIn('main', api._excluded_kinds)
+        self.assertEqual(api._capture_epoch, epoch)
+
+    def test_liquid_popover_composites_excluded_widget(self):
+        scope = definitions('_popover_needs_compat')
+        needs_compat = scope['_popover_needs_compat']
+        self.assertTrue(needs_compat('popover', 'liquid', {'main', 'popover'}, (123,)))
+        self.assertFalse(needs_compat('main', 'liquid', {'main'}, (123,)))
+        self.assertFalse(needs_compat('popover', 'classic', {'main'}, (123,)))
+        self.assertFalse(needs_compat('popover', 'liquid', {'popover'}, (123,)))
+
+    def test_transparent_widget_keeps_popover_backdrop_color(self):
+        from PIL import Image
+        scope = definitions('_composite_rgba_window')
+        background = Image.new('RGBA', (2, 1), (20, 40, 60, 0))
+        widget = Image.new('RGBA', (2, 1), (200, 0, 0, 0))
+        widget.putpixel((1, 0), (200, 0, 0, 128))
+        raw = scope['_composite_rgba_window'](
+            background.tobytes('raw', 'BGRA'), (2, 1), widget, (0, 0))
+        result = Image.frombytes('RGBA', (2, 1), raw, 'raw', 'BGRA')
+        self.assertEqual(result.getpixel((0, 0))[:3], (20, 40, 60))
+        self.assertEqual(result.getpixel((1, 0))[:3], (110, 20, 30))
+
+    def test_popover_reuses_main_screen_pixels_under_widget(self):
+        from PIL import Image
+        scope = definitions('_composite_rgba_window', '_compose_popover_backdrop')
+        screen = Image.new('RGBA', (3, 1), (0, 0, 0, 0))
+        main = Image.new('RGBA', (2, 1), (20, 40, 60, 0))
+        widget = Image.new('RGBA', (2, 1), (200, 0, 0, 0))
+        widget.putpixel((1, 0), (200, 0, 0, 128))
+        raw = scope['_compose_popover_backdrop'](
+            screen.tobytes('raw', 'BGRA'), (0, 0, 3, 1),
+            (1, 0, 2, 1, main.tobytes('raw', 'BGRA')),
+            (widget, (1, 0, 3, 1)))
+        result = Image.frombytes('RGBA', (3, 1), raw, 'raw', 'BGRA')
+        self.assertEqual(result.getpixel((1, 0))[:3], (20, 40, 60))
+        self.assertEqual(result.getpixel((2, 0))[:3], (110, 20, 30))
 
     def test_worker_timeout_restarts_without_blocking_next_capture(self):
         with patch('capture_worker._serve', test_worker):

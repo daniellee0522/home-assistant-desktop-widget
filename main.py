@@ -159,6 +159,10 @@ class Api:
         # on its next composition, not at the instant of the API call.
         self._capture_epoch = 0
         self._capture_transition_until = 0.0
+        # The main window's latest real screen pixels. A popover above an
+        # excluded widget can restore this region without a slow wallpaper
+        # re-render or a black capture-affinity hole.
+        self._main_backdrop_frame = None
         # Which overlay windows are open. While any of them is, the grid
         # window is deliberately left capturable, because it is part of
         # what is behind them and so part of their frosted backdrop.
@@ -266,6 +270,7 @@ class Api:
                 "ha_url": self._cfg.get("ha_url", ""),
                 "ha_token": self._cfg.get("ha_token", ""),
                 "theme": self._cfg.get("theme", "auto"),
+                "language": self._cfg.get("language", "zh-TW"),
                 "glass_style": self._cfg.get("glass_style", "classic"),
                 "columns": self._cfg.get("columns", 4),
                 "lock_position": bool(self._cfg.get("lock_position", False)),
@@ -378,6 +383,7 @@ class Api:
     _PREF_CLEANERS = {
         "theme": lambda v: v if v in ("auto", "light", "dark") else "auto",
         "glass_style": lambda v: v if v in ("classic", "liquid", "windows") else "classic",
+        "language": lambda v: v if v in ("zh-TW", "en") else "zh-TW",
         # The tray panel sits over other windows rather than on the
         # wallpaper, so what looks right there is not what looks right on
         # the desktop; "follow" means don't have an opinion.
@@ -1130,20 +1136,18 @@ class Api:
                 # this does not (a fixed size, a zoom), so it wins.
                 if abs(want_w - w) > 3 or abs(want_h - h) > 3:
                     w, h = want_w, want_h
-            # The popover opens on top of the widget, so the widget is part
-            # of what is behind it. In the fast path the widget is excluded
-            # from screen capture as well, so it has to be drawn back in;
-            # in the slow path only the desktop was rendered to begin with.
+        # The popover opens on top of the widget, so the widget is part
+        # of what is behind it. Liquid mode composites its Qt image with
+        # alpha below; other modes use the usual capture path.
             over = ()
             if window_kind in ("popover", "settings"):
                 below = []
                 for kind in ("main", "flyout"):
                     win = self._window_for(kind)
-                    # Not `h`: that is this capture's height, and naming
-                    # the handle the same thing sent a window handle in as
-                    # the number of rows to grab.
                     below_hwnd = _get_hwnd(win) if win else None
-                    if below_hwnd and _user32.IsWindowVisible(below_hwnd):
+                    below_rect = _visible_rect(win) if below_hwnd else None
+                    if below_rect and _rects_overlap(
+                            below_rect, (x, y, x + w, y + h)):
                         below.append(below_hwnd)
                 over = tuple(below)
             # Reading the screen only shows what this process has not
@@ -1163,6 +1167,10 @@ class Api:
             # when it next composes, so a read taken immediately after
             # clearing it still shows the window missing.
             can_read_screen = self._capture_excluded and window_kind in self._excluded_kinds
+            compose_widget = _popover_needs_compat(
+                window_kind, self._cfg.get("glass_style"), self._excluded_kinds, over)
+            if compose_widget:
+                can_read_screen = False
             if window_kind == "flyout" and not can_read_screen:
                 # Compatibility mode cannot read the screen containing
                 # itself. Render intersecting windows beneath the panel
@@ -1178,15 +1186,32 @@ class Api:
             # the whole 512x258 window. One blit, then; what the corners
             # save is in what gets encoded and sent, below.
             raw = _desktop_capture.grab_screen(
-                x, y, w, h) if can_read_screen else None
+                x, y, w, h) if can_read_screen or compose_widget else None
+            if raw and compose_widget:
+                widget = _grab_widget_rgba(self._window)
+                frame = getattr(self, '_main_backdrop_frame', None)
+                raw = (_compose_popover_backdrop(raw, (x, y, w, h), frame, widget)
+                       if frame and widget else None)
             if raw is None:
                 # Either the fast path is off or unusable here, or it
                 # failed - the slow one always works.
-                raw = _compat_capture.grab(x, y, w, h, over)
+                raw = _compat_capture.grab(x, y, w, h,
+                                           tuple(h for h in over if h != _get_hwnd(self._window))
+                                           if compose_widget else over)
+                if raw and compose_widget:
+                    widget = widget or _grab_widget_rgba(self._window)
+                    if widget:
+                        image, rect = widget
+                        raw = _composite_rgba_window(raw, (w, h), image,
+                                                     (rect[0] - x, rect[1] - y))
+                    else:
+                        raw = _compat_capture.grab(x, y, w, h, over)
             if not raw:
                 return None
             if capture_epoch != self._capture_epoch:
                 return {"skip": True, "retry_ms": 80}
+            if window_kind == 'main' and can_read_screen:
+                self._main_backdrop_frame = (x, y, w, h, raw)
             digest = zlib.crc32(raw) & 0xFFFFFFFF
             cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
@@ -1350,14 +1375,11 @@ class Api:
         where the black edge around the detail card came from when it was
         opened over the tray panel.
 
-        So: a window is excluded unless one of ours that can sit above it
-        is actually overlapping it (_WINDOWS_ABOVE). Overlapping, not
-        merely open - the panel lives in a screen corner and the widget
-        usually sits nowhere near it, and lifting the widget's exclusion
-        every time the panel opened put the widget on the fallback path
-        for as long as it was up, which changes what its glass is a
-        picture of. That reads as the widget distorting the moment the
-        panel is summoned.
+        A window is usually excluded unless another of ours overlaps it.
+        Liquid mode keeps the main widget excluded even below the detail
+        popover: switching its capture source changed the glass image.
+        The popover instead composes the widget through compatibility
+        capture. Other overlapping windows still use the normal rule.
 
         Only claims the mode is on if the OS actually accepted it on the
         main window - on an older build the call fails and the slower
@@ -1389,7 +1411,10 @@ class Api:
         for kind, above in _WINDOWS_ABOVE.items():
             mine = rects.get(kind)
             covered = bool(mine) and any(
-                rects.get(other) and _rects_overlap(mine, rects[other]) for other in above
+                rects.get(other) and _rects_overlap(mine, rects[other])
+                and not (kind == "main" and other == "popover"
+                         and self._cfg.get("glass_style") == "liquid")
+                for other in above
             )
             excluded[kind] = wanted and not covered
         accepted = set()
@@ -2417,6 +2442,78 @@ _WINDOWS_ABOVE = {
 }
 
 
+def _popover_needs_compat(kind, style, excluded, below):
+    return (kind == "popover" and style == "liquid"
+            and "main" in excluded and bool(below))
+
+
+def _grab_widget_rgba(window):
+    """Capture the Qt widget with its transparent corner alpha intact."""
+    if not window:
+        return None
+
+    def grab():
+        from PySide6.QtGui import QImage
+        pixmap = window.native.grab()
+        image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+        if image.isNull():
+            return None
+        r = (ctypes.c_long * 4)()
+        if not _user32.GetWindowRect(_get_hwnd(window), ctypes.byref(r)):
+            return None
+        from PIL import Image
+        rgba = Image.frombytes('RGBA', (image.width(), image.height()),
+                               image.bits().tobytes(), 'raw', 'RGBA',
+                               image.bytesPerLine(), 1)
+        size = (r[2] - r[0], r[3] - r[1])
+        if rgba.size != size:
+            rgba = rgba.resize(size, Image.Resampling.BILINEAR)
+        return rgba, (r[0], r[1], r[2], r[3])
+
+    try:
+        return window.run_on_ui_thread(grab)
+    except Exception:
+        return None
+
+
+def _composite_rgba_window(base_bgra, size, layer, offset):
+    """Place a translucent window over a BGRA backdrop without black corners."""
+    from PIL import Image
+    # GDI's fourth byte is often zero even for an opaque desktop bitmap.
+    # Treat the backdrop as opaque before applying the Qt window's alpha.
+    base = Image.frombytes('RGBA', size, base_bgra, 'raw', 'BGRA').convert('RGB').convert('RGBA')
+    left, top = max(0, offset[0]), max(0, offset[1])
+    right = min(size[0], offset[0] + layer.width)
+    bottom = min(size[1], offset[1] + layer.height)
+    if right > left and bottom > top:
+        clipped = layer.crop((left - offset[0], top - offset[1],
+                              right - offset[0], bottom - offset[1]))
+        base.alpha_composite(clipped, (left, top))
+    return base.tobytes('raw', 'BGRA')
+
+
+def _compose_popover_backdrop(screen_bgra, popover_rect, main_frame, widget):
+    """Restore pixels hidden by capture affinity, then blend the Qt widget."""
+    from PIL import Image
+    x, y, w, h = popover_rect
+    mx, my, mw, mh, main_bgra = main_frame
+    image, rect = widget
+    if (abs(mx - rect[0]) > 3 or abs(my - rect[1]) > 3 or
+            abs(mw - (rect[2] - rect[0])) > 3 or
+            abs(mh - (rect[3] - rect[1])) > 3):
+        return None
+    left, top = max(x, mx), max(y, my)
+    right, bottom = min(x + w, mx + mw), min(y + h, my + mh)
+    if right <= left or bottom <= top:
+        return screen_bgra
+    base = Image.frombytes('RGBA', (w, h), screen_bgra, 'raw', 'BGRA').convert('RGB')
+    main = Image.frombytes('RGBA', (mw, mh), main_bgra, 'raw', 'BGRA').convert('RGB')
+    base.paste(main.crop((left - mx, top - my, right - mx, bottom - my)),
+               (left - x, top - y))
+    return _composite_rgba_window(base.convert('RGBA').tobytes('raw', 'BGRA'),
+                                  (w, h), image, (rect[0] - x, rect[1] - y))
+
+
 def _visible_rect(window, even_if_hidden=False):
     """This window's screen rectangle, or None if it is not on screen."""
     hwnd = _get_hwnd(window) if window else None
@@ -3100,7 +3197,7 @@ def main():
     # fields - and it deliberately ignores the widget's zoom, so a widget
     # shrunk to 50% still gets readable settings.
     settings_window = webview.create_window(
-        "HA Widgets 設定",
+        "HA Widgets Settings",
         url=os.path.join(WEB_DIR, "index.html") + "#settings",
         js_api=api,
         width=420,

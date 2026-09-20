@@ -52,6 +52,10 @@
       <div class="section-title">圖示</div>
       <div id="icon-picker" class="icon-picker"></div>
       <label class="field">
+        <span>MDI 圖示名稱</span>
+        <input id="edit-mdi-input" type="text" placeholder="例如 mdi:air-conditioner" spellcheck="false">
+      </label>
+      <label class="field">
         <span>名稱</span>
         <input id="edit-room-input" type="text" maxlength="40">
       </label>
@@ -95,6 +99,13 @@
 
       <div class="section">
         <div class="section-title">外觀</div>
+        <label class="field">
+          <span>語言</span>
+          <select id="language-select">
+            <option value="zh-TW">繁體中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
         <div class="row gap">
           <label class="chip-select">
             <span>主題</span>
@@ -226,6 +237,8 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="settings-select.js"></script>
+<script src="i18n.js"></script>
+<script src="mdi-paths.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

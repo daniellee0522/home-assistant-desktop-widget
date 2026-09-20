@@ -1,3 +1,12 @@
+/* The fourth-power superellipse meets straight edges with C3 continuity.
+   Radii are enlarged to preserve the former circular corner's diagonal
+   inset, so the corners still read at their original visual size. */
+/* Every CSS radius uses the same superellipse as the
+   backdrop canvas and liquid lens. Unsupported WebViews keep the radius. */
+*, *::before, *::after {
+  corner-shape: superellipse(2);
+}
+
 :root {
   /* Tiles are wider than they are tall: a name and a room read across,
      not down, so the extra width goes further than the same pixels would
@@ -15,7 +24,7 @@
      tiles in the grid, the accessory tile in the popover - and the card
      around them derives its own from it. The slab inside a tile does the
      same arithmetic again with its own 10px inset. */
-  --radius-tile: 32px;
+  --radius-tile: 59px;
 
   /* The window is a rectangle and cannot be made transparent, so the area
      outside this radius - the four corner wedges - is painted with a copy
@@ -27,7 +36,7 @@
      it off, a smaller radius trades roundness for a less visible outline.
      It follows --radius-tile rather than being set here, for the
      concentric reason above. */
-  --radius-panel: calc(var(--radius-tile) + var(--pad));
+  --radius-panel: calc(var(--radius-tile) + 36.8px);
 
   /* The panel is a tint *over* the blurred desktop behind it (#backdrop
      plus .card-bg's backdrop-filter), so this is deliberately
@@ -283,8 +292,8 @@ html.is-system-glass #backdrop-glass {
 /* Clear captured backdrop, refracted bevel, translucent tint, and directional
    highlight follow the layered glass recipe used by KMPLiquidGlass. */
 html[data-glass-style="liquid"] {
-  --radius-tile: 28px;
-  --radius-panel: 48px;
+  --radius-tile: 52px;
+  --radius-panel: 88px;
   --panel: rgba(226, 239, 248, 0.18);
   --tile-off: rgba(39, 55, 73, 0.3);
   --tile-off-hover: rgba(48, 66, 86, 0.4);
@@ -358,7 +367,7 @@ html[data-glass-style="liquid"] .tile.is-on {
     inset 0 0 0 1px rgba(255,255,255,.35);
 }
 html[data-glass-style="windows"] {
-  --radius-tile: 12px;
+  --radius-tile: 22px;
   --panel: rgba(231, 237, 244, 0.72);
   --tile-off: rgba(58, 68, 81, 0.66);
   --tile-off-hover: rgba(70, 82, 98, 0.74);
@@ -464,15 +473,15 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
 }
 .tile .tile-icon svg { width: 100%; height: 100%; fill: currentColor; }
 
-/* Climate tiles put the set temperature in the icon slot instead of a
-   glyph (see climateBadge in app.js). */
 .tile .tile-icon.is-badge {
   border-radius: 50%;
+  corner-shape: round;
   font-size: 17.5px;
   font-weight: 700;
   letter-spacing: -0.3px;
   line-height: 1;
 }
+
 
 .tile .tile-room {
   font-size: 19.5px;
@@ -661,7 +670,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
    widget panel's 52px put the title inside the corner's arc. */
 #view-settings .card-bg,
 #view-picker .card-bg {
-  border-radius: 26px;
+  border-radius: 48px;
   /* Settings is read, not glanced at: a form full of small grey labels
      over a live wallpaper is the one place the glass costs more than it
      gives, so this panel is most of the way to solid. The widget and the
@@ -726,7 +735,7 @@ html[data-theme="dark"] #view-picker .card-bg {
 .icon-picker .icon-swatch {
   width: 34px;
   height: 34px;
-  border-radius: 10px;
+  border-radius: 18px;
   border: 2px solid transparent;
   background: var(--btn-fill);
   color: var(--btn-text);
@@ -805,7 +814,7 @@ html[data-theme="dark"] #view-picker .card-bg {
   pointer-events: auto;
 }
 .view-body::-webkit-scrollbar { width: 6px; }
-.view-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+.view-body::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 6px; }
 
 /* ================= Detail view controls ================= */
 
@@ -921,7 +930,7 @@ html[data-theme="dark"] #view-picker .card-bg {
   border: 1px solid var(--input-border);
   background: var(--input-bg);
   color: var(--text-on-1);
-  border-radius: 10px;
+  border-radius: 18px;
   padding: 7px 10px;
   font: inherit;
   font-size: 13px;
@@ -950,7 +959,7 @@ input[type="range"] {
   -webkit-appearance: none;
   width: 100%;
   height: 8px;
-  border-radius: 4px;
+  border-radius: 7px;
   background: var(--btn-fill);
   pointer-events: auto;
 }
@@ -968,7 +977,7 @@ input[type="range"]::-webkit-slider-thumb {
 .btn-row .seg-btn {
   flex: 1;
   padding: 9px 4px;
-  border-radius: 12px;
+  border-radius: 22px;
   border: none;
   background: var(--btn-fill);
   color: var(--btn-text);
@@ -1012,15 +1021,8 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .stepper-btn:hover { background: var(--btn-fill-strong); }
 
-.color-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
-.swatch {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  pointer-events: auto;
-}
-.swatch.active { border-color: var(--accent-blue); }
+.color-picker-row { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; color: var(--text-on-1); font-size: 13px; }
+.color-picker-row input { width: 44px; height: 32px; padding: 2px; border: 1px solid var(--input-border); border-radius: 8px; background: var(--input-bg); cursor: pointer; pointer-events: auto; }
 
 .media-controls { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 8px 0 16px; }
 .media-controls .icon-btn { width: 40px; height: 40px; }
@@ -1062,7 +1064,7 @@ input[type="range"]::-webkit-slider-thumb {
   border: 1px solid var(--input-border);
   background: var(--input-bg);
   color: var(--text-on-1);
-  border-radius: 10px;
+  border-radius: 18px;
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
@@ -1080,7 +1082,7 @@ input[type="range"]::-webkit-slider-thumb {
   max-width: calc(100vw - 16px);
   overflow-y: auto;
   border: 1px solid var(--input-border);
-  border-radius: 10px;
+  border-radius: 18px;
   background: var(--panel-solid);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
 }
@@ -1089,7 +1091,7 @@ input[type="range"]::-webkit-slider-thumb {
   width: 100%;
   padding: 8px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 11px;
   background: transparent;
   color: var(--text-on-1);
   font: inherit;
@@ -1152,7 +1154,7 @@ input[type="range"]::-webkit-slider-thumb {
   gap: 8px;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
-  border-radius: 12px;
+  border-radius: 22px;
   padding: 7px 8px;
   pointer-events: auto;
 }
@@ -1183,7 +1185,7 @@ input[type="range"]::-webkit-slider-thumb {
   border: 1px solid var(--input-border);
   background: var(--input-bg);
   color: var(--text-on-1);
-  border-radius: 6px;
+  border-radius: 11px;
   padding: 3px 4px;
   font-size: 11px;
   font-family: inherit;
@@ -1199,7 +1201,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .picker-item {
   display: flex; align-items: center; gap: 10px;
-  padding: 8px; border-radius: 12px; pointer-events: auto;
+  padding: 8px; border-radius: 22px; pointer-events: auto;
 }
 .picker-item:hover { background: var(--btn-fill); }
 .picker-item .tr-icon { width: 22px; height: 22px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--text-on-2); }
@@ -1239,7 +1241,7 @@ input[type="range"]::-webkit-slider-thumb {
   right: 8px;
   bottom: 8px;
   height: calc(50% - 12px);
-  border-radius: calc(var(--accessory-radius, var(--radius-tile)) - 8px);
+  border-radius: calc(var(--accessory-radius, var(--radius-tile)) - 15px);
   background: rgba(0, 0, 0, 0.42);
   color: #fff;
   display: flex;
@@ -1317,7 +1319,7 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
    that: 14px in means 14px less radius, and the slab inside the
    accessory tile does the same again with its own 8px. */
 .detail-popover .card-bg { border-radius: var(--radius-tile); }
-.detail-popover { --accessory-radius: calc(var(--radius-tile) - 14px); }
+.detail-popover { --accessory-radius: calc(var(--radius-tile) - 26px); }
 .detail-popover .accessory-tile { border-radius: var(--accessory-radius); }
 .detail-popover .view-body { padding: 4px 14px 14px; }
 .detail-popover .accessory-tile .accessory-state { font-size: 17px; }
@@ -1531,10 +1533,6 @@ html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon {
   color: rgba(255, 255, 255, 0.95) !important;
   background: transparent !important;
 }
-/* The climate chip is the exception: it is a filled chip by design (the
-   temperature is set *in* it, see climateBadge) and it is round, so it
-   keeps a plate - just a flattened, colourless one like everything else
-   down here. */
 html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon.is-badge {
   background: rgba(255, 255, 255, 0.12) !important;
 }

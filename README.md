@@ -3,13 +3,30 @@
 Home Assistant controls on your Windows desktop. Built with Qt, with a
 frosted-glass background and transparent rounded corners.
 
-![Desktop widget](docs/widget.png)
+## Themes
+
+These screenshots use demo devices and show the actual Qt interface in each
+appearance. The captured desktop and system glass effects vary with your wallpaper.
+
+| Appearance | Light | Dark |
+| --- | --- | --- |
+| Classic frost | ![Classic light theme](docs/theme-classic-light.png) | ![Classic dark theme](docs/theme-classic-dark.png) |
+| Liquid glass | ![Liquid light theme](docs/theme-liquid-light.png) | ![Liquid dark theme](docs/theme-liquid-dark.png) |
+| Windows glass | ![Windows light theme](docs/theme-windows-light.png) | ![Windows dark theme](docs/theme-windows-dark.png) |
+
+## Features
 
 - **Desktop controls:** keep your devices on the desktop, drag to reposition, and lock in place.
 - **Live updates:** device states update through Home Assistant's WebSocket API.
 - **Quick access:** click the tray icon to open a panel beside the taskbar.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
 - **Personalization:** light and dark themes, classic, liquid, and Windows glass appearances, adjustable size, zoom, and opacity.
+- **Languages:** switch between Traditional Chinese and English in Settings.
+
+In a device's detail view, open the edit panel to choose an icon or enter a
+Material Design Icons name such as `mdi:air-conditioner`. Home Assistant's
+`mdi:` entity icon is used automatically when no icon is selected. Icons are
+bundled for offline use and keep each device type's on/off color.
 
 The liquid appearance ports the rounded-rectangle distance and edge
 displacement from [KMPLiquidGlass's Skia Lens.kt](https://github.com/Kashif-E/KMPLiquidGlass/blob/master/backdrop/src/skiaMain/kotlin/com/kashif_e/backdrop/effects/Lens.kt).
@@ -23,6 +40,8 @@ longer than one frame.
 | Tray panel | Device controls | Sensor history |
 | --- | --- | --- |
 | ![Tray panel](docs/tray-panel.png) | ![Device controls](docs/detail-switch.png) | ![Sensor history](docs/detail-history.png) |
+
+To regenerate the theme images from demo data: `python packaging/render_readme.py`.
 
 ## Run
 

@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "ha_url": "http://homeassistant.local:8123",
     "ha_token": "",
     "theme": "auto",          # light | dark | auto
+    "language": "zh-TW",      # zh-TW | en
     "glass_style": "classic",  # classic | liquid | windows
     "columns": 4,
     "window_x": 200,
