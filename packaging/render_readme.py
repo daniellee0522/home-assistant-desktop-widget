@@ -49,7 +49,14 @@ index = 0
 def next_variant():
     global index
     if index >= len(variants):
-        app.quit()
+        view.resize(520, 620)
+        view.page().runJavaScript("CONFIG.theme = 'light'; CONFIG.glass_style = 'classic'; applyTheme(); openSettingsView(); setInterfaceLanguage('en');")
+        def save_settings():
+            target = DOCS / 'settings-english.png'
+            view.grab().toImage().save(str(target))
+            print(target.relative_to(ROOT))
+            app.quit()
+        QTimer.singleShot(600, save_settings)
         return
     glass, theme = variants[index]
     index += 1

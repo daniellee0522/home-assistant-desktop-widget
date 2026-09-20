@@ -41,6 +41,8 @@ longer than one frame.
 | --- | --- | --- |
 | ![Tray panel](docs/tray-panel.png) | ![Device controls](docs/detail-switch.png) | ![Sensor history](docs/detail-history.png) |
 
+![English settings with language and appearance controls](docs/settings-english.png)
+
 To regenerate the theme images from demo data: `python packaging/render_readme.py`.
 
 ## Run
@@ -65,3 +67,5 @@ mode to include it; background capture depends on the applications behind it.
 ## License
 
 [MIT](LICENSE)
+
+Bundled Material Design Icons path data: [Apache 2.0](web/mdi-LICENSE).
