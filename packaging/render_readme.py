@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QTimer, Qt, QUrl
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication
 
@@ -46,17 +46,34 @@ variants = [
 index = 0
 
 
+def save_panel():
+    # The tray panel uses the same grid at half scale. Scale a captured
+    # liquid-theme grid so its labels stay legible in the README table.
+    target = DOCS / 'tray-panel.png'
+    QImage(str(DOCS / 'theme-liquid-dark.png')).scaled(
+        500, 252, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+    ).save(str(target))
+    print(target.relative_to(ROOT))
+    save_settings()
+
+
+def save_settings():
+    view.resize(520, 620)
+    view.page().runJavaScript("document.documentElement.classList.remove('is-flyout-window'); document.documentElement.style.zoom = '1'; CONFIG.theme = 'light'; CONFIG.glass_style = 'classic'; applyTheme(); openSettingsView(); setInterfaceLanguage('en');")
+
+    def save():
+        target = DOCS / 'settings-english.png'
+        view.grab().toImage().save(str(target))
+        print(target.relative_to(ROOT))
+        app.quit()
+
+    QTimer.singleShot(600, save)
+
+
 def next_variant():
     global index
     if index >= len(variants):
-        view.resize(520, 620)
-        view.page().runJavaScript("CONFIG.theme = 'light'; CONFIG.glass_style = 'classic'; applyTheme(); openSettingsView(); setInterfaceLanguage('en');")
-        def save_settings():
-            target = DOCS / 'settings-english.png'
-            view.grab().toImage().save(str(target))
-            print(target.relative_to(ROOT))
-            app.quit()
-        QTimer.singleShot(600, save_settings)
+        save_panel()
         return
     glass, theme = variants[index]
     index += 1
