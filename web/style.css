@@ -1,77 +1,39 @@
-/* The fourth-power superellipse meets straight edges with C3 continuity.
-   Radii are enlarged to preserve the former circular corner's diagonal
-   inset, so the corners still read at their original visual size. */
-/* Every CSS radius uses the same superellipse as the
-   backdrop canvas and liquid lens. Unsupported WebViews keep the radius. */
+/* Every radius uses the same fourth-power superellipse as the backdrop
+   canvas and liquid lens (C3-continuous with straight edges). Engines
+   without corner-shape keep the plain radius. */
 *, *::before, *::after {
   corner-shape: superellipse(2);
 }
 
 :root {
-  /* Tiles are wider than they are tall: a name and a room read across,
-     not down, so the extra width goes further than the same pixels would
-     as height. Keep in step with TILE_W/TILE_H in main.py, which sizes
-     the window before the page has measured itself. */
+  /* Keep in step with TILE_W/TILE_H/GAP/PAD in main.py, which sizes the
+     window before the page has measured itself. */
   --tile-w: 152px;
   --tile-h: 146px;
   --gap: 12px;
   --pad: 20px;
-  /* Nested corners are concentric, not equal. A box sitting --pad inside
-     another needs (outer - pad) for the gap between the two arcs to stay
-     the same width the whole way round; give both the same radius and
-     the gap pinches at every corner, which is what "the inner and outer
-     radii don't match" looks like. So this is the radius that is chosen -
-     tiles in the grid, the accessory tile in the popover - and the card
-     around them derives its own from it. The slab inside a tile does the
-     same arithmetic again with its own 10px inset. */
+  /* Nested corners are concentric: the panel's radius derives from the
+     tile's plus the padding between them, so the gap never pinches. */
   --radius-tile: 59px;
-
-  /* The window is a rectangle and cannot be made transparent, so the area
-     outside this radius - the four corner wedges - is painted with a copy
-     of the desktop, and a copy is always a frame behind the live wallpaper
-     beside it. On an animated wallpaper that lag is what makes the
-     window's square outline visible, and it shows in the wedges, whose
-     area grows with the square of this (~0.86r² per corner). The "流暢毛
-     玻璃" setting is what keeps that lag small enough not to notice; with
-     it off, a smaller radius trades roundness for a less visible outline.
-     It follows --radius-tile rather than being set here, for the
-     concentric reason above. */
   --radius-panel: calc(var(--radius-tile) + 36.8px);
 
-  /* The panel is a tint *over* the blurred desktop behind it (#backdrop
-     plus .card-bg's backdrop-filter), so this is deliberately
-     see-through. --panel-solid is the same colour opaque, used for the
-     moment before the first desktop capture arrives and as the fallback
-     if capturing ever fails - the window itself is not translucent, so
-     something has to be painted there. */
+  /* The panel is a see-through tint over the blurred desktop.
+     --panel-solid is the same colour opaque, for the settings menus. */
   --panel: rgba(214, 228, 241, 0.4);
   --panel-solid: #d6e4f1;
-  /* An "on" tile is always a bright white card with dark text, matching
-     the iOS Home widget, regardless of the app's own light/dark theme -
-     so unlike the other tokens below, these three are never redefined per
-     theme. */
+  /* An "on" tile is a white card with dark text in every theme. */
   --tile-on: #ffffff;
   --tile-on-text-1: #1d1d1f;
   --tile-on-text-2: #6e6e73;
-  /* An off tile is a darker pane of the same glass, not a solid card:
-     the blurred desktop under the panel carries on through it. The alpha
-     is as low as it goes while white text on top still reads over a
-     bright wallpaper - much below this and the light ones wash it out. */
+  /* An off tile is a darker pane of glass; the alpha is as low as white
+     text over a bright wallpaper allows. */
   --tile-off: rgba(58, 66, 80, 0.42);
   --tile-off-hover: rgba(72, 81, 97, 0.5);
   --text-on-1: #1d1d1f;
-  /* The muted one. Apple's grey on Apple's opaque white is one thing;
-     the same grey on a panel that is 40% see-through over whatever the
-     wallpaper is doing is another, and the field labels and section
-     headings in Settings were the first thing to become hard to read.
-     Darker here, and Settings itself is a more solid panel (below). */
+  /* Darker than a typical muted grey to stay legible on translucent glass. */
   --text-on-2: #4d4d55;
   --text-off-1: #ffffff;
-  /* The small line under a tile's name. It used to be a soft grey, which
-     is fine on a dark tile and not fine on this one: the tile is a pane
-     of glass over whatever the wallpaper is, and measured on a light one
-     that grey came out at 2:1 against its own background. White, with
-     the shadow below doing the separating. */
+  /* White, with a text shadow for contrast; grey failed on light wallpaper. */
   --text-off-2: #ffffff;
   --accent-yellow: #ffb320;
   --accent-blue: #409cff;
@@ -85,11 +47,8 @@
   --input-bg: rgba(255, 255, 255, 0.6);
   --input-border: rgba(0, 0, 0, 0.12);
   --scrollbar: rgba(0, 0, 0, 0.18);
-  /* Glass has an edge where the pane catches the light. Drawn as an inset
-     shadow rather than a border, because every window here is sized from
-     what its page measures (syncWindowSize) and a real 1px border on the
-     outermost card would grow that measurement by 2px each way. The top
-     edge is the brighter one, as it would be if lit from above. */
+  /* The glass rim, drawn as inset shadows: a border would change the
+     measured size windows are fitted to. Lit from above. */
   --glass-edge: rgba(255, 255, 255, 0.38);
   --glass-edge-top: rgba(255, 255, 255, 0.55);
   /* An "on" tile is white, so its rim has to be the shadow side. */
@@ -140,13 +99,7 @@ html[data-theme="dark"] {
 
 * { box-sizing: border-box; }
 
-/* Anything toggled via the `hidden` attribute must actually disappear.
-   Several elements below (views, the tile grid, the empty-state hint) also
-   have an author rule that sets `display` for their visible state, and an
-   author rule beats the browser's own `[hidden]{display:none}` UA style
-   regardless of specificity - so without `!important` here, a hidden
-   element with its own `display` rule silently stays on screen stacked
-   underneath whatever replaced it. */
+/* Author `display` rules would otherwise beat the UA's [hidden] style. */
 [hidden] {
   display: none !important;
 }
@@ -156,21 +109,14 @@ html, body {
   padding: 0;
   width: 100%;
   height: 100%;
-  /* #backdrop paints every pixel of the window; nothing may be left
-     transparent, because what shows through is the window's own surface -
-     flat grey where the host framework painted it and raw black where it
-     never did, which is where the black frame around the card came
-     from. */
+  /* The window is transparent outside the card. */
   background: transparent;
   overflow: hidden;
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei", -apple-system, sans-serif;
   -ms-overflow-style: none;
   user-select: none;
   -webkit-user-select: none;
-  /* ClearType assumes an opaque background to compute its subpixel color
-     fringing; against this window's real transparency it instead paints a
-     visible light halo around text and shape edges. Plain grayscale AA
-     doesn't make that assumption. */
+  /* Subpixel AA assumes an opaque background and haloes on transparency. */
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -178,20 +124,9 @@ html, body {
 #stage {
   position: relative;
   z-index: 1;
-  /* Sized to its own content, explicitly - *not* an inline-block, whose
-     width an ancestor can still clamp. The window is sized *from* this
-     element's measured bounding rect (syncWindowSize -> SetWindowPos),
-     so its layout must never be constrained by whatever size the window
-     currently happens to be: that's circular. As an inline-block inside
-     a width:100% body, it got clamped to the *old*, not-yet-resized
-     window's width whenever the view swapped to a wider one - switching
-     back from the narrow Settings panel to the wider tile grid measured
-     the grid at Settings' width, sent that too-small number as the new
-     window size, and nothing re-measured afterwards, leaving the grid
-     permanently clipped with unpainted (black) window past where the
-     squeezed-narrow layout had actually drawn. (max-content belongs
-     here rather than on html/body: html carries the CSS `zoom`, and
-     max-content on a zoomed element resolves against the wrong scale.) */
+  /* The window is sized from this element (syncWindowSize), so it must
+     never be constrained by the window's current size. max-content lives
+     here, not on html, because html carries the CSS zoom. */
   display: block;
   width: max-content;
   height: max-content;
@@ -201,26 +136,12 @@ html, body {
   position: relative;
 }
 
-/* The frosted card. backdrop-filter blurs whatever is painted behind
-   it, which here is #backdrop's copy of the real desktop - so this is a
-   genuine blur of what is behind the window, not a picture of one. The
-   rounded corners work because the desktop copy continues *unblurred*
-   outside this element: the corners show the same pixels the desktop
-   would, which is what a real cutout would look like. Nothing here relies
-   on the window being translucent, because it cannot be (see main.py). */
+/* The card's tint and rim. The frosted image under it is painted into
+   #backdrop-glass, clipped to this shape (paintBackdrop in app.js). */
 .card-bg {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-panel);
-  /* Only the tint. The frosted image underneath it is painted by
-     #backdrop, which draws the blurred copy of the desktop clipped to
-     this element's own rounded rectangle (see paintBackdrop in app.js) -
-     as a CSS background it was a brand new image resource every frame,
-     and Chromium's decoded-image cache grew by ~20MB a minute holding
-     frames nobody would ever ask for again. The blur itself is done once,
-     at quarter scale, on the Python side; backdrop-filter did it on the
-     GPU every frame and the repainting competed with the capture badly
-     enough to double what a frame cost. */
   background-color: transparent;
   background-image: linear-gradient(var(--panel), var(--panel));
   background-size: 100% 100%;
@@ -230,61 +151,19 @@ html, body {
   transition: background-color 0.25s ease;
 }
 
-/* Everything behind the window's own content: the desktop as captured,
-   plus the blurred copy of it inside each card. One canvas rather than a
-   pair of cross-fading <div>s with background-images - a canvas is one
-   bitmap redrawn in place, where the images were a new resource per frame
-   for Chromium to decode, cache and upload as a texture. Drawing is also
-   atomic within a frame, so the cross-fade that used to hide the handover
-   is no longer needed.
-
-   Its bitmap is sized to the exact device pixels the capture was taken at
-   and stretched to the element by `width/height: 100%`, so it is a 1:1
-   blit and not a resample - which matters at the cards' rounded corners,
-   where the backdrop shows unblurred against the real desktop and any
-   softening reads as a ragged edge. */
-#backdrop,
+/* The card's frosted fill: a canvas covering the window, its bitmap at
+   the capture's exact device pixels so it is drawn 1:1. Transparent
+   wherever the card is not. */
 #backdrop-glass {
   position: fixed;
   inset: 0;
   z-index: 0;
   width: 100%;
   height: 100%;
-}
-#backdrop {
-  /* Nothing is drawn on this any more - the window is translucent, so
-     the four corners are simply left alone and the desktop is what is
-     there. It stays in the document, and out of the way, because
-     cardGeometry measures the card against this canvas's bitmap to
-     decide whether the card covers the window.
-
-     display:none rather than a transparent background: the canvas is
-     created without an alpha channel (it used to hold an opaque copy of
-     the desktop), and a canvas with no alpha is *black* where nothing
-     has been drawn on it - which is what a translucent window then
-     showed, a black frame around the card where the desktop should have
-     been. */
-  display: none;
-}
-/* The frosted fill of the card, on its own layer above the sharp desktop
-   rather than drawn into it. It belongs to the card, not to the window,
-   and this is what lets it come and go with the card - painted into the
-   one canvas it stayed behind as a pane of blurred glass after the card
-   itself had gone, which is what the tray panel's dismissal looked
-   like. Transparent everywhere the card is not. */
-#backdrop-glass {
   background: transparent;
 }
 
-/* DWM is drawing the frosted glass behind this window itself (see
-   _set_system_glass in main.py). It is *behind* everything the page
-   paints, so the page's own opaque layers have to get out of its way:
-   the fallback colour that stood in for a capture that had not arrived
-   yet, and the blurred copy, which is now a picture of the thing that is
-   already there. What is left on #backdrop is the four sharp corners. */
-html.is-system-glass #backdrop {
-  background-color: transparent;
-}
+/* DWM draws the glass itself (see _set_system_glass in main.py). */
 html.is-system-glass #backdrop-glass {
   display: none;
 }
@@ -308,12 +187,6 @@ html[data-glass-style="liquid"] .card-bg {
   background-color: var(--panel);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.42);
-}
-html[data-glass-style="liquid"] .card-bg::before {
-  content: none;
-}
-html[data-glass-style="liquid"] .card-bg::after {
-  content: none;
 }
 /* Light travels along the rounded rim, fading toward the middle of each
    side. The mask keeps the light on the edge instead of tinting the pane. */
@@ -429,9 +302,7 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   gap: var(--gap);
   pointer-events: none;
 }
-/* An empty grid still reserves its full column-template width even with
-   zero children, which briefly widens #stage before JS has a chance to
-   hide it in favor of the empty-hint. Kill that at the CSS level too. */
+/* An empty grid still reserves its column widths. */
 .tiles-grid:empty {
   display: none;
 }
@@ -485,10 +356,6 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
 
 .tile .tile-room {
   font-size: 19.5px;
-  /* Tighter than the font's own leading: at this size the default puts
-     several unused pixels above and below each line, which the tile
-     cannot spare now that the type has grown. It crops leading, not ink
-     (the face's ascender-to-descender is about 1.1em). */
   line-height: 1.2;
   font-weight: 600;
   color: var(--text-off-1);
@@ -496,18 +363,12 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
 .tile .tile-label {
   font-size: 16.5px;
   line-height: 1.2;
-  /* Not 400: at this size thin strokes on a busy background lose more to
-     antialiasing than the extra weight costs in tidiness. */
   font-weight: 500;
   color: var(--text-off-2);
   margin-top: 1px;
 }
 
-/* A name too long for its tile fades out at the edge instead of being
-   cut off or ending in an ellipsis - the ellipsis reads as punctuation at
-   this size, and a hard cut looks like a rendering fault. The mask is
-   unconditional: when the text does fit, the faded strip falls on empty
-   space and nothing shows. */
+/* Text too long for its tile fades out at the edge. */
 .tile .tile-room,
 .tile .tile-label,
 .tile .tile-value {
@@ -522,9 +383,7 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
 
 .tile .tile-value {
   position: absolute;
-  /* Just below the icon (14 + 40), and tight enough that the larger type
-     still clears the name block at the bottom of the tile. */
-  top: 56px;
+  top: 56px;                  /* just below the icon */
   left: 14px;
   right: 14px;
   font-size: 25.5px;
@@ -534,12 +393,7 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
 }
 .tile.is-on .tile-value { color: var(--tile-on-text-1); }
 
-/* White on glass sits over whatever the wallpaper happens to be doing,
-   which on a bright one is close to white itself. Two shadows rather
-   than one: a tight dark edge that gives the strokes something to sit
-   against, and a wider halo that darkens the background around them
-   without darkening the tile. Measured over a light wallpaper, the
-   secondary line went from 2:1 to comfortably readable on this alone. */
+/* A tight edge plus a wide halo keep white text legible on light wallpaper. */
 .tile:not(.is-on) .tile-room,
 .tile:not(.is-on) .tile-label,
 .tile:not(.is-on) .tile-value,
@@ -551,12 +405,7 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
 }
 
-/* A read-only accessory is a readout, so the reading is the headline and
-   the name is the caption underneath it - the reverse of a switch tile,
-   where the name is what you are looking for and the state is a detail.
-   Taking .tile-value out of absolute positioning lets the two sit
-   together at the bottom of the tile instead of the number floating at a
-   fixed offset that only suits the switch layout. */
+/* A read-only tile leads with the reading, captioned by the name. */
 .tile.is-readonly .tile-value {
   position: static;
   font-size: 27px;
@@ -610,11 +459,7 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  /* Mini +/- buttons only ever appear on an "on" climate tile, which is
-     always the fixed white-card style (see --tile-on) regardless of
-     theme - so they need fixed dark-on-white colors to match, not the
-     theme-dependent --btn-fill/--btn-text (which, in dark theme, is a
-     near-white-on-white combination here and was effectively invisible). */
+  /* Only shown on an "on" climate tile, which is white in every theme. */
   background: rgba(0, 0, 0, 0.08);
   color: #1d1d1f;
   display: flex;
@@ -649,7 +494,6 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   text-align: center;
   pointer-events: auto;
 }
-html[data-theme="dark"] .empty-hint,
 html:not([data-theme="light"]) .empty-hint { color: var(--text-off-2); }
 .empty-icon { font-size: 30px; margin-bottom: 2px; color: var(--accent-blue); }
 .empty-title { font-size: 14px; font-weight: 600; color: var(--text-off-1); }
@@ -664,17 +508,10 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
   flex-direction: column;
   overflow: hidden;
 }
-/* Settings takes its radius from what is actually nested inside it - the
-   input fields, 10px rounded and 16px in from the edge - not from the
-   grid's tiles, which are in another window entirely. Inheriting the
-   widget panel's 52px put the title inside the corner's arc. */
+/* Settings is read rather than glanced at, so its panel is nearly solid. */
 #view-settings .card-bg,
 #view-picker .card-bg {
   border-radius: 48px;
-  /* Settings is read, not glanced at: a form full of small grey labels
-     over a live wallpaper is the one place the glass costs more than it
-     gives, so this panel is most of the way to solid. The widget and the
-     cards keep theirs. */
   --panel: rgba(240, 245, 250, 0.9);
 }
 html[data-theme="dark"] #view-settings .card-bg,
@@ -698,19 +535,10 @@ html[data-theme="dark"] #view-picker .card-bg {
   background: transparent;
 }
 .detail-popover {
-  /* Deliberately no transform/scale here: this card's own OS window is
-     sized from its full 260x336 layout footprint (syncWindowSize), which
-     a scale-in doesn't change - but a scale-in *would* shrink what's
-     actually drawn for as long as the transition hasn't finished, and
-     since this is a WS_EX_NOACTIVATE window that never gains real OS
-     focus, Chromium can throttle its rAF/transitions indefinitely. That
-     left a permanently under-drawn card in a full-size window. Opacity
-     and a small translate don't change the layout footprint, so they're
-     safe to animate no matter how slowly (or never) the transition
-     actually plays. */
+  /* Opacity only, never a scale: the window never takes focus, so its
+     transitions may be throttled and must not leave the card undersized. */
   position: absolute;
-  width: 260px;
-  height: 336px;
+  width: 288px;
   z-index: 9;
   display: flex;
   flex-direction: column;
@@ -747,9 +575,7 @@ html[data-theme="dark"] #view-picker .card-bg {
 .icon-picker .icon-swatch svg { width: 18px; height: 18px; fill: currentColor; }
 .icon-picker .icon-swatch.active { border-color: var(--accent-blue); background: var(--btn-fill-strong); }
 
-/* Flex/grid children default to a min-content floor that can silently
-   overflow a fixed-width card (e.g. a button next to a long label). Since
-   nothing here relies on that floor, drop it everywhere inside a view. */
+/* Drop the min-content floor that lets flex children overflow a card. */
 .view-body * {
   min-width: 0;
 }
@@ -818,65 +644,8 @@ html[data-theme="dark"] #view-picker .card-bg {
 
 /* ================= Detail view controls ================= */
 
-.detail-power-row {
-  display: flex;
-  justify-content: center;
-  margin: 6px 0 18px;
-}
-.power-toggle {
-  width: 74px;
-  height: 74px;
-  border-radius: 50%;
-  border: none;
-  background: var(--btn-fill);
-  color: var(--btn-text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: auto;
-}
-.power-toggle svg { width: 32px; height: 32px; fill: currentColor; }
-.power-toggle.is-on { background: var(--accent-yellow); color: #3a2a00; }
-
-.toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 10px 0 18px;
-  pointer-events: auto;
-}
-.toggle-row .toggle-label { font-size: 14px; font-weight: 600; color: var(--text-on-1); }
-.toggle-switch {
-  position: relative;
-  width: 50px;
-  height: 30px;
-  border-radius: 999px;
-  border: none;
-  background: var(--btn-fill-strong);
-  cursor: pointer;
-  flex: none;
-  pointer-events: auto;
-  transition: background 0.18s ease;
-}
-.toggle-switch::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-  transition: transform 0.18s ease;
-}
-.toggle-switch.is-on { background: var(--accent-green); }
-.toggle-switch.is-on::after { transform: translateX(20px); }
-
-/* Big HomeKit-style accessory tile: the primary glance+toggle control,
-   shared by every expandable domain for a consistent look. Off = dim
-   icon on a plain dark tile; on = a colored fill rising from the bottom
-   (100% for a plain switch, the live percentage for a dimmable one). */
+/* The large accessory tile: on = a coloured fill rising from the bottom
+   (the live percentage for something dimmable). */
 .accessory-tile {
   position: relative;
   display: block;
@@ -922,8 +691,7 @@ html[data-theme="dark"] #view-picker .card-bg {
 }
 
 .slider-block { margin: 14px 0; }
-/* The chip-sized selects hold a word; this one holds a sentence, so it
-   gets the width of the panel and a line of its own. */
+/* A select whose options are sentences gets a full-width line. */
 .wide-select {
   width: 100%;
   appearance: none;
@@ -937,16 +705,10 @@ html[data-theme="dark"] #view-picker .card-bg {
   margin-top: 2px;
 }
 .slider-hint {
-  margin-top: 6px;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--text-on-2);
-}
-.slider-block .slider-hint {
+  margin-top: 5px;
   font-size: 11.5px;
   line-height: 1.4;
   color: var(--text-on-2);
-  margin-top: 5px;
 }
 .slider-block .slider-label {
   display: flex;
@@ -1231,10 +993,8 @@ input[type="range"]::-webkit-slider-thumb {
 
 
 /* ---- the on/off slab (switches and locks) ----
-   The tile is the track and keeps the size and glass it always had; the
-   slab inside is half its height, sits in the lower half when off, and
-   rides to the upper half - turning white - when on. Everything else
-   about the tile is left alone, including its rim. */
+   The tile is the track; the half-height slab rides from the lower half
+   to the upper half, turning white, when on. */
 .accessory-tile.toggle-slab .slab {
   position: absolute;
   left: 8px;
@@ -1255,8 +1015,7 @@ input[type="range"]::-webkit-slider-thumb {
   height: 34px;
   fill: currentColor;
 }
-/* Off at bottom:8, on at bottom:50%+4 - the same 8px of track above it
-   that it had below, so the two rest positions mirror each other. */
+/* Mirrors the off position: 8px of track above instead of below. */
 .accessory-tile.toggle-slab.is-on .slab {
   bottom: calc(50% + 4px);
   background: #ffffff;
@@ -1264,26 +1023,11 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 /* ================= Detail popover: its own scale =================
+   The shared chrome runs a step larger in the glanceable detail card
+   than in Settings. */
 
-   The popover is a small card glanced at from wherever the widget sits,
-   while Settings is a window someone is leaning into - so the shared
-   chrome below runs a step larger here, and keeps further away from the
-   rounded edge it is sitting inside (the corner radius eats the space a
-   12px inset used to leave). Scoped to .detail-popover so none of it
-   reflows the Settings window. */
-
-.detail-popover {
-  width: 288px;
-  /* Height follows the content. In the popover's own window the card is
-     also taken out of absolute positioning (below) so that #stage, and
-     with it the OS window, comes out exactly the size of the card. */
-  height: auto;
-}
-
-/* The card is absolutely positioned in the grid window, where it used to
-   overlay the tiles. In its own window there is nothing to overlay and
-   the window has already been moved into place, so it lays out in the
-   flow instead and lets #stage measure it. */
+/* In its own window the card is in the flow, so #stage - and the
+   window - take its size. */
 .is-popover-window .detail-popover {
   position: relative;
   left: auto;
@@ -1305,30 +1049,22 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
   }
 }
 .popover-header {
-  /* Far enough in to clear the card's corner arc, and to not read as
-     crowded against it. */
+  /* Clear of the corner arc. */
   padding: 16px 16px 10px 18px;
 }
 .popover-header .header-title { font-size: 19.5px; }
 .popover-header .header-sub { font-size: 14.5px; }
 .popover-header .icon-btn { width: 32px; height: 32px; }
 
-/* The card is one of the tiles, opened up - so it is rounded like one,
-   not like the widget panel (whose radius is wide because it has 20px of
-   padding around real tiles). Everything inside then steps down from
-   that: 14px in means 14px less radius, and the slab inside the
-   accessory tile does the same again with its own 8px. */
+/* The card is rounded like a tile, and nested radii step down from it. */
 .detail-popover .card-bg { border-radius: var(--radius-tile); }
 .detail-popover { --accessory-radius: calc(var(--radius-tile) - 26px); }
 .detail-popover .accessory-tile { border-radius: var(--accessory-radius); }
 .detail-popover .view-body { padding: 4px 14px 14px; }
 .detail-popover .accessory-tile .accessory-state { font-size: 17px; }
-.detail-popover .toggle-row .toggle-label { font-size: 17px; }
 .detail-popover .slider-block .slider-label { font-size: 15px; }
 .detail-popover .btn-row .seg-btn { font-size: 15.5px; padding: 10px 4px; }
-/* The one thing that did not grow with the rest: this is the entity id,
-   a long unbroken string that wraps mid-word the moment it no longer
-   fits on one line. */
+/* The entity id: a long unbroken string, kept small. */
 .detail-popover .detail-readout-sub { font-size: 13px; }
 .detail-popover .section-title { font-size: 14.5px; }
 .detail-popover .field { font-size: 14.5px; }
@@ -1338,26 +1074,11 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
 
 
 /* ================= Tray flyout =================
-
-   The same grid as the desktop widget, in the window that comes up beside
-   the clock when the tray icon is clicked. It pops out of the corner it
-   is anchored to and fades back into it, which is how Windows' own panels
-   come and go.
-
-   Nothing in the animation ever grows past the card's resting size, and
-   that is a constraint rather than a preference: the window is exactly
-   the card, so anything larger is clipped against its edge - and a window
-   the card does not quite fill gives up the trick where only the four
-   corner wedges of the backdrop have to be captured sharp, which is most
-   of what keeps the sampling smooth. It grows *into* its resting size
-   instead, out of the corner it is anchored to.
-
-   The animation is on #view-grid rather than on #stage because the window
-   is sized from #stage's measured box (syncWindowSize), and a transform
-   would be included in that measurement - the window would shrink to fit
-   the animation's first frame. A transform on a child changes nothing
-   about its parent's layout. */
-/* The card and its own frosted fill move as one thing. */
+   The widget's grid in the tray panel. It scales out of its anchored
+   corner and back, never past its resting size: the window is exactly the
+   card, so anything larger would be clipped. The animation is on
+   #view-grid, not #stage, which the window is measured from. The card and
+   its frosted fill move as one. */
 .is-flyout-window #view-grid,
 .is-flyout-window #backdrop-glass {
   transform-origin: 100% 100%;
@@ -1375,25 +1096,16 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
 }
 .is-flyout-window #view-grid.flyout-enter,
 .is-flyout-window #backdrop-glass.flyout-enter {
-  /* Most of the distance is covered in the first third, then it eases
-     into place - which is what reads as popping up rather than being
-     switched on, without ever going past full size. */
   animation: flyout-enter 220ms cubic-bezier(0.12, 0.9, 0.2, 1) forwards;
 }
 .is-flyout-window #view-grid.flyout-leave,
 .is-flyout-window #backdrop-glass.flyout-leave {
-  /* Shorter than it arrives in, and accelerating rather than easing:
-     things leave faster than they come. */
   animation: flyout-leave 130ms cubic-bezier(0.5, 0, 0.9, 0.35) forwards;
 }
 
 /* ================= History chart =================
-
-   Drawn for any accessory whose detail is just a reading. Two stacked
-   SVGs rather than one: the line and its fill are stretched to the
-   card's width with preserveAspectRatio="none", which would stretch the
-   dot on the end into an ellipse - so the dot gets its own layer that
-   keeps its aspect. */
+   Two stacked SVGs: the line is stretched to the card's width, and the
+   end dot gets its own unstretched layer so it stays round. */
 .history-block {
   margin-top: 10px;
 }
@@ -1444,38 +1156,14 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
   stroke-width: 1.2;
 }
 
-/* ================= Faded out =================
-
-   When the machine has been quiet for a while, or something is running
-   full screen, the widget settles back into the desktop rather than
-   disappearing. It comes back for a click on itself, or for the desktop
-   coming to the front - not for any keystroke anywhere (see
-   _desktop_is_front in main.py).
-
-   It is done by restyling the tiles, not by fading a layer out. Opacity
-   on the grid was the obvious way and it is the wrong one: it fades the
-   tiles towards whatever is behind them, so on a busy wallpaper the whole
-   thing reads as coming apart rather than quietening down, and it dims
-   the glass along with the tiles even though the glass is the part that
-   should stay. So the tokens move instead - an "on" tile stops being a
-   solid white card and becomes translucent pale grey, an "off" one gives
-   up most of its remaining weight, the panel's tint thins out, and the
-   type and icons go to a grey-white with nothing left to shout with. The
-   frosted pane underneath is untouched, and so is the rate it is sampled
-   at: what is behind the glass is most of what is left to look at.
-
-   Both directions are carried by the transitions on the elements
-   themselves, since it is colours that move now and not a layer. */
+/* ================= Dimmed =================
+   While the desktop is out of sight (see _watch_for_idle in main.py) the
+   widget recedes by restyling its tokens rather than fading a layer:
+   opacity would fade the glass too, and read as coming apart on a busy
+   wallpaper. The frosted pane itself is untouched. */
 html.is-dimmed:not(.is-flyout-window) {
-  /* Darker than the widget's own tint rather than lighter: faded out it
-     should read as settling into the desktop, and on a pale wallpaper a
-     pale tint just made it glare. */
   --panel: rgba(104, 120, 140, 0.26);
-  /* An "on" tile keeps its lead over an "off" one - it is still the thing
-     that is on - but as a shade of the same pale glass rather than as a
-     solid white card. Both carry the same near-white type, which is what
-     decides the ceiling here: at much above this the tile turns into a
-     bright field and takes its own text with it. */
+  /* "On" stays ahead of "off", as translucent glass not a white card. */
   --tile-on: rgba(255, 255, 255, 0.30);
   --tile-on-text-1: rgba(255, 255, 255, 0.95);
   --tile-on-text-2: rgba(255, 255, 255, 0.74);
@@ -1524,11 +1212,7 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-icon {
               box-shadow 700ms ease-in-out, color 700ms ease-in-out,
               text-shadow 700ms ease-in-out, transform 0.12s ease;
 }
-/* The icon's colour is set per accessory as an inline style (a lit bulb
-   is yellow, a running fan is blue), which is the one thing a stylesheet
-   cannot outrank without saying so. Faded out they all go the same way as
-   the type around them: near-white on a lit tile, and exactly the text's
-   own colour on an unlit one. */
+/* Icon colours are inline styles, hence !important. */
 html.is-dimmed:not(.is-flyout-window) .tile.is-on .tile-icon {
   color: rgba(255, 255, 255, 0.95) !important;
   background: transparent !important;
@@ -1544,9 +1228,7 @@ html.is-dimmed:not(.is-flyout-window) .tile:not(.is-on) .tile-icon {
   color: var(--text-off-1) !important;
   background: transparent !important;
 }
-/* The shadow under the type is there to hold white text off a bright
-   wallpaper. Type this pale has given up being read, and a hard shadow
-   under it only makes it look grubby. */
+/* A lighter text shadow for the paler type. */
 html.is-dimmed:not(.is-flyout-window) .tile .tile-room,
 html.is-dimmed:not(.is-flyout-window) .tile .tile-label,
 html.is-dimmed:not(.is-flyout-window) .tile .tile-value {

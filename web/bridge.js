@@ -1,11 +1,6 @@
-// The page's half of the bridge to Python.
-//
-// The object it builds is pywebview's, name for name, because app.js was
-// written against that and there is nothing wrong with the shape: every
-// method returns a promise of whatever Python returned. What is different
-// is underneath - the call is a POST to the same origin the page was
-// served from (see qtshell.py), which needs no injection into the page
-// and no channel library, and is the same transport in both directions.
+// The page's half of the bridge to Python: window.pywebview.api.<name>(...)
+// POSTs to /api/<name> on the page's own origin (see qtshell.py) and
+// resolves to whatever Python returned.
 (function () {
   function call(name, args) {
     const controller = new AbortController();
@@ -26,9 +21,7 @@
     }).finally(() => { if (timeout !== null) clearTimeout(timeout); });
   }
 
-  // A proxy rather than a fixed list, so adding a method to the Python
-  // side is all it takes - and so that pulling one off the object to call
-  // later (app.js does that to pick a resize function) still works.
+  // A proxy, so any public Python method is callable without a list here.
   var api = new Proxy({}, {
     get: function (_, name) {
       if (typeof name !== 'string') return undefined;
@@ -40,8 +33,7 @@
   });
 
   window.pywebview = { api: api };
-  // app.js waits for this before it asks for anything (see the bottom of
-  // app.js), exactly as it did under pywebview.
+  // app.js boots on this event.
   window.addEventListener('DOMContentLoaded', function () {
     window.dispatchEvent(new Event('pywebviewready'));
   });

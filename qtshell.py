@@ -1,34 +1,16 @@
-"""A pywebview-shaped window layer built on Qt.
+"""The window layer: frameless, transparent Qt web views plus the bridge.
 
-This exists for one reason: a Qt window can actually be transparent, and
-the WinForms one this replaces cannot. That is not a matter of taste - it
-decides whether the card's rounded corners are the desktop itself or a
-photograph of it taken a moment ago, and a photograph next to the live
-thing beside it is a seam you can see whenever anything moves.
+A Qt window can be genuinely transparent, so outside the card's rounded
+corners the desktop shows through unpainted. The interface loosely follows
+pywebview's (create_window, window.events, evaluate_js), which is why the
+page still calls `window.pywebview.api`.
 
-Measured on this machine, with the window hidden and shown and the two
-photographs subtracted: inside the window, outside the card's rounded
-corner, the difference is *zero*. Nothing is painted there at all. The
-card's own area comes back correlated with the desktop behind it (0.72),
-which is what a translucent tint over the real thing looks like.
-
-The shape of the API is pywebview's, method for method, so the rest of
-the program does not have to know which one it is talking to. What is
-deliberately not pywebview's:
-
-  * The bridge. pywebview injects `window.pywebview.api` and marshals
-    calls over its own channel; here the page's own origin serves an
-    /api/<name> endpoint and web/bridge.js builds the same object out of
-    fetch(). One transport for both directions of the same conversation,
-    no QWebChannel, and the page cannot tell the difference.
-
-  * Windows are addressed by their HWND for anything positional, because
-    everything around this - the z-order pinning, the capture exclusion,
-    the tray corner arithmetic - is already Win32 and already thinks in
-    physical pixels.
+The bridge: the page's own origin (a loopback HTTP server) answers
+POST /api/<name> by calling that method on the api object, and
+web/bridge.js builds `window.pywebview.api` out of fetch(). Anything
+positional is done by HWND in physical pixels, as in main.py.
 """
 
-import ctypes
 import faulthandler
 import json
 import os
@@ -39,12 +21,12 @@ from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 _app = None
+_heartbeat = None
 _windows = []
 _server = None
 _server_port = 0
@@ -52,30 +34,19 @@ _web_dir = None
 
 
 # ---------------------------------------------------------------------
-# Staying alive across a suspend, and saying so when it does not
+# Watchdog: hang reports and resume detection
 # ---------------------------------------------------------------------
-# Windows kills a program whose GUI thread stops answering its message
-# queue, and reports it as a hang rather than a crash: no exception, no
-# dump, nothing in the process to say what happened. That is how this
-# program went away a minute after the machine woke up, and with no
-# record of it there was nothing to fix but a guess.
-#
-# So the GUI thread signs a register every half second, and a thread that
-# is not it watches the dates. If the register goes cold, every Python
-# stack in the process is written out - including the GUI thread's, which
-# is the one that matters - before Windows gets around to closing it.
+# Windows closes a program whose GUI thread stops answering without leaving
+# any record. The GUI thread stamps a heartbeat every half second; if it
+# goes stale, every Python stack is written to the log first.
 _LOG_PATH = None
 _alive_at = [0.0]
 _hang_logged = [False]
 _resume_hooks = []
 
-# How long the GUI thread may go without answering before it counts as
-# stuck. Windows' own patience is five seconds; this is longer, because a
-# GUI thread busy for five seconds is a bad frame and one busy for ten is
-# not coming back.
+# How long the GUI thread may go without answering before it counts as stuck.
 _STALL_SECS = 10.0
-# A watchdog tick that took this much longer than it asked for did not
-# oversleep - the machine was suspended underneath it.
+# A one-second watchdog tick that took this long means the machine slept.
 _SUSPEND_SECS = 20.0
 
 
@@ -95,11 +66,8 @@ def log(line):
 def on_resume(fn):
     """Call fn after the machine has been suspended and come back.
 
-    Detected by the clock rather than by WM_POWERBROADCAST: a watchdog
-    tick that asked for one second and got thirty was not slow, it was
-    asleep. That reads the same for every kind of suspend, needs no native
-    event filter in the message loop, and cannot itself be the thing that
-    breaks the message loop.
+    Detected by the watchdog's clock rather than WM_POWERBROADCAST, which
+    needs no native event filter in the message loop.
     """
     _resume_hooks.append(fn)
 
@@ -122,9 +90,6 @@ def _watchdog():
         slept = now - last
         last = now
         if slept > _SUSPEND_SECS:
-            # Asleep, not slow. Anything cached from before is cached
-            # against a machine that no longer exists in the same shape -
-            # a different set of monitors, most of the time.
             log("resumed after %.0fs suspended" % slept)
             _alive_at[0] = now
             _hang_logged[0] = False
@@ -146,7 +111,7 @@ def _watchdog():
 
 
 # ---------------------------------------------------------------------
-# Events, in pywebview's shape: `window.events.shown += handler`
+# Events: `window.events.shown += handler`
 # ---------------------------------------------------------------------
 class _Event:
     def __init__(self):
@@ -154,11 +119,6 @@ class _Event:
 
     def __iadd__(self, fn):
         self._handlers.append(fn)
-        return self
-
-    def __isub__(self, fn):
-        if fn in self._handlers:
-            self._handlers.remove(fn)
         return self
 
     def fire(self, *args):
@@ -175,24 +135,14 @@ class _Event:
 
 class _Events:
     def __init__(self):
-        self.shown = _Event()
+        self.shown = _Event()           # first show only
+        # Every show, synchronously inside it. Showing a window restores
+        # DWM's rounding and border, so undoing them must run each time
+        # and before the first frame is presented.
+        self.showing = _Event()
         self.loaded = _Event()
         self.closing = _Event()
         self.moved = _Event()
-        # Not pywebview's, and not `shown` either: this one fires on
-        # every show, where `shown` fires once. Showing a window is what
-        # puts Windows' own attributes back on it - measured here, a
-        # hidden and re-shown Qt window comes back with
-        # DWMWA_WINDOW_CORNER_PREFERENCE returned to DWMWCP_ROUND, and a
-        # rounded window is a window DWM draws a border and a shadow
-        # around. Whatever undoes that has to run again every time (see
-        # _apply_window_shape in main.py), and has to run inside the show
-        # rather than after it, or the first frame of a panel that is
-        # only ever on screen for a second is the frame with the border.
-        self.showing = _Event()
-        # Not pywebview's. It exposes this as the native form's own
-        # Deactivate; a Qt window has no equivalent to reach into, so the
-        # shell raises it instead - see focusOutEvent below.
         self.deactivated = _Event()
 
 
@@ -200,20 +150,16 @@ class _Events:
 # The bridge: the page's own origin answers for the API
 # ---------------------------------------------------------------------
 class _Handler(SimpleHTTPRequestHandler):
-    """Serves web/ and, at /api/<name>, the js_api object behind it."""
+    """Serves web/ and, at /api/<name>, the api object behind it."""
 
-    # HTTP/1.1, so the pages keep one connection each instead of opening a
-    # new one per call. The backdrop asks about twenty times a second per
-    # window, and on HTTP/1.0 every one of those was a fresh TCP connection
-    # *and* a fresh thread in the threading server - which is a lot of
-    # churn to pay for a call that crosses no process boundary.
+    # Keep-alive: the backdrop alone calls ~20 times a second per window.
     protocol_version = "HTTP/1.1"
 
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=_web_dir, **kw)
 
     def log_message(self, *a):
-        pass                      # not a web server anyone is watching
+        pass
 
     def do_POST(self):
         if not self.path.startswith("/api/"):
@@ -231,10 +177,8 @@ class _Handler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_error(400)
             return
-        # Every call gets its own thread, because this is a threading
-        # server - which is what the API already expected, and why
-        # anything it does to a window has to be marshalled onto the GUI
-        # thread (see Window.run_on_ui_thread).
+        # Each call runs on its own server thread; the api marshals window
+        # work onto the GUI thread itself (see Window.run_on_ui_thread).
         try:
             value = fn(*args)
             body = json.dumps({"value": value}, ensure_ascii=False, default=str)
@@ -261,8 +205,7 @@ class _Handler(SimpleHTTPRequestHandler):
 def _start_server(web_dir, api):
     global _server, _server_port, _web_dir
     _web_dir = web_dir
-    # Loopback only, and a port the OS picks: this is a private channel
-    # between the program and its own pages, not a service.
+    # Loopback only, on a port the OS picks.
     _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     _server.daemon_threads = True
     _server.api = api
@@ -275,17 +218,13 @@ def _start_server(web_dir, api):
 # The window
 # ---------------------------------------------------------------------
 class _WebWindow(QMainWindow):
-    """The Qt side. Kept separate from Window so the parts the rest of the
-    program touches stay small and boring."""
+    """The Qt widget behind a Window."""
 
     def __init__(self, window):
         super().__init__()
         self._window = window
-        flags = Qt.FramelessWindowHint | Qt.Tool
-        # Qt.Tool is what keeps these off the taskbar and out of Alt-Tab,
-        # which the old build did by rewriting extended styles after the
-        # fact and hiding and re-showing the window to make them stick.
-        self.setWindowFlags(flags)
+        # Qt.Tool keeps these windows off the taskbar and out of Alt-Tab.
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         if window.transparent:
             self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -293,8 +232,6 @@ class _WebWindow(QMainWindow):
         page = self.view.page()
         if window.transparent:
             page.setBackgroundColor(Qt.transparent)
-        elif window.background_color:
-            page.setBackgroundColor(QColor(window.background_color))
         s = page.settings()
         s.setAttribute(QWebEngineSettings.ShowScrollBars, False)
         s.setAttribute(QWebEngineSettings.FocusOnNavigationEnabled, False)
@@ -305,24 +242,10 @@ class _WebWindow(QMainWindow):
         self._shown_once = False
         self._renderer_failures = 0
         self._renderer_reload_pending = False
-        # The HWND, read once here on the GUI thread and kept.
-        #
-        # Everything around this program addresses windows by handle from
-        # whatever thread the API call arrived on (see Window.hwnd), and
-        # the obvious implementation of that - ask the widget, every time -
-        # is a QWidget touched off the GUI thread, tens of times a second.
-        # QWidget is not thread-safe, winId() least of all: it creates the
-        # native window if there is not one yet, and Qt destroys and
-        # recreates these when the display configuration changes - which is
-        # exactly what waking from sleep does. Reading the handle while the
-        # GUI thread is in the middle of replacing it is a race with the
-        # widget's own internals, and the program was observed wedged
-        # solid a minute after a resume, killed by Windows for not
-        # answering its message queue.
-        #
-        # So the handle is cached on the thread that owns it, and Qt says
-        # when it changes: WinIdChange is delivered to the widget for
-        # exactly that.
+        # The HWND is cached on the GUI thread and refreshed on WinIdChange.
+        # Calling winId() from request threads races Qt recreating native
+        # windows after a display change (e.g. on resume) and has wedged
+        # the GUI thread before.
         self._hwnd = 0
         self._cache_hwnd()
 
@@ -360,8 +283,7 @@ class _WebWindow(QMainWindow):
             log("Page load failed: " + self._window.title)
             return
         self._renderer_failures = 0
-        # Each page loads independently. Another window's ui_ready signal
-        # does not mean this page has installed its JavaScript handlers.
+        # Scripts queued before this page could run them.
         while self._window._pending_scripts:
             self.view.page().runJavaScript(self._window._pending_scripts.popleft())
         self._window.events.loaded.fire()
@@ -369,21 +291,15 @@ class _WebWindow(QMainWindow):
     def showEvent(self, e):
         super().showEvent(e)
         self._cache_hwnd()
-        # Synchronously, before the event loop gets a chance to present
-        # anything: by the time show() has returned, the window is back
-        # to the shape it is supposed to have (see events.showing).
         self._window.events.showing.fire()
         if not self._shown_once:
             self._shown_once = True
-            # After the event loop has settled, so anything the handler
-            # does to the window lands on a window that really is up.
+            # Once the event loop has settled and the window is really up.
             QTimer.singleShot(0, self._window.events.shown.fire)
 
     def moveEvent(self, e):
         super().moveEvent(e)
-        # pywebview's signature, which the handler ignores anyway: it reads
-        # the position back off the window in physical pixels, because
-        # these are logical ones and the two disagree per monitor.
+        # Logical pixels; handlers needing physical ones read the HWND.
         pos = e.pos()
         self._window.events.moved.fire(pos.x(), pos.y())
 
@@ -396,28 +312,20 @@ class _WebWindow(QMainWindow):
 
     def event(self, e):
         t = e.type()
-        # WindowDeactivate is Qt's version of the native Deactivate the
-        # popover and the tray panel dismiss themselves on.
         if t == QEvent.Type.WindowDeactivate:
             self._window.events.deactivated.fire()
         elif t == QEvent.Type.WinIdChange:
-            # Qt has thrown the native window away and made another. Every
-            # handle anyone outside is holding is now a handle to nothing.
             self._cache_hwnd()
         return super().event(e)
 
 
 class Window:
     def __init__(self, title, url=None, js_api=None, width=800, height=600,
-                 x=None, y=None, frameless=False, easy_drag=False,
-                 transparent=False, shadow=True, confirm_close=False,
-                 hidden=False, min_size=(0, 0), background_color=None,
-                 **ignored):
+                 x=None, y=None, transparent=False, hidden=False):
         self.title = title
         self.url = url
         self.js_api = js_api
         self.transparent = transparent
-        self.background_color = background_color
         self.events = _Events()
         self._page_loaded = False
         self._pending_scripts = deque(maxlen=512)
@@ -430,16 +338,12 @@ class Window:
         if url:
             self._native.view.load(QUrl(url))
 
-    # -- what the rest of the program uses ----------------------------
     @property
     def native(self):
         return self._native
 
     def hwnd(self):
-        # The cached one, from any thread (see _WebWindow.__init__). The
-        # marshalled read below is only for the moment before the first
-        # cache, and it goes to the GUI thread like everything else that
-        # touches the widget.
+        # Safe from any thread; see _WebWindow.__init__.
         h = self._native._hwnd
         if h:
             return h
@@ -466,51 +370,16 @@ class Window:
         _invoke(self._native, run)
         return None
 
-    def evaluate_js_result(self, script, timeout=4.0):
-        """evaluate_js, but waiting for what the page returns.
-
-        Qt hands the result to a callback rather than returning it, so this
-        is the callback turned back into a return value. Used by the
-        project's own testing, which needs to ask the page questions -
-        QtWebEngine's devtools endpoint refuses connections often enough
-        here that it cannot be relied on for that.
-        """
-        box = {}
-        done = threading.Event()
-
-        def run():
-            def got(value):
-                box["value"] = value
-                done.set()
-            try:
-                self._native.view.page().runJavaScript(script, 0, got)
-            except Exception:
-                traceback.print_exc()
-                done.set()
-
-        _invoke(self._native, run)
-        done.wait(timeout)
-        return box.get("value")
-
     def run_on_ui_thread(self, fn):
-        """Run fn on the GUI thread and wait for it.
-
-        Everything the API does arrives on a request thread (see
-        _Handler), and everything it does to a window has to happen where
-        the window lives.
-        """
+        """Run fn on the GUI thread and wait for its result."""
         return _invoke(self._native, fn, wait=True)
 
 
 class _Marshal(QObject):
     """Carries a call from a request thread onto the GUI thread.
 
-    It has to be a signal on an object that lives there. QTimer.singleShot
-    from another thread looks like it works and does not: the timer is
-    created on the calling thread, which has no event loop to fire it, so
-    the call is simply dropped - silently, which is how the first version
-    of this ended up with a window that never heard anything the API told
-    it.
+    A queued signal on an object living there; QTimer.singleShot from a
+    thread without an event loop silently never fires.
     """
 
     _call = Signal(object)
@@ -550,18 +419,18 @@ def _invoke(widget, fn, wait=False):
 
     _marshal.post(run)
     if wait:
-        # Long enough that a slow frame is not mistaken for a hang, short
-        # enough that a genuine one does not take the page with it.
+        # A slow frame is not a hang, but a hang must not take the caller
+        # with it.
         done.wait(5.0)
     return box.get("value")
 
 
 # ---------------------------------------------------------------------
-# The pywebview-shaped entry points
+# Entry points
 # ---------------------------------------------------------------------
 def create_window(title, url=None, **kw):
     """`url` may be a path to a file in the web directory; it is served
-    from the page's own origin so that the bridge is same-origin."""
+    from the bridge's origin so API calls are same-origin."""
     if url and not url.startswith("http"):
         path, _, frag = url.partition("#")
         name = os.path.basename(path)
@@ -571,27 +440,22 @@ def create_window(title, url=None, **kw):
     return win
 
 
-def start(func=None, web_dir=None, api=None, **kw):
-    """Runs the GUI. `web_dir` and `api` replace pywebview's implicit
-    wiring of the two - they are what the bridge serves."""
+def start():
+    """Show the windows not created hidden and run the event loop."""
     app = QApplication.instance() or QApplication([])
     for win in _windows:
         if not win._hidden:
             win.native.show()
-    if func:
-        QTimer.singleShot(0, func)
     app.exec()
 
 
 def prepare(web_dir, api, log_dir=None):
     """Create the application and the bridge, before any window exists."""
-    global _app, _marshal, _LOG_PATH
+    global _app, _marshal, _LOG_PATH, _heartbeat
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
         try:
-            # A hard crash - an access violation in Qt or in one of the
-            # ctypes calls around it - leaves nothing behind either. This
-            # writes the Python side of it to the same place.
+            # Hard crashes (access violations) get their Python stacks logged.
             faulthandler.enable(open(_LOG_PATH, "a", encoding="utf-8"))
         except Exception:
             pass
@@ -600,20 +464,13 @@ def prepare(web_dir, api, log_dir=None):
     log("Started pid=%s" % os.getpid())
     _app.screenAdded.connect(lambda screen: log("Display added: " + screen.name()))
     _app.screenRemoved.connect(lambda screen: log("Display removed: " + screen.name()))
-    # Created here, on the GUI thread, which is what gives it the thread
-    # affinity that makes the queued connection land in the right place.
+    # Created on the GUI thread, which is where its queued calls then run.
     _marshal = _Marshal()
     _alive_at[0] = time.monotonic()
-    # The register the watchdog reads. It is a plain timestamp rather than
-    # a round trip, so watching costs the GUI thread one assignment twice
-    # a second and cannot itself queue behind whatever is wrong.
-    global _heartbeat
+    # The heartbeat the watchdog reads: one assignment twice a second.
     _heartbeat = QTimer()
     _heartbeat.timeout.connect(lambda: _alive_at.__setitem__(0, time.monotonic()))
     _heartbeat.start(500)
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
     _start_server(web_dir, api)
     return _server_port
-
-
-_heartbeat = None

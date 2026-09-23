@@ -13,7 +13,8 @@ import config
 def api_type():
     tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
-    names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout'}
+    names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
+             '_eval_all', '_all_windows'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
     scope = {'json': json, 'threading': threading}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
@@ -73,7 +74,7 @@ class Regressions(unittest.TestCase):
     def test_compat_capture_only_composes_windows_below_panel(self):
         tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
         functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                     and n.name in {'_windows_below', '_rects_overlap'}]
+                     and n.name in {'_windows_below', '_rects_overlap', '_window_rect', '_class_name'}]
         user32 = Mock()
         user32.EnumWindows.side_effect = lambda visit, _: [visit(h, 0) for h in [1, 2, 3, 4, 5]]
         user32.IsWindowVisible.return_value = True
@@ -82,7 +83,7 @@ class Regressions(unittest.TestCase):
         dwm = Mock()
         dwm.DwmGetWindowAttribute.return_value = 0
         scope = {'ctypes': ctypes, '_user32': user32, '_dwmapi': dwm,
-                 '_ENUM_WINDOWS_PROC': lambda f: f}
+                 '_ENUM_WINDOWS_PROC': lambda f: f, 'DWMWA_CLOAKED': 14}
         exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), scope)
         self.assertEqual(scope['_windows_below'](2, (0, 0, 10, 10)), (5, 3))
 

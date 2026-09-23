@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('web/app.js', 'utf8');
 const refresh = source.slice(source.indexOf('function refreshBackdrop()'),
-  source.indexOf('// Anything that changes *which* pixels'));
+  source.indexOf('function invalidateBackdrop()'));
 const system = source.slice(source.indexOf('function systemGlass()'),
   source.indexOf('function applySystemGlass()'));
 

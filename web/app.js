@@ -17,11 +17,8 @@ const ICON_PATHS = {
   cover: '<path d="M4 3h16v2H4zM4 6.5h16v2H4zM4 10h16v2H4zM6 13h4v8H6zM14 13h4v8h-4z"/>',
   media: '<path d="M15 3v10.55A4 4 0 1013 17V8h5V3z"/>',
   lock: '<path d="M12 2a4 4 0 00-4 4v3H7a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V10a1 1 0 00-1-1h-1V6a4 4 0 00-4-4zm-2 7V6a2 2 0 114 0v3zm2 4a1.5 1.5 0 011.5 1.5c0 .6-.34 1.1-.83 1.36l.33 2.14h-2l.33-2.14A1.5 1.5 0 0112 13z"/>',
-  // Same body, shackle swung clear of it - a lock that is open should look
-  // open, not just be a different colour.
-  // The keyhole is cut out of the body with evenodd rather than painted
-  // over it in the tile's colour: the tile is glass now, so painting it
-  // back would leave a translucent smudge instead of a hole.
+  // Shackle swung open; the keyhole is cut out with evenodd so the glass
+  // tile shows through it.
   'lock-open': '<path fill-rule="evenodd" d="M6 10h12a1 1 0 011 1v10a1 1 0 01-1 1H6a1 1 0 01-1-1V11a1 1 0 011-1z'
              + 'M12 14a1.5 1.5 0 011.5 1.5c0 .6-.34 1.1-.83 1.36l.33 2.14h-2l.33-2.14A1.5 1.5 0 0112 14z"/>'
              + '<path d="M14 10V6a3.5 3.5 0 117 0v2h-2V6a1.5 1.5 0 10-3 0v4z"/>',
@@ -117,23 +114,14 @@ let entityToTileIds = {};
 let currentDetailTileId = null;
 let allEntities = [];
 
-// This one page runs in three separate OS windows - the grid widget, the
-// detail popover, and Settings - told apart only by the fragment the
-// window was opened with (#popover, #settings, or nothing). pywebview
-// strips the fragment when working out where to serve from, and it never
-// reaches the server, so all three are the same request for index.html.
-//
-// Separate windows rather than views swapped inside one: a window is
-// always a rectangle, so a popover floating beside a grid it doesn't
-// align with left real dead space that the grid still owned, and Settings
-// swapped in resized the grid out from under whatever was on screen.
-// Apart from that each window wants different behaviour - the grid never
-// takes focus, Settings must, and Settings ignores the widget's zoom.
+// This page runs in four OS windows, told apart by the URL fragment:
+// the grid widget (none), #popover, #settings and #flyout (the tray panel).
+// Each window shows one view; the grid never takes focus, Settings must,
+// and Settings ignores the widget's zoom.
 const WINDOW_ROLE = (location.hash || '').replace('#', '') || 'grid';
 const IS_POPOVER_WINDOW = WINDOW_ROLE === 'popover';
 const IS_FLYOUT_WINDOW = WINDOW_ROLE === 'flyout';
-// What Python calls this window. Same page, four windows; every call that
-// has to act on "this one" carries it.
+// What Python calls this window.
 const WINDOW_KIND = WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE;
 const IS_SETTINGS_WINDOW = WINDOW_ROLE === 'settings';
 
@@ -143,20 +131,12 @@ function friendlyName(state) { return state && state.attributes && state.attribu
 /* ============================================================
  * Realtime push handlers (called from Python)
  * ============================================================ */
-window.__haPush = function (entityId, newState) {
-  STATES[entityId] = newState;
-  updateTileByEntity(entityId);
-};
 window.__haPushBatch = function (items) {
   for (const [entityId, newState] of items) STATES[entityId] = newState;
   for (const [entityId] of items) updateTileByEntity(entityId);
 };
-// The websocket can drop and reconnect for all sorts of transient reasons
-// (network blip, HA restarting a component, idle timeout) and usually
-// recovers within its own backoff (a few seconds). Flashing the indicator
-// red for every one of those blips is just noise - only report
-// "disconnected" if it's still down after a few seconds; report
-// "connected" immediately, since that's never something to hide.
+// Short websocket drops usually recover within the client's backoff, so
+// "disconnected" is only shown once it has lasted a few seconds.
 let connDisconnectTimer = null;
 window.__haStatus = function (connected) {
   if (connected) {
@@ -189,39 +169,23 @@ async function boot() {
   applyZoom();
   applyFixedSizeConstraint();
   renderGrid();
-  // This window still runs the full shared bootstrap (same config file,
-  // same tile list) so findTile()/CONFIG/STATES all work normally once
-  // __showPopoverForTile asks it to render a tile's detail - but the grid
-  // section itself is never actually shown here (see IS_POPOVER_WINDOW).
-  // Each window owns one of the views; the others stay hidden for the
-  // life of that window. The markup for all of them is present in every
-  // window because they all load the same page.
   if (IS_FLYOUT_WINDOW) {
-    // Same grid as the desktop widget, in a window that behaves like a
-    // taskbar panel - see the flyout rules in style.css.
     document.documentElement.classList.add('is-flyout-window');
   }
   if (IS_POPOVER_WINDOW) {
     document.getElementById('view-grid').hidden = true;
-    // Lets the card lay itself out in the flow here, so #stage takes the
-    // card's own size and the window follows it - see openDetail.
+    // Lays the card out in the flow so the window takes its size.
     document.documentElement.classList.add('is-popover-window');
   } else if (IS_SETTINGS_WINDOW) {
     openSettingsView();
   }
   updateConnDot();
-  // The views are built and this window knows which one it is; its stage
-  // is now the size it is going to be, and the window may follow it.
   markLayoutReady();
   try { await window.pywebview.api.ui_ready(); } catch (e) { /* ignore */ }
   startBackdropTicker();
 
-  // Fetched separately from - and after - the first render: this is a
-  // real network round-trip, and bootstrap() above deliberately avoids
-  // blocking the initial paint on it (a slow or unreachable HA would
-  // otherwise stall the whole widget for as long as that request takes to
-  // time out). Tiles just show "無法連線" until this resolves or the
-  // websocket's own push arrives, whichever comes first.
+  // After the first render, so an unreachable Home Assistant never delays
+  // it; tiles show as unavailable until this or a websocket push arrives.
   window.pywebview.api.fetch_initial_states().then((states) => {
     if (states && Object.keys(states).length) {
       for (const [entityId, state] of Object.entries(states)) STATES[entityId] = state;
@@ -229,18 +193,14 @@ async function boot() {
     }
   }).catch(() => { /* ignore */ });
 
-  // First run, from the grid window only - the other two are opened on
-  // demand and would otherwise each try to raise Settings as well.
+  // First run: only the grid window raises Settings.
   if (WINDOW_ROLE === 'grid' && !CONFIG.ha_token && (!CONFIG.tiles || !CONFIG.tiles.length)) {
     setTimeout(openSettings, 150);
   }
 }
 
 function applyTheme() {
-  // The tray panel gets its own answer. It is the one surface that is not
-  // lying on the wallpaper: it opens over whatever the user had in front
-  // of them, which is as likely to be a white page as a dark one, and the
-  // theme that suits the desktop often reads badly there.
+  // The tray panel opens over other applications, so it has its own theme.
   const panel = CONFIG.panel_theme || 'follow';
   const theme = (IS_FLYOUT_WINDOW && panel !== 'follow') ? panel : (CONFIG.theme || 'auto');
   document.documentElement.setAttribute('data-theme', theme);
@@ -251,44 +211,25 @@ function applyTheme() {
 /* ============================================================
  * View switching + auto window sizing
  * ============================================================ */
-// Only ever swaps between the two views that share the Settings window;
-// the grid window shows the grid and nothing else.
+// Swaps between the views that share the Settings window.
 function showView(name) {
   for (const id of ['view-grid', 'view-settings', 'view-picker']) {
     document.getElementById(id).hidden = id !== name;
   }
 }
 
-// window.innerWidth/innerHeight turned out to be unreliable to read back
-// right after a programmatic resize on this host (observed to freeze at a
-// stale value indefinitely after the first resize call, on this project's
-// own dev machine), so the native window is never sized by asking
-// pywebview's own resize() to convert CSS pixels to physical ones - that
-// conversion uses Win32's GetDpiForWindow, which on that same machine
-// disagreed with WebView2's real devicePixelRatio (a Windows text-scaling
-// setting layered on top of normal monitor scaling was the reproducible
-// cause), leaving real content clipped at the window edge. Instead, this
-// converts to physical pixels itself using window.devicePixelRatio - a
-// static per-monitor value that doesn't need "measuring after a resize"
-// the way innerWidth/innerHeight do - and sends the OS an exact physical
-// pixel count to set via SetWindowPos, bypassing that translation step
-// entirely (see resize_window in main.py).
+// Every window is sized to its #stage. The page converts the measured CSS
+// size to physical pixels with its own devicePixelRatio, and Python sets
+// exactly that (see resize_window in main.py).
 let resizeRaf = null;
 let resizeSeq = 0;
 let lastRequestedSize = '';
 
-// The tray panel's own scale, deliberately not the widget's. The zoom
-// setting is about how big the widget should look sitting on the desktop,
-// which has nothing to do with how big a panel hanging off the taskbar
-// should be - and the panel wants to be compact, like the ones Windows
-// puts there.
+// The tray panel's own compact scale, independent of the widget's zoom.
 const FLYOUT_ZOOM = 0.5;
 
 function applyZoom() {
-  // Settings is never scaled. The zoom setting is there to size the
-  // *widget* against the desktop; applying it here too meant that turning
-  // the widget down to 50% left the controls for turning it back up half
-  // size as well.
+  // Settings is never scaled, so its controls stay usable at any zoom.
   const z = IS_SETTINGS_WINDOW
     ? 1
     : IS_FLYOUT_WINDOW
@@ -297,9 +238,8 @@ function applyZoom() {
   document.documentElement.style.zoom = String(z);
   currentZoom = z;
 }
-// The page's own scale, kept here because paintBackdrop has to convert CSS
-// lengths that `zoom` does not touch (a computed border-radius) into the
-// canvas's device pixels.
+// Needed to convert computed CSS lengths (which ignore `zoom`) to device
+// pixels in cardGeometry.
 let currentZoom = 1;
 
 function applyFixedSizeConstraint() {
@@ -315,22 +255,12 @@ function applyFixedSizeConstraint() {
   }
 }
 
-// The last resize this window asked Python for, so anything that has to
-// happen at the window's final size can wait for it - see armBackdrop.
+// The last resize requested, so work that needs the final size can wait
+// for it (see __armBackdrop).
 let pendingResize = Promise.resolve();
 
-// The ResizeObserver below is armed the moment this file runs, and fires
-// once straight away - on a #stage that is still the empty shell the
-// markup ships with, 40px square. That measurement went to the OS as the
-// window's new size, where it hit the minimum and left the window 80x60
-// for a tenth of a second: the whole widget squeezed into a stamp, and
-// the desktop capture taken while it was there stretched back out over
-// the real window when it grew again. (Whether it happened at all was a
-// race between the observer's first callback and boot()'s first render,
-// which is why it was every other launch rather than every one.)
-//
-// So: measurements only count once there is something to measure. boot()
-// says when.
+// The ResizeObserver fires immediately on the still-empty #stage; sizes
+// only count once boot() has rendered this window's view.
 let layoutReady = false;
 
 function markLayoutReady() {
@@ -346,8 +276,6 @@ function syncWindowSize() {
     if (!(window.pywebview && window.pywebview.api)) return;
     const dpr = window.devicePixelRatio || 1;
     const stage = document.getElementById('stage');
-    // Measure the rendered stage for every role, including CSS zoom.
-    // Fixed dimensions are applied to the desktop grid in CSS only.
     const rect = stage.getBoundingClientRect();
     const cssW = rect.width, cssH = rect.height;
     resizeSeq += 1;
@@ -365,8 +293,7 @@ function syncWindowSize() {
     pendingResize = Promise.resolve(done).catch(() => {
       if (lastRequestedSize === sizeKey) lastRequestedSize = '';
     });
-    // The backdrop is captured at the window's size, so it is wrong the
-    // moment the window changes size - re-take it once the resize lands.
+    // The backdrop is captured at the window's size; re-take it.
     Promise.resolve(done).then(() => refreshBackdropSoon()).catch(() => {});
   });
 }
@@ -375,67 +302,31 @@ new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 /* ============================================================
  * Frosted backdrop
  * ============================================================ */
-// The window cannot be translucent (see the note in main.py), so the
-// frosted look is built the other way round: Python hands over a picture
-// of the desktop from directly behind this window, the page paints it
-// full-bleed, and .card-bg blurs it with backdrop-filter. Outside the
-// card it stays unblurred, which is what makes the rounded corners read
-// as a cutout rather than as a shape drawn on top of something.
+// Python captures the desktop behind this window and returns a blurred copy
+// (plus, in liquid mode, the sharp pixels for the lens). The page paints it
+// into #backdrop-glass, clipped to the card. Outside the card the window is
+// transparent, so the rounded corners show the live desktop.
 //
-// It has to be re-taken whenever the window moves or resizes, and on a
-// slow tick as well, because an animated wallpaper keeps changing under a
-// window that has not moved at all.
-// This runs as fast as it can while the picture keeps changing - enough
-// to follow an animated wallpaper - and backs off hard once it stops.
-//
-// The rate is set from what a frame actually costs rather than fixed,
-// because "as fast as possible" on a background widget is the wrong
-// answer: BACKDROP_DUTY is how much of one core the capture is allowed,
-// so a frame that takes 13ms is followed by ~100ms of quiet, and a slower
-// machine thins itself out instead of pinning a core. A blurred backdrop
-// hides a low frame rate well, so this is a cheap trade.
-const BACKDROP_DUTY = 4;              // wait this many times the capture cost
-// ...but never busier than the rate the user asked for. Theirs to set,
-// because the right answer depends on what their wallpaper is doing: a
-// still one needs almost nothing, Wallpaper Engine at 60fps will take
-// whatever it is given.
+// Sampling is chained, not on an interval, and paced from what a capture
+// costs: BACKDROP_DUTY is how many times that cost to wait before the next
+// one, so slow machines thin the rate out instead of pinning a core. The
+// user's sample rate is a ceiling on top of that.
+const BACKDROP_DUTY = 4;
 const SAMPLE_FPS_MIN = 2;
 const SAMPLE_FPS_MAX = 30;
-// ...except in the tray panel while it is open, where none of the above
-// applies. Both the duty and the user's sample rate are answers to the
-// question "how fast does the wallpaper behind the widget move", and the
-// panel is not over a wallpaper - it is over whatever the user was just
-// looking at, which is as likely as not a page being scrolled. At the
-// widget's settings (16/s, and a wait of four times the capture cost on
-// top) the glass under the panel was measured redrawing 8 times a second
-// against a screen doing 180: not frozen, just always a little behind
-// what it is supposed to be a picture of.
-//
-// Twice the capture cost, with a floor of one 60Hz frame, measures ~50
-// looks a second here - one per frame QtWebEngine actually presents - and
-// costs about a third of a core on top of what the program burns at rest.
-// That is a lot to spend at rest and nothing to spend for the second or
-// two this panel is ever open.
+// The open tray panel sits over other applications (often a scrolling
+// page), so it samples faster and never backs off.
 const PANEL_DUTY = 2;
 const PANEL_FLOOR_MS = 16;
 
 function backdropFloorMs() {
   const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
     Number(CONFIG.sample_fps) || 16));
-  // Note that being faded out is not a reason to slow this down. Less of
-  // the widget is visible then, but the glass showing through it is more
-  // of what you see and not less, and a glass that lags the wallpaper
-  // moving behind it is exactly when the card stops looking like part of
-  // the desktop and starts looking like a stale picture pasted over it.
+  // Not slowed while dimmed: the glass is most of what remains visible.
   return Math.round(1000 / fps);
 }
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
-// How many identical frames it takes to decide the desktop has stopped
-// moving. Four rather than eight: a still wallpaper - Wallpaper Engine
-// paused, or a plain picture - is the common case, and eight frames at
-// the top rate is half a second of work to learn nothing. Anything that
-// starts moving again is picked up on the next look either way, because
-// invalidateBackdrop resets this the moment a frame differs.
+// Identical frames in a row before the desktop counts as still.
 const BACKDROP_STILL_BEFORE_IDLE = 4;
 let backdropPending = false;
 let backdropTimer = null;
@@ -443,41 +334,24 @@ let backdropRaf = null;
 let backdropHash = null;
 let backdropGeneration = 0;
 let backdropStill = 0;
-// Set from Python's answer when there is nothing worth capturing (window
-// hidden, or completely covered); it replaces the pacing below for as
-// long as that lasts - see refreshBackdrop.
+// Set when Python skips a capture (window hidden or covered); replaces
+// the normal pacing while it lasts.
 let backdropSkipMs = 0;
-// Where the window is being moved to, while it is being dragged. The
-// capture is taken there rather than where the window currently is - see
-// get_desktop_backdrop.
+// Where a dragged window is going, so the capture is taken there.
 let backdropAt = null;
 let backdropFrameMs = 60;
 
-// The interval is derived from what a capture costs, so a single slow
-// frame must not be allowed to set the pace: capture time spikes whenever
-// this window happens to be repainting at the same moment, and taking the
-// last frame at face value let those spikes roughly halve the frame rate
-// and leave it there. Track the floor instead - drop to a cheaper reading
-// immediately, drift up to an expensive one slowly.
+// Tracks the cheap end of capture cost: occasional spikes (e.g. while the
+// page repaints) must not set the pace. Drops immediately, rises slowly.
 function noteFrameCost(ms) {
   if (!(ms > 0)) return;
   backdropFrameMs = ms < backdropFrameMs ? ms : backdropFrameMs * 0.9 + ms * 0.1;
 }
 
-// One canvas holds everything behind the page's own content: the desktop
-// as captured, and the blurred copy of it inside each card. Drawing both
-// in one go is atomic - nothing is ever half-updated on screen - which is
-// what the old pair of cross-fading layers existed to fake.
-let backdropCtx = null;
-let backdropCtxAlpha = null;
 let glassCtx = null;
 
-// True when DWM is drawing the frosted glass for this window instead (see
-// _set_system_glass in main.py). Then the blurred copy is not painted at
-// all - the real thing is already behind the page, live and free - and
-// this canvas is reduced to the four sharp corners the system backdrop
-// knows nothing about, over a surface that is otherwise left clear so the
-// glass can show through it.
+// True when DWM draws the glass for this window (see _set_system_glass in
+// main.py); the page then paints no backdrop at all.
 function systemGlass() {
   return CONFIG.glass_style !== 'liquid'
     && CONFIG.glass_mode === 'system' && CONFIG.system_glass_ok === true
@@ -490,49 +364,18 @@ function applySystemGlass() {
   document.documentElement.classList.toggle('is-system-glass', systemGlass());
 }
 
-// A canvas cannot be told to grow or drop its alpha channel after its
-// context exists, and which one it needs depends on the mode: opaque
-// while the page paints the whole backdrop itself, transparent while DWM
-// paints most of it. Switching modes replaces the element.
-function backdropContext(wantAlpha) {
-  let cv = document.getElementById('backdrop');
-  if (!cv) return null;
-  if (backdropCtx && backdropCtxAlpha === wantAlpha) return backdropCtx;
-  if (backdropCtx) {
-    const fresh = document.createElement('canvas');
-    fresh.id = 'backdrop';
-    cv.replaceWith(fresh);
-    cv = fresh;
-  }
-  backdropCtxAlpha = wantAlpha;
-  backdropCtx = cv.getContext('2d', { alpha: wantAlpha });
-  return backdropCtx;
-}
-
-// Where the visible card sits, in the canvas's device pixels, plus its
-// corner radius. Everything the backdrop does is expressed against this:
-// the blurred copy is clipped to it, and the sharp copy is only needed
-// where it does not reach - the four wedges outside its rounded corners.
-// `fills` says the card is the window, give or take the pixel or two by
-// which the two roundings disagree (the window is sized from the card's
-// measured box, and WebView2's viewport does not always land on the same
-// device pixel). When it does, the box is snapped out to the canvas so
-// that the clip's rounded corners sit exactly where the sharp corner
-// wedges are drawn. When it does not - fixed-size mode can leave a real
-// margin - the whole frame has to come back sharp.
+// The visible card in the glass canvas's device pixels, plus its corner
+// radius. A card within CARD_SNAP_PX of the canvas edges is snapped to
+// them, absorbing rounding differences between the card and the window.
 const CARD_SNAP_PX = 4;
 
-// The card's resting geometry, remembered from the last moment nothing
-// was animating. The frosted fill is painted into a canvas that carries
-// the *same* entrance animation as the card, so it has to be painted
-// where the card rests: measure the card mid-animation and its transform
-// is applied twice - once in the numbers the clip is cut from, once by
-// the canvas's own animation - which is the picture visibly warping until
-// the animation settles.
+// The card's geometry from the last moment nothing was animating. The
+// glass canvas animates with the card, so measuring mid-animation would
+// apply the transform twice.
 let restingCard = null;
 
 function cardGeometry() {
-  const cv = document.getElementById('backdrop');
+  const cv = document.getElementById('backdrop-glass');
   if (!cv) return null;
   const dpr = window.devicePixelRatio || 1;
   const view = document.getElementById('view-grid');
@@ -560,10 +403,8 @@ function cardGeometry() {
   return null;
 }
 
-// What the backdrop is drawn over, in CSS pixels. The glass canvas is
-// inset to the window's edges, so its box is the window's - except in
-// system-glass mode, where it is not in the document at all; the visual
-// viewport is the same rectangle and is always there.
+// The window's box in CSS pixels: the glass canvas covers it, except in
+// system-glass mode where the canvas is hidden and the viewport is used.
 function viewportBox() {
   const g = document.getElementById('backdrop-glass');
   if (g) {
@@ -572,14 +413,6 @@ function viewportBox() {
   }
   return { width: window.innerWidth, height: window.innerHeight };
 }
-
-// How often the frosted copy is refreshed, against every frame for the
-// sharp corners. The corners sit against the live desktop along the
-// window's edge, so anything stale there shows as a seam; the frosted
-// copy sits under the card, where a blur of a blur of a frame ago is
-// indistinguishable from a blur of this one.
-const BLUR_EVERY_MS = 60;
-let lastBlurAt = 0;
 
 // Port of KMPLiquidGlass's Skia Lens.kt sampling model: signed distance to
 // a rounded rectangle, its outward normal, and the quarter-circle falloff.
@@ -695,7 +528,11 @@ function initLiquidGpu() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   const upload = document.createElement('canvas');
-  liquidGpu = { canvas, gl, program, texture, upload };
+  const uniforms = Object.fromEntries([
+    'backdrop', 'canvasSize', 'cardRect', 'cornerRadius',
+    'refractionHeight', 'refractionAmount', 'lensSoftness', 'lensOpacity',
+  ].map(name => [name, gl.getUniformLocation(program, name)]));
+  liquidGpu = { canvas, gl, program, texture, upload, uniforms };
   canvas.addEventListener('webglcontextlost', () => {
     liquidGpu = null;
     liquidGpuUnavailable = true;
@@ -706,7 +543,7 @@ function initLiquidGpu() {
 function paintLiquidLensGpu(ctx, image, width, height, card) {
   const gpu = initLiquidGpu();
   if (!gpu) return false;
-  const { canvas, gl, program, texture, upload } = gpu;
+  const { canvas, gl, program, texture, upload, uniforms } = gpu;
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
@@ -715,34 +552,65 @@ function paintLiquidLensGpu(ctx, image, width, height, card) {
   if (upload.width !== width || upload.height !== height) {
     upload.width = width;
     upload.height = height;
-    gpu.lastImage = null;
+    gpu.textureAllocated = false;
   }
   gl.useProgram(program);
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  if (gpu.lastImage !== image) {
-    upload.getContext('2d').drawImage(image, 0, 0, width, height);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  upload.getContext('2d').drawImage(image, 0, 0, width, height);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  if (gpu.textureAllocated) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, upload);
+  } else {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upload);
-    gpu.lastImage = image;
+    gpu.textureAllocated = true;
   }
-  gl.uniform1i(gl.getUniformLocation(program, 'backdrop'), 0);
-  gl.uniform2f(gl.getUniformLocation(program, 'canvasSize'), width, height);
-  gl.uniform4f(gl.getUniformLocation(program, 'cardRect'), card.x, card.y, card.w, card.h);
-  gl.uniform1f(gl.getUniformLocation(program, 'cornerRadius'), card.radius);
+  gl.uniform1i(uniforms.backdrop, 0);
+  gl.uniform2f(uniforms.canvasSize, width, height);
+  gl.uniform4f(uniforms.cardRect, card.x, card.y, card.w, card.h);
+  gl.uniform1f(uniforms.cornerRadius, card.radius);
   const refractionHeight = Math.min(46, card.radius * 1.05);
-  gl.uniform1f(gl.getUniformLocation(program, 'refractionHeight'), refractionHeight);
-  gl.uniform1f(gl.getUniformLocation(program, 'refractionAmount'),
+  gl.uniform1f(uniforms.refractionHeight, refractionHeight);
+  gl.uniform1f(uniforms.refractionAmount,
     Math.min(58, refractionHeight * 1.45));
-  gl.uniform1f(gl.getUniformLocation(program, 'lensSoftness'), 1.2);
-  gl.uniform1f(gl.getUniformLocation(program, 'lensOpacity'), 0.78);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.uniform1f(uniforms.lensSoftness, 1.2);
+  gl.uniform1f(uniforms.lensOpacity, 0.78);
+  // The shader returns transparent beyond the refracted rim. Clear the old
+  // frame, then shade only strips that can contain that rim. The extra
+  // radius covers the rounded corners, including their diagonal samples.
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
   const x = Math.max(0, Math.floor(card.x));
   const y = Math.max(0, Math.floor(card.y));
   const right = Math.min(width, Math.ceil(card.x + card.w));
   const bottom = Math.min(height, Math.ceil(card.y + card.h));
-  if (right > x && bottom > y)
+  if (right > x && bottom > y) {
+    const band = Math.ceil(Math.min(card.radius, card.w / 2, card.h / 2)
+      + refractionHeight + 2);
+    const innerTop = Math.min(bottom, y + band);
+    const innerBottom = Math.max(innerTop, bottom - band);
+    const innerLeft = Math.min(right, x + band);
+    const innerRight = Math.max(innerLeft, right - band);
+    if (innerLeft >= innerRight || innerTop >= innerBottom) {
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else {
+      const strips = [
+        [x, y, right - x, innerTop - y],
+        [x, innerBottom, right - x, bottom - innerBottom],
+        [x, innerTop, innerLeft - x, innerBottom - innerTop],
+        [innerRight, innerTop, right - innerRight, innerBottom - innerTop],
+      ];
+      gl.enable(gl.SCISSOR_TEST);
+      for (const [sx, sy, sw, sh] of strips) {
+        if (sw <= 0 || sh <= 0) continue;
+        gl.scissor(sx, height - sy - sh, sw, sh);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+      gl.disable(gl.SCISSOR_TEST);
+    }
     ctx.drawImage(canvas, x, y, right - x, bottom - y,
       x, y, right - x, bottom - y);
+  }
   return true;
 }
 
@@ -860,89 +728,36 @@ function traceSuperellipse(ctx, shape) {
   ctx.closePath();
 }
 
-function clipRoundedGlass(ctx, shape) {
-  traceSuperellipse(ctx, shape);
-  ctx.clip();
-}
-
-function paintBackdrop(sharp, blurred, lens, w, h, corner) {
-  const sys = systemGlass();
-  const ctx = backdropContext(sys);
-  const cv = document.getElementById('backdrop');
+function paintBackdrop(blurred, lens, w, h) {
   const glass = document.getElementById('backdrop-glass');
-  if (!cv || !ctx) return;
-  if (cv.width !== w || cv.height !== h) {
-    // Kept in step with the capture even though nothing is drawn on it:
-    // cardGeometry measures against this canvas to decide whether the
-    // card covers the window.
-    cv.width = w;
-    cv.height = h;
-  } else if (sys) {
-    ctx.clearRect(0, 0, w, h);
-  }
-  if (!sharp) {
-    // The window is transparent where the page paints nothing, which is
-    // exactly the four corners.
-  } else if (corner) {
-    // The sharp copy arrived as the four corner wedges packed into one
-    // square (see get_desktop_backdrop); put each back where it came
-    // from. Everything between them is about to be covered by the card.
-    const c = corner;
-    ctx.drawImage(sharp, 0, 0, c, c, 0, 0, c, c);
-    ctx.drawImage(sharp, c, 0, c, c, w - c, 0, c, c);
-    ctx.drawImage(sharp, 0, c, c, c, 0, h - c, c, c);
-    ctx.drawImage(sharp, c, c, c, c, w - c, h - c, c, c);
-  } else {
-    ctx.drawImage(sharp, 0, 0, w, h);
-  }
-  if (sys) {
-    // Everything the card covers belongs to DWM, so cut the card's own
-    // rounded rectangle back out of what was just drawn. What is left is
-    // exactly the wedges outside its corners - the one part of the window
-    // the system backdrop gets wrong, because it fills the rectangle and
-    // has never heard of the card.
-    const card = cardGeometry();
-    if (card) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'destination-out';
-      traceSuperellipse(ctx, card);
-      ctx.fill();
-      ctx.restore();
-    }
-    if (glass && glassCtx) glassCtx.clearRect(0, 0, glass.width, glass.height);
+  if (!glass) return;
+  if (!glassCtx) glassCtx = glass.getContext('2d');
+  if (systemGlass()) {
+    glassCtx.clearRect(0, 0, glass.width, glass.height);
     return;
   }
-  if (!glass) return;
-  // No frosted copy with this frame: this was one of the frames that only
-  // wanted the corners. What is already on the glass canvas is a few tens
-  // of milliseconds old and stays exactly where it is - clearing it would
-  // make the card flicker between frosted and bare.
+  // A frame without a picture leaves the previous one in place rather than
+  // flickering the card bare.
   if (!blurred && !lens) return;
-  // The card's frosted fill, on its own layer above that: it belongs to
-  // the card and has to be able to come and go with it. Clipped to the
-  // card's own rounded rectangle here rather than set as its CSS
-  // background, so the frame never becomes an image resource of its own.
-  if (!glassCtx) glassCtx = glass.getContext('2d');
-  const gctx = glassCtx;
   if (glass.width !== w || glass.height !== h) {
     glass.width = w;
     glass.height = h;
   } else {
-    gctx.clearRect(0, 0, w, h);
+    glassCtx.clearRect(0, 0, w, h);
   }
   const card = cardGeometry();
   if (!card) return;
-  gctx.save();
-  clipRoundedGlass(gctx, card);
-  gctx.drawImage(blurred || lens, 0, 0, w, h);
+  glassCtx.save();
+  traceSuperellipse(glassCtx, card);
+  glassCtx.clip();
+  glassCtx.drawImage(blurred || lens, 0, 0, w, h);
   if (CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW && lens)
-    paintLiquidLens(gctx, lens, w, h, card);
-  gctx.restore();
+    paintLiquidLens(glassCtx, lens, w, h, card);
+  glassCtx.restore();
 }
 
-// Decoded off the main thread, drawn, then closed - the bitmap's lifetime
-// is exactly this frame. Going through an <img> and a CSS background left
-// every frame in Chromium's decoded-image cache instead.
+// Decoded off the main thread and closed after drawing, so frames never
+// accumulate in Chromium's decoded-image cache.
 function decodeShot(url) {
   return fetch(url).then((r) => r.blob()).then(createImageBitmap);
 }
@@ -952,40 +767,14 @@ function refreshBackdrop() {
   backdropPending = true;
   const generation = backdropGeneration;
   const startedAt = performance.now();
-  // Ask for exactly the number of device pixels this will be drawn at, so
-  // the image lands 1:1 and is never resampled (see get_desktop_backdrop).
-  // Measured off the glass canvas, not off #backdrop: that one is
-  // display:none here (nothing is drawn on it any more - see style.css),
-  // and a hidden element's box is zero, which quietly turned every
-  // request into "whatever size you think the window is". Python's answer
-  // to that is its own GetWindowRect, which is right almost always and
-  // wrong in exactly the moment that matters - while a resize is in
-  // flight.
+  // Ask for exactly the device pixels this will be drawn at, so the image
+  // lands 1:1 (see get_desktop_backdrop).
   const box = viewportBox();
   const dpr = window.devicePixelRatio || 1;
-  // Only the wedges outside the card's corners are ever seen sharp, so
-  // that is all that has to come back at full size - as long as the card
-  // really does cover the window, and goes on covering it. The tray panel
-  // is the exception: its card scales out of the corner and back into it,
-  // and everything it uncovers on the way is canvas nobody has painted
-  // since the last full frame. That stale middle showing through the
-  // animation is what the panel looked like it was warping through.
-  // Nothing sharp is wanted from Python at all any more, and this is the
-  // whole point of the Qt window: outside the card's rounded corners the
-  // window is genuinely transparent, so those corners *are* the desktop.
-  // They used to be a copy of it, painted from a capture a frame or two
-  // old, sitting against the live desktop just beyond the window's edge -
-  // which is what tore whenever anything behind it moved. There is
-  // nothing to tear now, because there is nothing painted there.
-  const card = cardGeometry();
-  const corner = 0;
-  // The frosted copy is now the only thing a frame carries, so every
-  // frame carries it.
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
-                          Math.round(box.width * dpr), Math.round(box.height * dpr), corner,
-                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null,
-                          true, false)
+                          Math.round(box.width * dpr), Math.round(box.height * dpr),
+                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null)
     .then((shot) => {
       if (generation !== backdropGeneration) { backdropPending = false; return; }
       if (shot && typeof shot.system_glass === 'boolean') {
@@ -997,30 +786,21 @@ function refreshBackdrop() {
           backdropHash = null;
         }
       }
-      // shot.ms is the capture's own cost; the rest of the round trip is
-      // the bridge waiting, and pacing off that throttled this to a
-      // quarter of the rate the CPU budget actually allows.
-      // Python declined to capture: this window is hidden, or every
-      // pixel of it is behind something else. Nothing to draw, and no
-      // frame cost to pace from - just wait as long as it asked.
+      // Python skipped the capture (hidden or covered window).
       if (shot && shot.skip) {
         backdropSkipMs = shot.retry_ms || 500;
         backdropPending = false;
         return;
       }
       backdropSkipMs = 0;
+      // Paced from the capture's own cost, not the bridge round trip.
       noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
       if (!shot) { backdropPending = false; return; }
       if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
       backdropStill = 0;
-      if (!shot.url && !shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
-      // A capture is of a window of a particular size, and by the time it
-      // has been encoded, carried over the bridge and decoded, the window
-      // may not be that size any more - the page resizes it to fit its own
-      // content, and the first fit lands right about here. Painting it
-      // anyway stretches a picture of the old window across the new one,
-      // which is the backdrop arriving at visibly the wrong scale. Drop it
-      // and ask again; the next one is 20ms away.
+      if (!shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
+      // The window may have been resized while this was in flight; a frame
+      // of the old size would be stretched, so drop it and ask again.
       const live = viewportBox();
       const liveDpr = window.devicePixelRatio || 1;
       const liveW = Math.round(live.width * liveDpr);
@@ -1032,11 +812,10 @@ function refreshBackdrop() {
         return;
       }
       return Promise.allSettled([
-        shot.url ? decodeShot(shot.url) : null,
         shot.blur_url ? decodeShot(shot.blur_url) : null,
         shot.lens_url ? decodeShot(shot.lens_url) : null,
       ]).then((results) => {
-        const [sharp, blurred, lens] = results.map(result =>
+        const [blurred, lens] = results.map(result =>
           result.status === 'fulfilled' ? result.value : null);
         try {
           const failure = results.find(result => result.status === 'rejected');
@@ -1049,10 +828,9 @@ function refreshBackdrop() {
             backdropHash = null;
             return;
           }
-          paintBackdrop(sharp, blurred, lens, shot.w, shot.h, shot.corner || 0);
+          paintBackdrop(blurred, lens, shot.w, shot.h);
           backdropHash = shot.hash;
         } finally {
-          if (sharp) sharp.close();
           if (blurred) blurred.close();
           if (lens) lens.close();
           backdropPending = false;
@@ -1062,27 +840,22 @@ function refreshBackdrop() {
     .catch(() => { backdropHash = null; backdropPending = false; });
 }
 
-// Anything that changes *which* pixels are behind the window invalidates
-// the comparison as well as the image.
+// Anything that changes which pixels are behind the window invalidates the
+// frame comparison as well as the image.
 function invalidateBackdrop() {
   backdropGeneration += 1;
   backdropHash = null;
   backdropStill = 0;
 }
 
-// Called from Python after the machine has come back from a suspend (see
-// on_resume in main.py). Everything this page is holding - the frame on
-// the glass, the hash it compares new ones against, the pacing it learned
-// from how long a capture used to take - is about a screen that has since
-// been switched off and on again.
+// Called from Python after a suspend (see on_resume in main.py).
 window.__invalidateBackdrop = function () {
   invalidateBackdrop();
   backdropFrameMs = 60;
   restartBackdropTicker();
 };
 
-// Coalesced: a resize or a drag produces a burst of these, and each one is
-// a full desktop render on the Python side.
+// Coalesced: resizes come in bursts.
 let backdropSoonTimer = null;
 function refreshBackdropSoon(delay) {
   invalidateBackdrop();
@@ -1090,33 +863,24 @@ function refreshBackdropSoon(delay) {
   backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 60 : delay);
 }
 
-// The pace is decided at the end of each frame, so a window that has
-// spent the last while skipping - which every hidden one does - has
-// already booked its next look for a second away. Coming back on screen
-// has to tear that up, or the backdrop sits frozen for the rest of that
-// second while the card animates in over it.
-function restartBackdropTicker() {
+function stopBackdropTicker() {
   clearTimeout(backdropTimer);
   if (backdropRaf) cancelAnimationFrame(backdropRaf);
   backdropTimer = null;
   backdropRaf = null;
+}
+
+// A hidden window has booked its next look up to a second away; coming on
+// screen must not wait for it.
+function restartBackdropTicker() {
+  stopBackdropTicker();
   backdropSkipMs = 0;
   backdropStill = 0;
   startBackdropTicker();
 }
 
-// Reading the screen once per compositor frame was for the panel's sharp
-// corners: they sat against the live desktop along the window's edge, so
-// anything stale there showed as a seam, and only the screen's own rate
-// kept up. The corners are not painted at all now - the window is
-// transparent there and they *are* the desktop - and what is left to
-// capture is the frosted copy under the card, which is blurred past the
-// point where a frame or two of age can be seen.
-//
-// So it goes back to the ordinary pacing, and that is not only cheaper:
-// the capture and Qt's own compositing share a process here, and a look
-// that costs 12ms of it, sixty times a second, is 12ms the panel's
-// animation does not get.
+// Liquid glass refracts sharp pixels, where lag is visible, so it samples
+// once per display frame; other styles use the paced timer.
 function backdropTicksOnVsync() {
   return CONFIG.glass_style === 'liquid' &&
     (!IS_POPOVER_WINDOW || !!currentDetailTileId) &&
@@ -1125,11 +889,6 @@ function backdropTicksOnVsync() {
 
 function startBackdropTicker() {
   if (backdropTimer || backdropRaf) return;
-  // Chained rather than setInterval: each frame waits for the previous one
-  // to come back, so a slow machine thins the rate out instead of queueing
-  // work it cannot keep up with. That is true of the vsync path too - a
-  // frame that costs more than the screen's interval simply lands on the
-  // frame after next.
   const again = () => {
     const idle = document.hidden || flyoutAnimating;
     (idle ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
@@ -1143,13 +902,8 @@ function startBackdropTicker() {
       });
       return;
     }
-    // Backing off for three seconds is right for the widget: it sits on a
-    // wallpaper, and a wallpaper that has stopped moving will still be
-    // stopped in three seconds. It is wrong for the panel, which sits
-    // over other people's windows - four identical frames there means a
-    // browser that happens to be still, and the moment it scrolls the
-    // glass is frozen until the backoff expires. That wait is what the
-    // panel getting stuck was. An open panel does not back off at all.
+    // The widget backs off over still wallpaper; the open panel never
+    // does, since the window behind it may start scrolling at any time.
     const openPanel = IS_FLYOUT_WINDOW && flyoutOpen;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
       || (openPanel
@@ -1166,21 +920,13 @@ function startBackdropTicker() {
 /* ============================================================
  * Dragging the widget around the desktop
  * ============================================================ */
-// Done here rather than through pywebview's own drag-region support,
-// which moves the window on the first mousemove after any mousedown on
-// the region - no threshold at all. The detail popover is dismissed by
-// clicking away from it, and that click lands on the grid's background,
-// so dismissing it dragged the widget out from under the pointer. Its
-// move() also takes logical pixels and rescales them, which on a display
-// whose devicePixelRatio disagrees with the OS scale (this project's dev
-// machine, via Windows text scaling) made the window jump instead of
-// follow. Screen deltas converted with the page's own dpr, sent as
-// absolute physical pixels, track the pointer exactly.
+// Dragging by .drag-region, with a threshold so a plain click (e.g. one that
+// dismisses the detail popover) never moves the window. Positions are sent
+// as absolute physical pixels.
 const DRAG_THRESHOLD_PX = 5;
 
 function installWindowDrag() {
-  // The popover is placed by its tile and the flyout by the tray icon;
-  // neither is ever dragged.
+  // The popover and the tray panel are placed by Python.
   if (IS_POPOVER_WINDOW || IS_FLYOUT_WINDOW) return;
   const kind = IS_SETTINGS_WINDOW ? 'settings' : 'main';
   let start = null;
@@ -1189,12 +935,10 @@ function installWindowDrag() {
     if (e.button !== 0) return;
     if (CONFIG.lock_position && !IS_SETTINGS_WINDOW) return;
     if (!e.target.closest('.drag-region')) return;
-    // Controls sitting inside a drag region (the header's close/back
-    // buttons) are for clicking, not for dragging the window by.
+    // Controls inside a drag region are for clicking.
     if (e.target.closest('button, input, select, textarea, a, [data-action]')) return;
     start = { sx: e.screenX, sy: e.screenY, origin: null, moved: false };
-    // Fetched once per drag, not per move: it's a round trip into Python,
-    // and the window's origin only changes because *we* move it.
+    // Once per drag: the origin only changes because we move it.
     window.pywebview.api.get_window_pos(kind)
       .then((pos) => { if (start) start.origin = pos; })
       .catch(() => { start = null; });
@@ -1211,21 +955,15 @@ function installWindowDrag() {
     if (!start.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
     start.moved = true;
     dragTo = { x: Math.round(start.origin.x + dx), y: Math.round(start.origin.y + dy) };
-    // One move a frame, however fast the mouse reports. Every one of
-    // these is a round trip into Python on a thread of its own, and a
-    // mouse that reports at 1000Hz was queueing sixty of them for every
-    // frame the window could actually be drawn at.
+    // At most one move per frame, however fast the mouse reports.
     if (dragRaf) return;
     dragRaf = requestAnimationFrame(() => {
       dragRaf = 0;
       const to = dragTo;
       if (!to) return;
       window.pywebview.api.move_window(to.x, to.y, kind).catch(() => {});
-      // Different part of the desktop behind it now. Not
-      // refreshBackdropSoon: that is a debounce, and a drag never stops
-      // moving long enough for it to fire, so the glass sat still for
-      // the whole drag. Let the sampler take it at its own rate, aimed
-      // at where the window is going.
+      // Not refreshBackdropSoon: that debounce would never fire mid-drag.
+      // The sampler captures where the window is going instead.
       backdropAt = to;
       invalidateBackdrop();
     });
@@ -1263,9 +1001,7 @@ function iconColorFor(domain, state, on) {
     case 'fan': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'cover': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'media_player': return on ? 'var(--accent-green)' : 'var(--text-off-1)';
-    // Unlocked is a normal state for a door someone is using, not a
-    // fault, so it is a soft green rather than the red it used to be -
-    // which read as an alert every time anyone came home.
+    // Unlocked is normal, not an alert: soft green.
     case 'lock': return state && state.state === 'locked' ? 'var(--text-off-1)' : 'var(--accent-green-soft)';
     case 'vacuum': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'scene': case 'script': case 'automation': return 'var(--accent-blue)';
@@ -1354,9 +1090,7 @@ function tileEl(tile) {
   room.textContent = tile.room || friendlyName(state) || tile.entity;
   div.appendChild(room);
 
-  // A read-only accessory is a readout: the number is what the tile is
-  // for, and the name below it only says which one. It gets no second
-  // line, because that line would just repeat the number as raw state.
+  // A read-only tile with a reading needs no second line repeating it.
   if (!meta.readonly || !valueText) {
     const label = document.createElement('div');
     label.className = 'tile-label';
@@ -1392,9 +1126,8 @@ function addClimateMiniButtons(div, tile) {
 function attachTileInteraction(el, tile) {
   const meta = domainMeta(tile.domain);
 
-  // Read-only accessories have nothing to toggle, but they still need the
-  // detail card: that is where a tile's name and icon are edited, and
-  // without this a sensor could only ever be removed and re-added.
+  // Read-only accessories still open the detail card, where the name and
+  // icon are edited.
   if (meta.readonly) {
     el.addEventListener('contextmenu', (e) => { e.preventDefault(); requestPopover(tile); });
     let holdTimer = null;
@@ -1409,10 +1142,6 @@ function attachTileInteraction(el, tile) {
   }
 
   if (!meta.expand) {
-    // 'click' only ever fires for the primary (left) button, so right-click
-    // naturally can't trigger this - it opens the detail card instead, the
-    // same as on an expandable tile, since that is the only way to rename
-    // this accessory.
     el.addEventListener('click', (e) => {
       if (e.target.closest('.mini-btn')) return;
       quickAction(tile);
@@ -1421,9 +1150,8 @@ function attachTileInteraction(el, tile) {
     return;
   }
 
-  // Pointer events fire for *any* mouse button, unlike 'click', so the
-  // tap/long-press machinery below must ignore right-click itself - it
-  // gets its own, deliberately different behavior via 'contextmenu'.
+  // Tap toggles, long press opens the detail card. Pointer events fire for
+  // any button, so only the primary one is handled here.
   let timer = null, startX = 0, startY = 0, fired = false, primaryDown = false;
   const cancel = () => { el.classList.remove('is-pressing'); if (timer) { clearTimeout(timer); timer = null; } };
 
@@ -1450,19 +1178,11 @@ function attachTileInteraction(el, tile) {
   el.addEventListener('pointerleave', () => { primaryDown = false; cancel(); });
   el.addEventListener('pointercancel', () => { primaryDown = false; cancel(); });
 
-  // Right-click jumps straight to the detailed control sheet (brightness,
-  // temperature, position...) instead of duplicating the left-click action.
-  el.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    requestPopover(tile);
-  });
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); requestPopover(tile); });
 }
 
-// The grid lives in the main window; the detail popover lives in its own
-// separate window (see IS_POPOVER_WINDOW) - so opening it from a tile
-// here means asking Python to move/show *that* window at this tile's
-// current screen position, rather than showing anything locally. Python
-// then pushes the tile id into that window via __showPopoverForTile.
+// The detail card lives in the popover window: ask Python to show it over
+// this tile's screen position (it then calls __showPopoverForTile there).
 function requestPopover(tile) {
   const tileNode = document.querySelector('.tile[data-id="' + tile.id + '"]');
   if (!tileNode || !(window.pywebview && window.pywebview.api)) return;
@@ -1471,9 +1191,7 @@ function requestPopover(tile) {
   window.pywebview.api.get_window_pos(WINDOW_KIND).then((pos) => {
     const screenX = Math.round((pos && pos.x || 0) + r.left * dpr);
     const screenY = Math.round((pos && pos.y || 0) + r.top * dpr);
-    // The tile's size goes along too: near a screen edge the popover
-    // flips to align with the tile's far edge rather than its near one,
-    // which it cannot work out from a corner alone.
+    // The tile's size lets the popover flip to its far edge near a screen edge.
     return window.pywebview.api.open_popover(
       tile.id, screenX, screenY, Math.round(r.width * dpr), Math.round(r.height * dpr),
     );
@@ -1483,11 +1201,8 @@ function requestPopover(tile) {
 /* ============================================================
  * Fading out while nobody is there
  * ============================================================ */
-// Python decides when (see _watch_for_idle): the machine has been quiet
-// for long enough, or something is running full screen. All this side
-// does is carry the state, slow the sampling down while it is faded -
-// there is not much left to see - and treat the first click as a tap to
-// wake rather than as a tap on whatever was under it.
+// Python decides when (see _watch_for_idle). The first click on a dimmed
+// widget only wakes it.
 let dimmed = false;
 
 window.__setDimmed = function (on) {
@@ -1507,30 +1222,21 @@ function wakeFromDim() {
   return true;
 }
 
-// Capture phase, so the tap that wakes it never reaches a tile: waking
-// something up and turning a light off with the same click is not what
-// anyone meant by it.
+// Capture phase, so the waking click never reaches a tile.
 document.addEventListener('mousedown', (e) => {
   if (wakeFromDim()) { e.stopPropagation(); e.preventDefault(); }
 }, true);
 document.addEventListener('mousemove', () => { wakeFromDim(); }, true);
 
-// Pushed from Python each time the tray flyout is shown, to replay its
-// entrance. Restarting a CSS animation needs the class off, a layout read
-// to make that land, and the class back on.
-// Called by Python while the window is still hidden but already moved
-// to where it will appear: puts the card back to its pre-entrance state
-// and takes a fresh backdrop of the place it is about to cover. Without
-// it the panel arrived carrying whatever was behind it last time - a
-// frosted picture of somewhere else, replaced a moment later, which is
-// the flash and the lag. Python waits for the flyout_ready call back
-// before it shows the window.
+// The card and its frosted pane animate as one.
 function flyoutLayers() {
-  // The card and the frosted pane behind it animate as one thing.
   return [document.getElementById('view-grid'),
           document.getElementById('backdrop-glass')].filter(Boolean);
 }
 
+// Called by Python while the window is hidden but already in place: reset
+// the entrance and capture the backdrop there, then report back through
+// backdrop_armed (see _arm_backdrop in main.py).
 window.__armBackdrop = function () {
   for (const el of flyoutLayers()) el.classList.remove('flyout-enter', 'flyout-leave');
   const done = () => {
@@ -1538,12 +1244,7 @@ window.__armBackdrop = function () {
       window.pywebview.api.backdrop_armed().catch(() => {});
     }
   };
-  // Two things have to settle before the capture is worth taking. The
-  // window was just moved and resized under the page, so it needs a frame
-  // to take that in - measure before it has and the capture is of the old
-  // size. And a capture already in flight is of the old *place*:
-  // refreshBackdrop would hand that one back as if it were this one, and
-  // the panel would open showing wherever it used to be.
+  // Wait out any capture already in flight: it is of the old place.
   const attempt = (tries) => {
     if (backdropPending && tries > 0) {
       setTimeout(() => attempt(tries - 1), 16);
@@ -1552,31 +1253,18 @@ window.__armBackdrop = function () {
     invalidateBackdrop();
     Promise.resolve(refreshBackdrop()).then(done, done);
   };
-  // Whatever content this window is about to show has just been rendered
-  // into it; ask for the window to be sized to that first, and wait for
-  // that to land, or the capture is of the wrong rectangle.
+  // Size the window to the new content first, and wait for that to land.
   syncWindowSize();
   requestAnimationFrame(() => pendingResize.then(() => attempt(12), () => attempt(12)));
 };
 
-// True from the moment the panel starts opening until it has finished
-// closing. While that is the case it reads the screen on every frame the
-// compositor draws (see startBackdropTicker) rather than at the rate the
-// widget uses, because the panel is the one window that sits over other
-// applications: a browser scrolling behind it changes the whole of its
-// backdrop several times a second, and anything slower than the screen
-// itself reads as the glass lagging the page. It is only ever open for a
-// few seconds at a time, which is what makes that affordable.
+// Tray panel state. While it animates in or out nothing is captured: the
+// capture shares a process with the compositor running the animation.
 let flyoutOpen = false;
 let flyoutAnimating = false;
 
 window.__flyoutEnter = function () {
   flyoutOpen = true;
-  // Nothing is read from the screen while the card is scaling in. The
-  // backdrop for this frame was taken before the window was on screen
-  // (see _arm_backdrop), so there is nothing to gain from another one
-  // mid-animation - and a great deal to lose, since the capture runs in
-  // the same process that is compositing the animation.
   flyoutAnimating = true;
   const view = document.getElementById('view-grid');
   const settled = () => {
@@ -1594,11 +1282,10 @@ window.__flyoutEnter = function () {
   }
 };
 
-// ...and to play it backwards on the way out. Python waits out the
-// animation before it actually hides the window (see hide_flyout).
+// Python waits out this animation before hiding the window (hide_flyout).
 window.__flyoutLeave = function () {
   flyoutOpen = false;
-  flyoutAnimating = true;         // and nothing while it scales back out
+  flyoutAnimating = true;
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter');
     void el.offsetWidth;
@@ -1606,9 +1293,7 @@ window.__flyoutLeave = function () {
   }
 };
 
-// The card is rendered while its window is still hidden, so by the time
-// anyone can see it its entrance has already played to itself. Python
-// replays it once the window is actually up.
+// The card rendered while hidden; replay its entrance once visible.
 window.__popoverEnter = function () {
   const popover = document.getElementById('detail-popover');
   if (!popover) return;
@@ -1618,8 +1303,7 @@ window.__popoverEnter = function () {
   restartBackdropTicker();
 };
 
-// Pushed from Python (see Api.open_popover in main.py) once the popover
-// window has been moved into position for a given tile.
+// See Api.open_popover in main.py.
 window.__showPopoverForTile = function (tileId) {
   const tile = findTile(tileId);
   if (tile) openDetail(tile);
@@ -1631,9 +1315,7 @@ function renderGrid() {
   grid.innerHTML = '';
   entityToTileIds = {};
   const tiles = CONFIG.tiles || [];
-  // Using the full configured column count even when there are fewer
-  // tiles than that would reserve empty grid-track width nobody's using,
-  // leaving a big dead strip on the right - not very "widget"-sized.
+  // Never more columns than tiles (keep in step with main.py).
   const cols = Math.max(1, Math.min(CONFIG.columns || 4, tiles.length || 1));
   document.documentElement.style.setProperty('--cols', cols);
   if (!tiles.length) {
@@ -1738,16 +1420,10 @@ function climateStep(tile, delta) {
 }
 
 /* ============================================================
- * Detail popover: anchored to the tile that opened it, fixed size,
- * fades in place instead of replacing the whole widget.
+ * Detail popover (only ever rendered in the popover window)
  * ============================================================ */
 let popoverCloseTimer = null;
 
-// Detail cards only ever open in the popover window. The grid window
-// hands off to it instead of rendering one itself (requestPopover ->
-// Api.open_popover -> __showPopoverForTile), so this whole path is a
-// no-op there - guarded rather than assumed, since both windows run this
-// same script.
 function openDetail(tile) {
   if (!IS_POPOVER_WINDOW) return;
   const popover = document.getElementById('detail-popover');
@@ -1758,30 +1434,14 @@ function openDetail(tile) {
   showEditMode(false);
   renderDetailBody();
 
-  // This window shows nothing but the popover (view-grid is permanently
-  // hidden here - see IS_POPOVER_WINDOW/boot), so the card sits at the
-  // window's own origin: there is no laid-out tile in this window to
-  // anchor it to, and the window itself was already moved over the tile
-  // that asked for it. In this window the card is in the flow rather
-  // than absolutely positioned (.is-popover-window), which is what lets
-  // #stage - and so the window - be exactly the size of the card,
-  // whatever its content came to. Hard-coding that size here instead
-  // meant every change to the card's CSS had to be mirrored in a pair of
-  // constants, and when it wasn't the card was quietly clipped.
+  // The card is in the flow here, so the window takes its size.
   backdrop.hidden = false;
   popover.hidden = false;
   requestAnimationFrame(() => popover.classList.add('show'));
   syncWindowSize();
-  // This window was just moved over the tile that asked for it, so
-  // whatever backdrop it last captured is of somewhere else entirely -
-  // and while it was hidden it will have booked its next look a second
-  // out, which is a second of the card sitting on a still picture.
-  // Python arms one correctly positioned frame before showing the window.
-  // Stop the background ticker so an older in-flight sample cannot race it.
-  clearTimeout(backdropTimer);
-  if (backdropRaf) cancelAnimationFrame(backdropRaf);
-  backdropTimer = null;
-  backdropRaf = null;
+  // Python arms a correctly placed backdrop before showing the window;
+  // stop the ticker so an older sample cannot race it.
+  stopBackdropTicker();
   if (window.pywebview && window.pywebview.api) {
     window.pywebview.api.set_popover_activatable(true).catch(() => {});
   }
@@ -1799,11 +1459,8 @@ function closeDetail() {
   }
   popoverCloseTimer = setTimeout(() => {
     popoverCloseTimer = null;
-    if (currentDetailTileId) return; // reopened (on a different tile) before the fade finished
+    if (currentDetailTileId) return; // reopened before the fade finished
     popover.hidden = true;
-    // Nothing else is ever shown in this window - hide the whole OS
-    // window instead of shrinking it down to 0x0 and leaving it sitting
-    // there invisible-but-present.
     if (window.pywebview && window.pywebview.api) window.pywebview.api.close_popover().catch(() => {});
   }, 170);
 }
@@ -1870,19 +1527,8 @@ function renderIconPicker(tile) {
   }
 }
 
-function toggleRow(label, on, onClick) {
-  const row = document.createElement('div'); row.className = 'toggle-row';
-  const l = document.createElement('span'); l.className = 'toggle-label'; l.textContent = label;
-  const sw = document.createElement('button'); sw.className = 'toggle-switch' + (on ? ' is-on' : '');
-  sw.addEventListener('click', onClick);
-  row.appendChild(l); row.appendChild(sw);
-  return row;
-}
-
-// The big HomeKit-style glance+toggle tile: shared by every expandable
-// domain as the primary control, for one consistent look. fillPct is the
-// portion (0-100) of the tile that fills with color when on - 100 for a
-// plain switch, the live percentage for something dimmable.
+// The large glance-and-toggle tile. fillPct (0-100) is how much of it
+// fills with colour when on, e.g. a light's brightness.
 function accessoryTile(iconName, on, fillPct, color, stateText, onClick) {
   const tile = document.createElement('button');
   tile.className = 'accessory-tile' + (on ? ' is-on' : '');
@@ -1900,11 +1546,8 @@ function accessoryTile(iconName, on, fillPct, color, stateText, onClick) {
   tile.addEventListener('click', onClick);
   return tile;
 }
-// A switch or a lock has one thing to say - it is on or it is off - and
-// a fill creeping up from the bottom says it badly. This is the physical
-// version: a slab that sits in the bottom half of the tile, dark, and
-// rides up to the top half and turns white when it is on. The icon
-// travels with it, so a lock's shackle opens where the eye already is.
+// A two-state tile for switches and locks: a slab that rides from the
+// bottom half to the top half, turning white, when on.
 function toggleSlabTile(iconName, on, onClick) {
   const tile = document.createElement('button');
   tile.className = 'accessory-tile toggle-slab' + (on ? ' is-on' : '');
@@ -1961,10 +1604,8 @@ function mediaBtn(iconPath, onClick, big) {
   return b;
 }
 
-// Accessories with nothing to operate - sensors, and anything this build
-// has no controls for - still open a detail card, because that is where
-// renaming and icon-picking live. Showing the reading large is more use
-// than showing an empty panel.
+// Detail for accessories without controls: the reading, large, plus a
+// history chart when it is numeric.
 function buildReadoutDetail(body, tile, state) {
   const wrap = document.createElement('div');
   wrap.className = 'detail-readout';
@@ -1981,9 +1622,6 @@ function buildReadoutDetail(body, tile, state) {
 }
 
 // --- history ---------------------------------------------------------------
-// A reading on its own says what it is now; the shape of the last day says
-// whether that is unusual. Home Assistant keeps the recording, so this is
-// a fetch and a path rather than anything this widget has to remember.
 const HISTORY_HOURS = 24;
 const CHART_W = 248;      // the detail card's body width, in its own px
 const CHART_H = 64;
@@ -2040,20 +1678,23 @@ function historySvg(points) {
     + '<path class="history-area" d="' + area + '"/>'
     + '<path class="history-line" d="' + line + '"/>'
     + '</svg>'
-    // The dot is placed as a percentage of the box rather than in the
-    // chart's own coordinates, and this layer deliberately has no viewBox.
-    // The line's does, stretched to fit (preserveAspectRatio="none"), and
-    // a dot drawn that way would be an ellipse - but giving this layer the
-    // same viewBox without the stretch scales it uniformly and centres it,
-    // which is why the dot sat to one side of the line it belongs to by
-    // half the difference between the box and the chart's nominal width.
-    // Percentages are measured against the box itself, so they land where
-    // the stretched line does, and r stays a circle.
+    // The dot's layer has no viewBox, so it is positioned in percentages
+    // of the box (matching the stretched line) and stays circular.
     + '<svg class="history-dot-layer">'
     + '<circle class="history-dot"'
     + ' cx="' + (x(last[0]) / CHART_W * 100).toFixed(2) + '%"'
     + ' cy="' + (y(last[1]) / CHART_H * 100).toFixed(2) + '%" r="2.5"/>'
     + '</svg>';
+}
+
+function toggleDetail(domain) {
+  return (body, tile, state) => {
+    const on = !!state && state.state === 'on';
+    body.appendChild(toggleSlabTile(iconNameFor(tile, state), on, () => {
+      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
+      callService(domain, 'toggle', tile.entity);
+    }));
+  };
 }
 
 const DETAIL_BUILDERS = {
@@ -2097,23 +1738,10 @@ const DETAIL_BUILDERS = {
       body.appendChild(sliderBlock('風速', attrs.percentage, 0, 100, '%', (v) => callService('fan', 'set_percentage', tile.entity, { percentage: Number(v) }), 10));
     }
   },
-  switch(body, tile, state) {
-    const on = !!state && state.state === 'on';
-    body.appendChild(toggleSlabTile(iconNameFor(tile, state), on, () => {
-      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
-      callService('switch', 'toggle', tile.entity);
-    }));
-  },
-  input_boolean(body, tile, state) {
-    const on = !!state && state.state === 'on';
-    body.appendChild(toggleSlabTile(iconNameFor(tile, state), on, () => {
-      optimisticSet(tile.entity, { state: on ? 'off' : 'on' });
-      callService('input_boolean', 'toggle', tile.entity);
-    }));
-  },
+  switch: toggleDetail('switch'),
+  input_boolean: toggleDetail('input_boolean'),
   lock(body, tile, state) {
-    // Up and white is open, the same way round as every other accessory
-    // here - which for a lock means unlocked.
+    // Up and white means unlocked, matching "on" everywhere else.
     const open = !!state && state.state !== 'locked';
     body.appendChild(toggleSlabTile(iconNameFor(tile, state), open, () => {
       optimisticSet(tile.entity, { state: open ? 'locked' : 'unlocked' });
@@ -2195,8 +1823,7 @@ function updateConnDot() {
   if (label) label.textContent = CONNECTED ? '已連線 (即時同步)' : '未連線';
 }
 
-// From the grid, Settings is a different window - so this is a request to
-// Python to bring that window up, not a view swap.
+// Outside the Settings window, ask Python to bring that window up.
 function openSettings() {
   if (!IS_SETTINGS_WINDOW) {
     if (window.pywebview && window.pywebview.api) {
@@ -2207,7 +1834,7 @@ function openSettings() {
   return openSettingsView();
 }
 
-// Pushed from Python when the Settings window is shown (Api.open_settings_window).
+// See Api.open_settings_window in main.py.
 window.__enterSettings = function () {
   try { openSettingsView(); } catch (e) { /* ignore */ }
 };
@@ -2228,8 +1855,7 @@ function openSettingsView() {
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
   const glassSelect = document.getElementById('glass-mode-select');
   glassSelect.value = CONFIG.glass_mode || 'fast';
-  // Offering a mode this build of Windows cannot do would be a setting
-  // that silently does nothing.
+  // Native glass is only offered where it is supported.
   glassSelect.querySelector('option[value="system"]').hidden = CONFIG.system_glass_ok !== true;
   if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
   document.getElementById('panel-theme-select').value = CONFIG.panel_theme || 'follow';
@@ -2245,11 +1871,14 @@ function openSettingsView() {
   SettingsSelect.sync();
 }
 
+function dimAfterText(sec) {
+  return sec < 60 ? (sec + ' 秒') : (Math.round(sec / 6) / 10 + ' 分鐘');
+}
+
 function setDimAfterSlider(sec) {
   const v = Math.max(10, Math.min(600, Number(sec) || 120));
   document.getElementById('dim-after-range').value = String(v);
-  document.getElementById('dim-after-value').textContent =
-    v < 60 ? (v + ' 秒') : (Math.round(v / 6) / 10 + ' 分鐘');
+  document.getElementById('dim-after-value').textContent = dimAfterText(v);
 }
 
 function setSampleFpsSlider(fps) {
@@ -2273,10 +1902,7 @@ async function saveHaConfig(url, token) {
   try { await window.pywebview.api.save_ha_config(url, token); } catch (e) { /* ignore */ }
 }
 
-// One preference at a time, by name. Sending the whole of CONFIG - which
-// is what this used to do - meant every window could write its own copy
-// of every setting, and a window whose copy was a few seconds out of date
-// silently undid whatever had just been changed somewhere else.
+// Only the changed keys, so no window's stale copy overwrites another's edit.
 async function savePref(changes) {
   Object.assign(CONFIG, changes);
   try {
@@ -2524,8 +2150,7 @@ function init() {
   document.getElementById('glass-mode-select').addEventListener('change', async (e) => {
     await savePref({ glass_mode: e.target.value });
     applySystemGlass();
-    // Who paints the backdrop has changed, so both the frame on screen and
-    // the estimate of what a frame costs belong to the old way of doing it.
+    // The frame and its cost estimate belong to the old capture method.
     backdropHash = null;
     backdropFrameMs = backdropFloorMs();
     refreshBackdropSoon(0);
@@ -2533,10 +2158,7 @@ function init() {
   document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
     await savePref({ panel_theme: e.target.value });
   });
-  // The number follows the thumb while it is being dragged, but the
-  // widget is only re-laid-out on release: every step in between would
-  // save the config and put the grid window through a relayout and a
-  // fresh desktop capture, which is a lot of work to throw away 5% later.
+  // Sliders update their label while dragging and save only on release.
   document.getElementById('dim-idle-check').addEventListener('change', async (e) => {
     const on = !!e.target.checked;
     document.getElementById('dim-after-block').hidden = !on;
@@ -2544,9 +2166,7 @@ function init() {
   });
   const dimRange = document.getElementById('dim-after-range');
   dimRange.addEventListener('input', (e) => {
-    const v = Number(e.target.value);
-    document.getElementById('dim-after-value').textContent =
-      v < 60 ? (v + ' 秒') : (Math.round(v / 6) / 10 + ' 分鐘');
+    document.getElementById('dim-after-value').textContent = dimAfterText(Number(e.target.value));
   });
   dimRange.addEventListener('change', async (e) => {
     await savePref({ dim_after_sec: Number(e.target.value) });
@@ -2578,18 +2198,17 @@ function init() {
     applyFixedSizeConstraint();
     syncWindowSize();
   });
-  document.getElementById('fixed-width-input').addEventListener('change', async (e) => {
-    await savePref({ fixed_width: Math.max(120, Number(e.target.value) || 400) });
-    e.target.value = String(CONFIG.fixed_width);
-    applyFixedSizeConstraint();
-    syncWindowSize();
-  });
-  document.getElementById('fixed-height-input').addEventListener('change', async (e) => {
-    await savePref({ fixed_height: Math.max(90, Number(e.target.value) || 300) });
-    e.target.value = String(CONFIG.fixed_height);
-    applyFixedSizeConstraint();
-    syncWindowSize();
-  });
+  for (const [id, key, min, fallback] of [
+    ['fixed-width-input', 'fixed_width', 120, 400],
+    ['fixed-height-input', 'fixed_height', 90, 300],
+  ]) {
+    document.getElementById(id).addEventListener('change', async (e) => {
+      await savePref({ [key]: Math.max(min, Number(e.target.value) || fallback) });
+      e.target.value = String(CONFIG[key]);
+      applyFixedSizeConstraint();
+      syncWindowSize();
+    });
+  }
   document.getElementById('start-on-boot-check').addEventListener('change', async (e) => {
     const wanted = !!e.target.checked;
     e.target.disabled = true;
@@ -2642,16 +2261,11 @@ function init() {
   installWindowDrag();
 }
 
-// Pushed from Python whenever preferences change (Api._push_prefs).
-// The popover lives in a second window with its own copy of this script
-// and its own CONFIG, loaded once at startup - without this it kept the
-// zoom and theme it booted with, so changing either in Settings left the
-// detail card rendering at the old scale until the app was restarted.
+// Pushed from Python whenever preferences change (Api._push_prefs). Every
+// window gets every change, including the one that made it, so compare
+// before re-rendering anything under someone mid-edit.
 window.__applyPrefs = function (cfg) {
   if (!cfg) return;
-  // The window that made the change gets this back too, so compare before
-  // acting: re-rendering the grid or the tile list underneath someone who
-  // is mid-edit is worse than doing nothing.
   const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
   const languageChanged = cfg.language !== CONFIG.language;
   const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
@@ -2661,46 +2275,23 @@ window.__applyPrefs = function (cfg) {
   const layoutChanged = cfg.zoom !== CONFIG.zoom || cfg.columns !== CONFIG.columns ||
     cfg.fixed_size !== CONFIG.fixed_size || cfg.fixed_width !== CONFIG.fixed_width ||
     cfg.fixed_height !== CONFIG.fixed_height;
+  CONFIG = Object.assign({}, CONFIG, cfg);
+  if (languageChanged) setInterfaceLanguage(CONFIG.language);
   if (glassChanged) {
-    // Who paints the backdrop has changed; the frame on screen was drawn
-    // by the other one.
-    CONFIG = Object.assign({}, CONFIG, cfg);
     applySystemGlass();
     backdropHash = null;
     refreshBackdropSoon(0);
   }
-  if (panelThemeChanged) {
-    CONFIG = Object.assign({}, CONFIG, cfg);
-    applyTheme();
-  }
-  if (!tilesChanged && !themeChanged && !layoutChanged) {
-    CONFIG = Object.assign({}, CONFIG, cfg);
-    if (languageChanged) setInterfaceLanguage(CONFIG.language);
-    return;
-  }
-  CONFIG = Object.assign({}, CONFIG, cfg);
-  if (languageChanged) setInterfaceLanguage(CONFIG.language);
-  if (themeChanged) {
-    applyTheme();
-    invalidateBackdrop();
-  }
+  if (panelThemeChanged || themeChanged) applyTheme();
+  if (!tilesChanged && !themeChanged && !layoutChanged) return;
+  if (themeChanged) invalidateBackdrop();
   if (layoutChanged) { applyZoom(); applyFixedSizeConstraint(); }
-  if (tilesChanged && !IS_POPOVER_WINDOW) renderGrid();
+  // The column count lives in renderGrid's --cols.
+  if ((tilesChanged || layoutChanged) && !IS_POPOVER_WINDOW) renderGrid();
   if (tilesChanged && !document.getElementById('view-settings').hidden) renderTileList();
   if (currentDetailTileId) renderDetailBody();
   syncWindowSize();
   refreshBackdropSoon();
-};
-
-window.__openSettingsFromTray = function () {
-  try { openSettings(); } catch (e) { /* ignore */ }
-};
-
-window.__setThemeFromTray = function (name) {
-  CONFIG.theme = name;
-  applyTheme();
-  const sel = document.getElementById('theme-select');
-  if (sel) sel.value = name;
 };
 
 init();

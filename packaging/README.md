@@ -1,41 +1,43 @@
 # Build an installer
 
 Requirements: Windows, Python 3.12, the project dependencies, PyInstaller, and
-Inno Setup 6. Installers bundle Python and Qt; end users do not need either.
+Inno Setup 6. Installers bundle Python and Qt; end users need neither.
 
 ```powershell
 pip install -r requirements.txt pyinstaller
-./packaging/release.ps1 -Version 1.3.0
-```
-
-The version comes from `VERSION`. Output is
-`dist/<version>/HA-Widgets-Setup-<version>.exe`, with a SHA-256 checksum beside it.
-Use `--iscc "C:\path\to\ISCC.exe"` if the compiler is not found automatically.
-
-For the next release, use a new semantic version:
-
-```powershell
 ./packaging/release.ps1 -Version 1.3.1
 ```
 
-The script writes `VERSION`, runs the test suite, builds the bundle and
-installer, and produces a SHA-256 file. Review and commit the version change
-before attaching the installer and checksum to a GitHub release with the same
-`v<version>` tag. Pass `-Iscc "C:\path\to\ISCC.exe"` if needed.
+`release.ps1` writes `VERSION`, runs the Python tests, builds the bundle and
+installer, and writes a SHA-256 checksum. Output is
+`dist/<version>/HA-Widgets-Setup-<version>.exe`. Pass
+`-Iscc "C:\path\to\ISCC.exe"` if Inno Setup is not found automatically.
 
-Keep the `AppId` in `installer.iss` unchanged. Running a newer installer updates
-the existing installation and preserves `%APPDATA%\HA Widgets` settings.
-It closes the installed app when necessary and launches the updated app afterward.
-Startup preferences are left unchanged. There is no automatic online update check.
+To build without bumping the version, run `python packaging/build.py
+--installer` (add `--iscc PATH` if needed); the version comes from `VERSION`.
+Without `--installer` only the PyInstaller bundle is built.
 
-The build uses a restricted DLL search path and checks the frozen capture worker
-before creating the installer. Release 1.1.1 also removes the incompatible ICU
-files accidentally included in 1.1.0 during an upgrade.
+Review and commit the version change, then attach the installer and checksum
+to a GitHub release tagged `v<version>`.
 
-The installer does not bundle local Home Assistant credentials. On first install,
-it can migrate a legacy settings file from the installation folder or a nearby
-source checkout; existing user settings always win.
+## Upgrades
 
-Installer testing: `/VERYSILENT /TESTINSTALL=1 /DIR="<isolated directory>"` skips
-shortcuts, uninstall registration, and launching. Settings migration is redirected
-to `test-user-data` inside that directory. Never use this switch for a normal install.
+Keep the `AppId` in `installer.iss` unchanged. A newer installer updates the
+existing installation, preserves `%APPDATA%\HA Widgets` settings, closes the
+running app when necessary, and relaunches it afterward. Startup preferences
+are left unchanged. There is no automatic update check.
+
+The build uses a restricted DLL search path and checks the frozen capture
+worker (`test_frozen_worker.py`) before creating the installer. The installer
+also removes incompatible ICU files that 1.1.0 shipped by mistake.
+
+The installer never bundles local Home Assistant credentials. On first
+install it can migrate a legacy settings file from the installation folder or
+a nearby source checkout; existing user settings always win.
+
+## Testing the installer
+
+`/VERYSILENT /TESTINSTALL=1 /DIR="<isolated directory>"` skips shortcuts,
+uninstall registration, and launching, and redirects settings migration to
+`test-user-data` inside that directory (see `test_installer.ps1`). Never use
+this switch for a normal install.

@@ -8,6 +8,7 @@ and it follows the taskbar between light and dark.
 """
 
 import threading
+import time
 
 import pystray
 from PIL import Image, ImageDraw, ImageFont
@@ -88,9 +89,8 @@ def _make_image(light_taskbar=None):
 def _follow_taskbar_theme(icon):
     """Repaint the glyph when the taskbar flips light/dark.
 
-    A registry read every few seconds, rather than a window subclass to
-    catch WM_SETTINGCHANGE: pystray owns the only window here and does not
-    hand out its handle, and this costs microseconds.
+    Polls the registry: pystray does not expose its window for
+    WM_SETTINGCHANGE.
     """
     state = {"light": _taskbar_is_light()}
 
@@ -103,7 +103,7 @@ def _follow_taskbar_theme(icon):
                     icon.icon = _make_image(now)
             except Exception:
                 pass
-            threading.Event().wait(5.0)
+            time.sleep(5.0)
 
     threading.Thread(target=loop, daemon=True).start()
 
@@ -111,9 +111,7 @@ def _follow_taskbar_theme(icon):
 def build_tray_icon(on_activate, on_toggle_visibility, on_open_settings,
                     on_toggle_theme, on_refresh, on_quit):
     menu = pystray.Menu(
-        # Invisible, and the default: this is what a left click runs (see
-        # Api.toggle_flyout), which is not the same thing as any of the
-        # entries below it.
+        # Invisible default item: what a left click runs (the tray panel).
         pystray.MenuItem("", on_activate, default=True, visible=False),
         pystray.MenuItem("Show / Hide on desktop", on_toggle_visibility),
         pystray.MenuItem("Settings...", on_open_settings),

@@ -104,18 +104,12 @@ class HAClient:
     def get_states(self, timeout=15):
         return self._request("/api/states", timeout=timeout) or []
 
-    def get_state(self, entity_id, timeout=8):
-        return self._request("/api/states/%s" % entity_id, timeout=timeout)
-
     def get_history(self, entity_id, hours=24, timeout=15):
         """Recorded states for one entity over the last `hours`.
 
-        minimal_response and no_attributes keep this to what a chart needs
-        - a state and a timestamp - rather than the full attribute set on
-        every sample, which for a sensor polled every few seconds is most
-        of the payload. significant_changes_only is deliberately *not*
-        set: for a temperature that only ever drifts, it throws away the
-        drift.
+        minimal_response and no_attributes keep this to a state and a
+        timestamp per sample. significant_changes_only is deliberately not
+        set: it would drop a slowly drifting temperature.
         """
         start = time.strftime(
             "%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - hours * 3600)
@@ -196,15 +190,8 @@ class HAClient:
                         data = event.get("data") or {}
                         new_state = data.get("new_state")
                         entity_id = data.get("entity_id")
-                        # state_changed is a firehose - Home Assistant
-                        # pushes one for *every* entity it knows about, and
-                        # the subscribe_events API has no server-side
-                        # entity filter. Dropping the ones no tile shows
-                        # here rather than in the callback matters: each
-                        # one that gets through costs a Python->JS
-                        # evaluate_js round trip marshaled onto the UI
-                        # thread, for a tile update that would then be a
-                        # no-op.
+                        # subscribe_events has no entity filter; drop
+                        # entities no tile shows before they reach the UI.
                         if entity_id not in self._entity_set:
                             continue
                         if self.on_event:
@@ -238,10 +225,7 @@ class HAClient:
             wanted = self._entity_set
             if not wanted:
                 continue
-            # One /api/states for the whole set, not one request per
-            # entity: this runs on a timer forever, and per-entity requests
-            # meant the cost of the safety net grew with the number of
-            # tiles for no benefit (the response carries them all anyway).
+            # One /api/states for the whole set rather than per entity.
             try:
                 states = self.get_states()
             except Exception:

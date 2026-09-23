@@ -40,7 +40,8 @@ class GlassTests(unittest.TestCase):
         scope = definitions('_send_to_bottom', _user32=user,
                             _get_hwnd=lambda w: 123, _hwnd_lock=threading.Lock(),
                             _run_on_ui_thread=lambda w, fn: fn(), GWL_EXSTYLE=-20,
-                            HWND_BOTTOM=1, SWP_NOMOVE=2, SWP_NOSIZE=1, SWP_NOACTIVATE=16)
+                            HWND_BOTTOM=1, SWP_NOMOVE=2, SWP_NOSIZE=1, SWP_NOACTIVATE=16,
+                            WS_EX_TOPMOST=8, GW_HWNDLAST=1)
         scope['_send_to_bottom'](object())
         user.SetWindowPos.assert_not_called()
         user.GetWindow.return_value = 456
@@ -77,7 +78,7 @@ class GlassTests(unittest.TestCase):
         gdi.CreateCompatibleBitmap.return_value = 30
         gdi.SelectObject.return_value = 40
         scope = definitions('_DesktopCapture', '_BITMAPINFOHEADER',
-                            _gdi32=gdi, _user32=user, SRCCOPY=0x00CC0020,
+                            _gdi32=gdi, _user32=user, SRCCOPY=0x00CC0020, BLACKNESS=0x42,
                             SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77,
                             SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79)
         return scope['_DesktopCapture'](), gdi, user
@@ -172,7 +173,6 @@ class GlassTests(unittest.TestCase):
         api._excluded_kinds = set()
         api._capture_epoch = 0
         api._capture_transition_until = 0
-        api._capture_excluded = False
         api._apply_capture_exclusion()
         self.assertIn('main', api._excluded_kinds)
         affinity.assert_any_call(windows['main'], True)

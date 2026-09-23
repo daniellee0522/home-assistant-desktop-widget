@@ -51,36 +51,20 @@ DEFAULT_CONFIG = {
     "lock_position": False,
     "start_on_boot": False,
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
-    "opacity": 85,            # percent; whole-window translucency (see main.py)
-    # Who draws the frosted glass, and at what price:
-    #   "fast"    - captured from the screen, which needs the widget to be
-    #               hidden from screen capture to avoid reading itself back
-    #   "compat"  - captured the slow way, with the widget visible to
-    #               screenshots and screen recording
-    #   "system"  - DWM draws it. Off unless HA_WIDGET_SYSTEM_GLASS is set:
-    #               it works in a window of its own but not in this app,
-    #               and the note above _SYSTEM_GLASS_SUPPORTED in main.py
-    #               says exactly how far it got.
-    # See _set_system_glass and _set_capture_exclusion in main.py.
+    # Who draws the frosted glass:
+    #   "fast"    - screen capture; the widget is hidden from screenshots
+    #               and recordings so it does not read itself back
+    #   "compat"  - slower wallpaper rendering; the widget stays visible
+    #   "system"  - DWM glass; only offered with HA_WIDGET_SYSTEM_GLASS set
     "glass_mode": "fast",
-    # How often the frosted backdrop is re-read from the screen, in
-    # frames per second. The ceiling rather than the rate: a still
-    # wallpaper backs off to a look every few seconds on its own, and a
-    # machine that cannot keep up thins itself out (see BACKDROP_DUTY in
-    # app.js). Higher tracks an animated wallpaper more closely and costs
-    # proportionally more.
+    # Ceiling on how often the backdrop is re-captured, in frames per
+    # second. Still wallpaper backs off on its own (see app.js).
     "sample_fps": 16,
-    # The tray panel's own light/dark setting. It is not on the desktop
-    # like the widget is - it sits over whatever was open - so what reads
-    # well there is often the opposite. "follow" takes the widget's.
+    # The tray panel's own theme; "follow" uses the widget's.
     "panel_theme": "follow",
-    # Fade the widget back into the desktop once the desktop itself has
-    # been out of sight for this long - something else in front of it,
-    # or something running full screen - and bring it back when the
-    # desktop returns or it is clicked. It is a gadget that lives on the
-    # desktop all day; there is no reason for it to be at full strength
-    # behind somebody's browser. dim_after_sec is how long the desktop
-    # has to have been covered, not how long the machine has been idle.
+    # Dim the widget once the desktop has been covered for dim_after_sec
+    # (immediately for a full-screen app) until the desktop returns or the
+    # widget is clicked.
     "dim_when_idle": True,
     "dim_after_sec": 120,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
@@ -127,20 +111,18 @@ def load_config():
 def _migrate(cfg, loaded):
     """Carry an older settings file forward.
 
-    Judged on what the *file* had, not on the merged config: the defaults
-    have already filled in the new keys, so asking whether the merged one
-    knows about glass_mode would always say yes and quietly ignore what
-    the user had chosen.
+    Judged on what the file had, since the defaults have already filled
+    in the new keys.
     """
     if "glass_mode" not in loaded:
-        # The two booleans this replaces could describe states that made no
-        # sense together, which is why they became one setting.
+        # Replaces the old fast_glass/system_glass booleans.
         if loaded.get("system_glass"):
             cfg["glass_mode"] = "system"
         else:
             cfg["glass_mode"] = "fast" if loaded.get("fast_glass", True) else "compat"
-    cfg.pop("system_glass", None)
-    cfg.pop("fast_glass", None)
+    # Settings that no longer exist.
+    for key in ("system_glass", "fast_glass", "opacity"):
+        cfg.pop(key, None)
     return cfg
 
 

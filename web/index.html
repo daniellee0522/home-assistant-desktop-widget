@@ -7,11 +7,8 @@
 <script src="bridge.js"></script>
 </head>
 <body>
-<!-- A live picture of the desktop directly behind this window, kept
-     up to date from Python (see get_desktop_backdrop in main.py). The
-     card blurs it to make frosted glass; outside the card it stays
-     unblurred, so the rounded corners read as a real cutout. -->
-<canvas id="backdrop"></canvas>
+<!-- The card's frosted fill: a blurred capture of the desktop behind this
+     window (see get_desktop_backdrop in main.py and paintBackdrop in app.js). -->
 <canvas id="backdrop-glass"></canvas>
 <div id="stage">
 
@@ -27,11 +24,8 @@
     </div>
   </section>
 
-  <!-- Detail popover. Present but never shown in this window: opening a
-       tile's details hands off to the separate popover window instead
-       (requestPopover in app.js -> Api.open_popover in main.py), which
-       loads popover.html - this same markup with __IS_POPOVER_WINDOW set.
-       Kept here so the two pages stay identical apart from that flag. -->
+  <!-- Detail card: only shown in the #popover window
+       (requestPopover in app.js -> Api.open_popover in main.py). -->
   <div id="detail-backdrop" class="detail-backdrop" hidden></div>
   <div id="detail-popover" class="detail-popover" hidden>
     <div class="card-bg"></div>
