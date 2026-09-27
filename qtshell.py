@@ -12,6 +12,8 @@ positional is done by HWND in physical pixels, as in main.py.
 """
 
 import faulthandler
+import ctypes
+from ctypes import wintypes
 import json
 import os
 import threading
@@ -20,7 +22,7 @@ import traceback
 from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow
@@ -43,6 +45,19 @@ _LOG_PATH = None
 _alive_at = [0.0]
 _hang_logged = [False]
 _resume_hooks = []
+_resume_pending = threading.Event()
+_power_filter = None
+
+
+class _PowerFilter(QAbstractNativeEventFilter):
+    def nativeEventFilter(self, event_type, message):
+        if bytes(event_type) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0218 and msg.wParam in (0x0007, 0x0012):
+                # Only signal here: recovery can block and must not run inside
+                # Windows' synchronous power broadcast on the GUI thread.
+                _resume_pending.set()
+        return False, 0
 
 # How long the GUI thread may go without answering before it counts as stuck.
 _STALL_SECS = 10.0
@@ -66,8 +81,8 @@ def log(line):
 def on_resume(fn):
     """Call fn after the machine has been suspended and come back.
 
-    Detected by the watchdog's clock rather than WM_POWERBROADCAST, which
-    needs no native event filter in the message loop.
+    Runs on the watchdog thread, from Windows power notifications with a
+    clock-gap fallback. Hooks must marshal window work to the GUI thread.
     """
     _resume_hooks.append(fn)
 
@@ -89,8 +104,10 @@ def _watchdog():
         now = time.monotonic()
         slept = now - last
         last = now
-        if slept > _SUSPEND_SECS:
-            log("resumed after %.0fs suspended" % slept)
+        notified = _resume_pending.is_set()
+        _resume_pending.clear()
+        if notified or slept > _SUSPEND_SECS:
+            log("resume recovery (power=%s, clock gap=%.0fs)" % (notified, slept))
             _alive_at[0] = now
             _hang_logged[0] = False
             for fn in list(_resume_hooks):
@@ -451,7 +468,7 @@ def start():
 
 def prepare(web_dir, api, log_dir=None):
     """Create the application and the bridge, before any window exists."""
-    global _app, _marshal, _LOG_PATH, _heartbeat
+    global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
         try:
@@ -466,6 +483,9 @@ def prepare(web_dir, api, log_dir=None):
     _app.screenRemoved.connect(lambda screen: log("Display removed: " + screen.name()))
     # Created on the GUI thread, which is where its queued calls then run.
     _marshal = _Marshal()
+    if os.name == "nt":
+        _power_filter = _PowerFilter()
+        _app.installNativeEventFilter(_power_filter)
     _alive_at[0] = time.monotonic()
     # The heartbeat the watchdog reads: one assignment twice a second.
     _heartbeat = QTimer()

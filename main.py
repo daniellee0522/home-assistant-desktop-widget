@@ -57,7 +57,7 @@ import qtshell as webview  # noqa: E402
 
 import config as cfgmod  # noqa: E402
 from ha_client import HAClient  # noqa: E402
-from tray import build_tray_icon  # noqa: E402
+from tray import build_tray_icon, restore_tray_icon  # noqa: E402
 
 # Frozen, bundled data lives under PyInstaller's _MEIPASS while the
 # executable's own folder is BASE_DIR.
@@ -2327,6 +2327,36 @@ def main():
     def on_resume():
         """Rebuild what a suspend invalidates: GDI objects made for the old
         display, DWM attributes, capture exclusion, and the websocket."""
+        def restore_tray():
+            # Independent of desktop visibility: this is the entry point to
+            # the panel even when the desktop widget was manually hidden.
+            try:
+                posted = restore_tray_icon(api._tray_icon)
+                webview.log("Resume tray re-registration requested: %s" % posted)
+            except Exception as exc:
+                webview.log("Resume tray re-registration failed: %s" % exc)
+
+        def restore_window():
+            # Recheck on every retry: hiding from the tray during recovery
+            # must remain authoritative. Displays/DWM can settle after wake.
+            if not api._desktop_visible:
+                return
+            window.native._cache_hwnd()
+            _set_noactivate(window, True)
+            window.native.showNormal()
+            _apply_window_shape(window)
+            _send_to_bottom(window)
+            api._apply_capture_exclusion()
+            api._apply_system_glass("main")
+            window.native.view.update()
+
+        def schedule_restore():
+            from PySide6.QtCore import QTimer
+            for delay in (0, 2000, 5000):
+                QTimer.singleShot(delay, restore_tray)
+                QTimer.singleShot(delay, restore_window)
+
+        _run_on_ui_thread(window, schedule_restore)
         _desktop_capture.reset()
         _compat_capture.close()
         for win in api._all_windows():

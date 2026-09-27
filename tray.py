@@ -9,6 +9,8 @@ and it follows the taskbar between light and dark.
 
 import threading
 import time
+import ctypes
+from ctypes import wintypes
 
 import pystray
 from PIL import Image, ImageDraw, ImageFont
@@ -24,6 +26,22 @@ _HOME_GLYPH = "\ue80f"
 # The tray is drawn at 16pt; this is that at 200%, which downscales
 # cleanly to whatever the display actually asks for.
 _SIZE = 32
+
+
+def restore_tray_icon(icon):
+    """Ask pystray's own message thread to delete/add its notification icon.
+
+    Its Windows display-change handler already performs this operation,
+    including when visible is still True but Explorer lost the icon. Posting
+    to that thread avoids racing native icon updates or shutdown from Qt.
+    """
+    hwnd = getattr(icon, "_hwnd", None)
+    if not hwnd:
+        return False
+    post = ctypes.windll.user32.PostMessageW
+    post.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    post.restype = wintypes.BOOL
+    return bool(post(hwnd, 0x007E, 0, 0))  # WM_DISPLAYCHANGE
 
 
 def _taskbar_is_light():

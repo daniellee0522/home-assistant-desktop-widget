@@ -3,6 +3,7 @@ import ctypes
 import multiprocessing
 from pathlib import Path
 import sys
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,8 +11,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def run():
     import main
     import qtshell
-    from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QEventLoop, QTimer, Qt
+    from PySide6.QtWidgets import QApplication, QWidget
+    from PIL import Image
+    import pystray
+    from tray import restore_tray_icon
+
+    # Exercise pystray's real Windows message loop without adding a test icon
+    # to the user's taskbar. Record only the final Shell_NotifyIcon boundary.
+    icon = pystray.Icon('resume-test', Image.new('RGBA', (16, 16)))
+    ready = threading.Event()
+    restored = threading.Event()
+    calls = []
+
+    def record_notification(code, flags, **kwargs):
+        calls.append((code, threading.get_ident()))
+        if code == 0:  # NIM_ADD
+            restored.set()
+
+    def setup(tray_icon):
+        tray_icon.visible = True
+        ready.set()
+
+    icon._message = record_notification
+    icon.run_detached(setup)
+    try:
+        assert ready.wait(5), 'Tray message loop did not start'
+        calls.clear()
+        restored.clear()
+        assert restore_tray_icon(icon), 'Failed to queue tray recovery'
+        assert restored.wait(5), 'Tray recovery was not processed'
+        assert [code for code, _ in calls] == [2, 0], calls  # DELETE, ADD
+        assert all(tid != threading.get_ident() for _, tid in calls), calls
+        assert icon.visible
+        print('Native tray recovery deleted/re-added the icon on its own message thread')
+    finally:
+        icon.stop()
 
     capture = main._DesktopCapture()
     kernel = ctypes.WinDLL('kernel32')
@@ -46,6 +81,24 @@ def run():
     window = qtshell.Window('Load test', hidden=True, transparent=True)
     window.native.setAttribute(Qt.WA_DontShowOnScreen, True)
     window.native.show()
+    power_filter = qtshell._PowerFilter()
+    app.installNativeEventFilter(power_filter)
+    # WA_DontShowOnScreen is a render-only window; use a hidden native
+    # top-level receiver for the Windows broadcast test.
+    receiver = QWidget()
+    post = ctypes.windll.user32.PostMessageW
+    post.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    post.restype = ctypes.c_int
+    qtshell._resume_pending.clear()
+    assert post(int(receiver.winId()), 0x0218, 0x0012, 0)
+    resume_loop = QEventLoop()
+    QTimer.singleShot(200, resume_loop.quit)
+    resume_loop.exec()
+    assert qtshell._resume_pending.is_set(), 'Qt did not receive the native resume notification'
+    qtshell._resume_pending.clear()
+    app.removeNativeEventFilter(power_filter)
+    receiver.close()
+    print('Native Windows resume notification reached the Qt power filter')
     received = []
     pixels = []
     last_pixels = []
