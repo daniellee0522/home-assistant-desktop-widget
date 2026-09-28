@@ -17,6 +17,48 @@ def extract(path, name, scope):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_hidden_surface_defers_recovery_until_shown(self):
+        refresh = extract("qtshell.py", "_refresh_display", {})
+        native = Mock()
+        native.size.return_value.width.return_value = 300
+        native.size.return_value.height.return_value = 200
+        native.isVisible.return_value = False
+        refresh(native)
+        self.assertTrue(native._display_dirty)
+        native.resize.assert_not_called()
+        native.view.show.assert_not_called()
+        native.isVisible.return_value = True
+        refresh(native)
+        self.assertFalse(native._display_dirty)
+        self.assertEqual(native.resize.call_count, 2)
+        native.view.hide.assert_called_once()
+        native.view.show.assert_called_once()
+        native._window.evaluate_js.assert_called_once_with(
+            "window.__recoverDisplay && window.__recoverDisplay()")
+
+    def test_flyout_origin_uses_current_monitor_work_area(self):
+        work_area = Mock(return_value=(0, 0, 1920, 1040))
+        origin = extract("main.py", "_flyout_origin", {"_work_area_at": work_area})
+        api = Mock(_flyout_anchor=((0, 0, 2560, 1400), True), _FLYOUT_MARGIN=12)
+        self.assertEqual(origin(api, 300, 200), (1608, 828))
+        work_area.assert_called_once_with(2559, 1399)
+
+    def test_old_resize_cannot_poison_flyout_size_cache(self):
+        scope = {"MIN_WINDOW_W": 1, "MIN_WINDOW_H": 1,
+                 "_get_hwnd": lambda w: 123, "_set_window_rect": Mock(),
+                 "_set_window_size": Mock(), "_run_on_ui_thread": lambda w, fn: fn()}
+        resize = extract("main.py", "_resize_native", scope)
+        resize_flyout = extract("main.py", "resize_flyout_window", scope)
+        api = Mock(_flyout_size=(100, 100), _flyout_last_resize_seq=10,
+                   _flyout_resize_lock=threading.Lock())
+        api._flyout_origin.return_value = (5, 5)
+        api._resize_native = lambda *a, **kw: resize(api, *a, **kw)
+        resize_flyout(api, 300, 200, 11)
+        self.assertEqual(api._flyout_size, (300, 200))
+        resize_flyout(api, 100, 100, 9)
+        self.assertEqual(api._flyout_size, (300, 200))
+        scope["_set_window_rect"].assert_called_once_with(123, 5, 5, 300, 200)
+
     def test_tray_recovery_posts_to_icon_thread_even_if_logically_visible(self):
         native = Mock()
         native.windll.user32.PostMessageW.return_value = 1
@@ -57,7 +99,8 @@ class ResumeTests(unittest.TestCase):
 
     def test_restore_rechecks_visibility_and_restores_native_state(self):
         window, api = Mock(), Mock()
-        scope = {"window": window, "api": api}
+        api._all_windows.return_value = [window]
+        scope = {"window": window, "api": api, "webview": Mock()}
         for name in ("_set_noactivate", "_apply_window_shape", "_send_to_bottom"):
             scope[name] = Mock()
         restore = extract("main.py", "restore_window", scope)
@@ -66,7 +109,8 @@ class ResumeTests(unittest.TestCase):
         window.native.showNormal.assert_called_once()
         window.native._cache_hwnd.assert_called_once()
         scope["_send_to_bottom"].assert_called_once_with(window)
-        api._apply_system_glass.assert_called_once_with("main")
+        api._apply_system_glass.assert_called_once_with()
+        window.refresh_display.assert_called_once()
         api._desktop_visible = False
         restore()  # a delayed retry must respect a subsequent tray hide
         window.native.showNormal.assert_called_once()

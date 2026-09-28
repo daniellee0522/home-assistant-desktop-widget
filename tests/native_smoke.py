@@ -117,6 +117,9 @@ def run():
     def loaded():
         def result(value):
             received.append(value)
+            geometry = window.native.geometry()
+            window.refresh_display()
+            assert window.native.geometry() == geometry, 'Display recovery moved/resized the widget'
             QTimer.singleShot(100, check_pixels)
         window.native.view.page().runJavaScript('JSON.stringify(window.received)', result)
 

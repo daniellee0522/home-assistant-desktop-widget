@@ -24,6 +24,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtGui import QCursor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -47,6 +48,38 @@ _hang_logged = [False]
 _resume_hooks = []
 _resume_pending = threading.Event()
 _power_filter = None
+_display_hooks = []
+_display_timer = None
+
+
+def on_display_change(fn):
+    """Run fn on the GUI thread once a burst of screen changes settles."""
+    _display_hooks.append(fn)
+
+
+def _display_changed(*args):
+    if _display_timer is not None:
+        _display_timer.start(500)
+
+
+def _notify_display_change():
+    for fn in list(_display_hooks):
+        try:
+            fn()
+        except Exception:
+            log("display recovery failed: " + traceback.format_exc())
+
+
+def _watch_screen(screen):
+    screen.geometryChanged.connect(_display_changed)
+    screen.availableGeometryChanged.connect(_display_changed)
+    screen.logicalDotsPerInchChanged.connect(_display_changed)
+
+
+def _screen_added(screen):
+    log("Display added: " + screen.name())
+    _watch_screen(screen)
+    _display_changed()
 
 
 class _PowerFilter(QAbstractNativeEventFilter):
@@ -259,6 +292,7 @@ class _WebWindow(QMainWindow):
         self._shown_once = False
         self._renderer_failures = 0
         self._renderer_reload_pending = False
+        self._display_dirty = False
         # The HWND is cached on the GUI thread and refreshed on WinIdChange.
         # Calling winId() from request threads races Qt recreating native
         # windows after a display change (e.g. on resume) and has wedged
@@ -276,6 +310,27 @@ class _WebWindow(QMainWindow):
 
     def _on_load_started(self):
         self._window._page_loaded = False
+
+    def _refresh_display(self):
+        """GUI thread: rebuild the viewport after monitor/DPI changes.
+
+        Hidden panels keep the dirty flag until shown on their final monitor.
+        A size round-trip forces WebEngine to submit a fresh surface even if
+        the final CSS dimensions match its pre-suspend cache.
+        """
+        if not self.isVisible():
+            self._display_dirty = True
+            return
+        self._display_dirty = False
+        size = self.size()
+        self.view.hide()
+        self.resize(size.width() + 1, size.height() + 1)
+        self.resize(size)
+        self.view.show()
+        self._cache_hwnd()
+        self.view.update()
+        self._window.evaluate_js(
+            "window.__recoverDisplay && window.__recoverDisplay()")
 
     def _on_renderer_terminated(self, status, exit_code):
         self._window._page_loaded = False
@@ -309,6 +364,8 @@ class _WebWindow(QMainWindow):
         super().showEvent(e)
         self._cache_hwnd()
         self._window.events.showing.fire()
+        if self._display_dirty:
+            QTimer.singleShot(0, self._refresh_display)
         if not self._shown_once:
             self._shown_once = True
             # Once the event loop has settled and the window is really up.
@@ -371,6 +428,19 @@ class Window:
 
     def show(self):
         _invoke(self._native, self._native.show)
+
+    def refresh_display(self):
+        _invoke(self._native, self._native._refresh_display)
+
+    def prepare_for_show(self):
+        """Tray panels must adopt the click monitor before physical placement."""
+        def prepare():
+            screen = QApplication.screenAt(QCursor.pos())
+            if screen is not None and screen != self._native.screen():
+                self._native.setScreen(screen)
+                self._native._display_dirty = True
+            self._native._cache_hwnd()
+        _invoke(self._native, prepare, wait=True)
 
     def hide(self):
         _invoke(self._native, self._native.hide)
@@ -468,7 +538,7 @@ def start():
 
 def prepare(web_dir, api, log_dir=None):
     """Create the application and the bridge, before any window exists."""
-    global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter
+    global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter, _display_timer
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
         try:
@@ -479,8 +549,13 @@ def prepare(web_dir, api, log_dir=None):
     _app = QApplication.instance() or QApplication([])
     _app.setQuitOnLastWindowClosed(False)
     log("Started pid=%s" % os.getpid())
-    _app.screenAdded.connect(lambda screen: log("Display added: " + screen.name()))
-    _app.screenRemoved.connect(lambda screen: log("Display removed: " + screen.name()))
+    _display_timer = QTimer()
+    _display_timer.setSingleShot(True)
+    _display_timer.timeout.connect(_notify_display_change)
+    _app.screenAdded.connect(_screen_added)
+    _app.screenRemoved.connect(lambda screen: (log("Display removed: " + screen.name()), _display_changed()))
+    for screen in _app.screens():
+        _watch_screen(screen)
     # Created on the GUI thread, which is where its queued calls then run.
     _marshal = _Marshal()
     if os.name == "nt":

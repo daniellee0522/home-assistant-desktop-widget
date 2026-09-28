@@ -429,12 +429,11 @@ class Api:
         )
 
     def resize_flyout_window(self, phys_w, phys_h, seq=None):
-        self._flyout_size = (max(MIN_WINDOW_W, int(phys_w)),
-                             max(MIN_WINDOW_H, int(phys_h)))
         # Anchored to a screen corner, so growing it moves it as well.
         self._resize_native(
             self._flyout_window, self._flyout_resize_lock, "_flyout_last_resize_seq",
             phys_w, phys_h, seq, origin=self._flyout_origin,
+            on_applied=lambda w, h: setattr(self, "_flyout_size", (w, h)),
         )
 
     def resize_settings_window(self, phys_w, phys_h, seq=None):
@@ -444,7 +443,7 @@ class Api:
         )
 
     def _resize_native(self, window, seq_lock, seq_attr, phys_w, phys_h, seq,
-                       origin=None):
+                       origin=None, on_applied=None):
         if not window:
             return
         if seq is not None:
@@ -465,11 +464,16 @@ class Api:
             # the owning thread.
             if seq is not None and seq != getattr(self, seq_attr):
                 return
+            hwnd = _get_hwnd(window)
+            if not hwnd:
+                return
             at = origin(w, h) if origin else None
             if at:
                 _set_window_rect(hwnd, at[0], at[1], w, h)
             else:
                 _set_window_size(hwnd, w, h)
+            if on_applied:
+                on_applied(w, h)
         _run_on_ui_thread(window, apply)
 
     def quit_app(self):
@@ -513,7 +517,7 @@ class Api:
         if at:
             _run_on_ui_thread(
                 window, lambda: _set_window_rect(
-                    hwnd, at[0], at[1], size[0], size[1]),
+                    _get_hwnd(window), at[0], at[1], size[0], size[1]),
             )
 
     def show_flyout(self):
@@ -521,6 +525,8 @@ class Api:
             self.open_settings_window()
             return
         window = self._flyout_window
+        if window:
+            window.prepare_for_show()
         hwnd = _get_hwnd(window) if window else None
         if not hwnd:
             return
@@ -653,6 +659,9 @@ class Api:
         if not anchor or w <= 0 or h <= 0:
             return None
         work, near_right = anchor
+        # A monitor can disappear and return with a different work area on
+        # resume. Never position against the rectangle cached before sleep.
+        work = _work_area_at(work[2] - 1 if near_right else work[0], work[3] - 1) or work
         m = self._FLYOUT_MARGIN
         x = work[2] - w - m if near_right else work[0] + m
         return (
@@ -2324,6 +2333,23 @@ def main():
     def quit_action(icon=None, item=None):
         api._quit()
 
+    def restore_window():
+        # Screen arrival/DPI changes can happen after the resume retries.
+        # Refresh every surface; hidden panels defer repainting until shown.
+        if api._desktop_visible:
+            window.native._cache_hwnd()
+            _set_noactivate(window, True)
+            window.native.showNormal()
+            _send_to_bottom(window)
+        for win in api._all_windows():
+            win.refresh_display()
+            _apply_window_shape(win)
+        api._apply_capture_exclusion()
+        api._apply_system_glass()
+        webview.log("Display surfaces refreshed")
+
+    webview.on_display_change(restore_window)
+
     def on_resume():
         """Rebuild what a suspend invalidates: GDI objects made for the old
         display, DWM attributes, capture exclusion, and the websocket."""
@@ -2335,20 +2361,6 @@ def main():
                 webview.log("Resume tray re-registration requested: %s" % posted)
             except Exception as exc:
                 webview.log("Resume tray re-registration failed: %s" % exc)
-
-        def restore_window():
-            # Recheck on every retry: hiding from the tray during recovery
-            # must remain authoritative. Displays/DWM can settle after wake.
-            if not api._desktop_visible:
-                return
-            window.native._cache_hwnd()
-            _set_noactivate(window, True)
-            window.native.showNormal()
-            _apply_window_shape(window)
-            _send_to_bottom(window)
-            api._apply_capture_exclusion()
-            api._apply_system_glass("main")
-            window.native.view.update()
 
         def schedule_restore():
             from PySide6.QtCore import QTimer

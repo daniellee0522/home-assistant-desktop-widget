@@ -11,23 +11,26 @@ const assert = require('assert');
       {role: 'settings', fixed: true, zoom: 200, dpr: 1.5},
       {role: 'grid', fixed: true, zoom: 150, dpr: 1.25},
       {role: 'flyout', fixed: true, zoom: 200, dpr: 2},
+      {role: 'flyout', populated: true, dpr: 1.5},
     ]) {
-      const {role, fixed = false, zoom = 100, dpr = 1} = scenario;
+      const {role, fixed = false, zoom = 100, dpr = 1, populated = false} = scenario;
+      const tiles = populated ? [{id: 'test-light', entity: 'light.test', domain: 'light', room: 'Test room'}] : [];
       const page = await browser.newPage({viewport: {width: 340, height: 500}, deviceScaleFactor: dpr});
       const errors = [];
       page.on('pageerror', e => errors.push(e.message));
       let sizes = [];
+      let simulateHostResize = true;
       await page.route('http://widget.test/**', async route => {
         const url = new URL(route.request().url());
         if (url.pathname.startsWith('/api/')) {
           const method = url.pathname.slice(5);
           const args = route.request().postDataJSON();
           let value = null;
-          if (method === 'bootstrap') value = {config: {tiles: [], ha_token: '', columns: 4, zoom, theme: 'auto', fixed_size: fixed, fixed_width: 400, fixed_height: 300}, connected: false};
+          if (method === 'bootstrap') value = {config: {tiles, ha_token: '', columns: 4, zoom, theme: 'auto', fixed_size: fixed, fixed_width: 400, fixed_height: 300}, connected: false};
           if (method === 'fetch_initial_states') value = {};
           if (method.startsWith('resize_')) {
             sizes.push(args.slice(0, 2));
-            if (sizes.length < 30) await page.setViewportSize({width: Math.ceil(args[0] / dpr), height: Math.ceil(args[1] / dpr)});
+            if (simulateHostResize && sizes.length < 30) await page.setViewportSize({width: Math.ceil(args[0] / dpr), height: Math.ceil(args[1] / dpr)});
           }
           return route.fulfill({json: {value}});
         }
@@ -67,6 +70,26 @@ const assert = require('assert');
       }
       if (role === 'grid' && fixed) assert.deepEqual(sizes.at(-1), [750, 563]);
       if (role === 'flyout') assert(await page.locator('#empty-hint').isHidden());
+      const beforeRecovery = sizes.length;
+      const expectedSize = sizes.at(-1);
+      await page.evaluate(() => window.__recoverDisplay());
+      await page.waitForFunction(() => !backdropPending);
+      await page.waitForTimeout(200);
+      assert(sizes.length > beforeRecovery, 'resume must resend unchanged CSS dimensions');
+      assert.deepEqual(sizes.at(-1), expectedSize, 'recovery must preserve layout and zoom');
+      if (role === 'grid' && fixed) {
+        simulateHostResize = false;
+        const client = await page.context().newCDPSession(page);
+        await client.send('Emulation.setDeviceMetricsOverride', {
+          ...page.viewportSize(), deviceScaleFactor: 2, mobile: false,
+        });
+        // Emulation changes DPR without reliably dispatching a media-query
+        // event. Deliver the same recovery callback used by Qt's DPI hook.
+        await page.evaluate(() => window.__recoverDisplay());
+        await page.waitForTimeout(500);
+        assert.deepEqual(sizes.at(-1), [1200, 900], 'DPR-only change must resize physical viewport');
+      }
+      assert.equal(errors.length, 0);
       await page.close();
     }
   } finally { await browser.close(); }

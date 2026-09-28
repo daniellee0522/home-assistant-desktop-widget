@@ -299,6 +299,24 @@ function syncWindowSize() {
 }
 new ResizeObserver(syncWindowSize).observe(document.getElementById('stage'));
 
+// A DPR change need not change the CSS dimensions observed above.
+let dpiQuery = null;
+let displayDpr = window.devicePixelRatio || 1;
+function watchDisplayScale() {
+  if (dpiQuery) dpiQuery.removeEventListener('change', displayScaleChanged);
+  dpiQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+  dpiQuery.addEventListener('change', displayScaleChanged);
+}
+function displayScaleChanged() {
+  displayDpr = window.devicePixelRatio || 1;
+  watchDisplayScale();
+  window.__recoverDisplay();
+}
+watchDisplayScale();
+window.addEventListener('resize', () => {
+  if ((window.devicePixelRatio || 1) !== displayDpr) displayScaleChanged();
+});
+
 /* ============================================================
  * Frosted backdrop
  * ============================================================ */
@@ -855,6 +873,14 @@ window.__invalidateBackdrop = function () {
   restartBackdropTicker();
 };
 
+window.__recoverDisplay = function () {
+  // Windows may have resized the native window while the renderer slept.
+  // Re-send even an unchanged size so the host can restore its geometry.
+  lastRequestedSize = '';
+  syncWindowSize();
+  window.__invalidateBackdrop();
+};
+
 // Coalesced: resizes come in bursts.
 let backdropSoonTimer = null;
 function refreshBackdropSoon(delay) {
@@ -1254,6 +1280,7 @@ window.__armBackdrop = function () {
     Promise.resolve(refreshBackdrop()).then(done, done);
   };
   // Size the window to the new content first, and wait for that to land.
+  lastRequestedSize = '';
   syncWindowSize();
   requestAnimationFrame(() => pendingResize.then(() => attempt(12), () => attempt(12)));
 };
