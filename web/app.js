@@ -103,7 +103,7 @@ function iconNameFor(tile, state) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', columns: 4, tiles: [], sample_fps: 16,
+  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', columns: 4, tiles: [],
   dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
   zoom: 100, fixed_size: false, fixed_width: 400, fixed_height: 300,
@@ -205,7 +205,6 @@ function applyTheme() {
   const theme = (IS_FLYOUT_WINDOW && panel !== 'follow') ? panel : (CONFIG.theme || 'auto');
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.setAttribute('data-glass-style', CONFIG.glass_style || 'classic');
-  if (document.getElementById('sample-fps-range')) setSampleFpsSlider(CONFIG.sample_fps);
 }
 
 /* ============================================================
@@ -325,24 +324,18 @@ window.addEventListener('resize', () => {
 // into #backdrop-glass, clipped to the card. Outside the card the window is
 // transparent, so the rounded corners show the live desktop.
 //
-// Sampling is chained, not on an interval, and paced from what a capture
+// Sampling is chained, not on an interval. Through Desktop Duplication the
+// host answers when the screen under the window changes ("paced"), so the
+// next request goes out at once and the display sets the rate. Otherwise
+// (compatibility capture, GDI fallback) it is paced from what a capture
 // costs: BACKDROP_DUTY is how many times that cost to wait before the next
-// one, so slow machines thin the rate out instead of pinning a core. The
-// user's sample rate is a ceiling on top of that.
+// one, so slow machines thin the rate out instead of pinning a core.
 const BACKDROP_DUTY = 4;
-const SAMPLE_FPS_MIN = 2;
-const SAMPLE_FPS_MAX = 30;
+const BACKDROP_FLOOR_MS = 16;
 // The open tray panel sits over other applications (often a scrolling
 // page), so it samples faster and never backs off.
 const PANEL_DUTY = 2;
 const PANEL_FLOOR_MS = 16;
-
-function backdropFloorMs() {
-  const fps = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX,
-    Number(CONFIG.sample_fps) || 16));
-  // Not slowed while dimmed: the glass is most of what remains visible.
-  return Math.round(1000 / fps);
-}
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 // Identical frames in a row before the desktop counts as still.
 const BACKDROP_STILL_BEFORE_IDLE = 4;
@@ -358,6 +351,8 @@ let backdropSkipMs = 0;
 // Where a dragged window is going, so the capture is taken there.
 let backdropAt = null;
 let backdropFrameMs = 60;
+// True while the host paces reads by the screen (see above).
+let backdropPaced = false;
 
 // Tracks the cheap end of capture cost: occasional spikes (e.g. while the
 // page repaints) must not set the pace. Drops immediately, rises slowly.
@@ -811,8 +806,10 @@ function refreshBackdrop() {
         return;
       }
       backdropSkipMs = 0;
-      // Paced from the capture's own cost, not the bridge round trip.
-      noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
+      backdropPaced = !!(shot && shot.paced);
+      // Paced from the capture's own cost, not the bridge round trip; a
+      // screen-paced answer's time is mostly waiting, not cost.
+      if (!backdropPaced) noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
       if (!shot) { backdropPending = false; return; }
       if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
       backdropStill = 0;
@@ -928,15 +925,16 @@ function startBackdropTicker() {
       });
       return;
     }
-    // The widget backs off over still wallpaper; the open panel never
-    // does, since the window behind it may start scrolling at any time.
+    // A screen-paced read already waited for a change. Otherwise the widget
+    // backs off over still wallpaper; the open panel never does, since the
+    // window behind it may start scrolling at any time.
     const openPanel = IS_FLYOUT_WINDOW && flyoutOpen;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
-      || (openPanel
+      || (backdropPaced ? 0 : openPanel
         ? Math.max(PANEL_FLOOR_MS, Math.round(backdropFrameMs * PANEL_DUTY))
         : backdropStill >= BACKDROP_STILL_BEFORE_IDLE
           ? BACKDROP_IDLE_MS
-          : Math.max(backdropFloorMs(), Math.round(backdropFrameMs * BACKDROP_DUTY))));
+          : Math.max(BACKDROP_FLOOR_MS, Math.round(backdropFrameMs * BACKDROP_DUTY))));
     backdropRaf = null;
     backdropTimer = setTimeout(again, wait);
   };
@@ -1875,7 +1873,6 @@ function openSettingsView() {
   document.getElementById('glass-style-select').value = CONFIG.glass_style || 'classic';
   document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
-  setSampleFpsSlider(CONFIG.sample_fps || 16);
   document.getElementById('dim-idle-check').checked = CONFIG.dim_when_idle !== false;
   setDimAfterSlider(CONFIG.dim_after_sec || 120);
   document.getElementById('dim-after-block').hidden = CONFIG.dim_when_idle === false;
@@ -1906,15 +1903,6 @@ function setDimAfterSlider(sec) {
   const v = Math.max(10, Math.min(600, Number(sec) || 120));
   document.getElementById('dim-after-range').value = String(v);
   document.getElementById('dim-after-value').textContent = dimAfterText(v);
-}
-
-function setSampleFpsSlider(fps) {
-  const v = Math.max(SAMPLE_FPS_MIN, Math.min(SAMPLE_FPS_MAX, Number(fps) || 16));
-  const range = document.getElementById('sample-fps-range');
-  range.value = String(v);
-  range.disabled = CONFIG.glass_style === 'liquid';
-  document.getElementById('sample-fps-value').textContent =
-    range.disabled ? '跟隨螢幕' : v + ' fps';
 }
 
 function setZoomSlider(pct) {
@@ -2179,7 +2167,8 @@ function init() {
     applySystemGlass();
     // The frame and its cost estimate belong to the old capture method.
     backdropHash = null;
-    backdropFrameMs = backdropFloorMs();
+    backdropFrameMs = BACKDROP_FLOOR_MS;
+    backdropPaced = false;
     refreshBackdropSoon(0);
   });
   document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
@@ -2198,15 +2187,6 @@ function init() {
   dimRange.addEventListener('change', async (e) => {
     await savePref({ dim_after_sec: Number(e.target.value) });
     setDimAfterSlider(CONFIG.dim_after_sec);
-  });
-
-  const fpsRange = document.getElementById('sample-fps-range');
-  fpsRange.addEventListener('input', (e) => {
-    document.getElementById('sample-fps-value').textContent = e.target.value + ' fps';
-  });
-  fpsRange.addEventListener('change', async (e) => {
-    await savePref({ sample_fps: Number(e.target.value) });
-    setSampleFpsSlider(CONFIG.sample_fps);
   });
 
   const zoomRange = document.getElementById('zoom-range');

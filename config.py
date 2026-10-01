@@ -52,14 +52,13 @@ DEFAULT_CONFIG = {
     "start_on_boot": False,
     "zoom": 100,              # percent; scales the whole widget via CSS zoom
     # Who draws the frosted glass:
-    #   "fast"    - screen capture; the widget is hidden from screenshots
-    #               and recordings so it does not read itself back
+    #   "fast"    - screen capture through Desktop Duplication, refreshed
+    #               when the screen behind changes; the widget is hidden
+    #               from screenshots and recordings so it does not read
+    #               itself back
     #   "compat"  - slower wallpaper rendering; the widget stays visible
     #   "system"  - DWM glass; only offered with HA_WIDGET_SYSTEM_GLASS set
     "glass_mode": "fast",
-    # Ceiling on how often the backdrop is re-captured, in frames per
-    # second. Still wallpaper backs off on its own (see app.js).
-    "sample_fps": 16,
     # The tray panel's own theme; "follow" uses the widget's.
     "panel_theme": "follow",
     # Dim the widget once the desktop has been covered for dim_after_sec
@@ -121,7 +120,7 @@ def _migrate(cfg, loaded):
         else:
             cfg["glass_mode"] = "fast" if loaded.get("fast_glass", True) else "compat"
     # Settings that no longer exist.
-    for key in ("system_glass", "fast_glass", "opacity"):
+    for key in ("system_glass", "fast_glass", "opacity", "sample_fps"):
         cfg.pop(key, None)
     return cfg
 

@@ -18,8 +18,7 @@ const EN_TEXT = {
   '畫面擷取 (widget 不出現在截圖／錄影)':'Screen capture (widget hidden from recordings)',
   '相容模式 (較耗資源，會出現在截圖)':'Compatibility (widget visible in recordings)',
   '毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。':'Glass blurs a capture of the desktop behind the window. Screen capture excludes the widget for speed, so it will not appear in recordings. Compatibility mode keeps it visible but captures more slowly.',
-  '縮放比例':'Scale', '毛玻璃更新率':'Glass sample rate',
-  '越高越跟得上動態桌布，耗用也等比增加；靜止的桌布會自動放慢。工作列面板不受此限制——它開著的時候會跟著螢幕更新率跑。':'Higher rates track animated wallpaper more closely and use more resources. Still wallpaper slows automatically. The tray panel follows the display while open.',
+  '縮放比例':'Scale',
   '行為':'Behavior', '鎖定位置 (無法拖曳移動)':'Lock position (disable dragging)',
   '離開桌面時淡化 (全螢幕時立刻淡化，回到桌面或點一下恢復)':'Dim away from desktop (immediately in full screen; return or click to restore)',
   '離開桌面多久後淡化':'Dim after leaving desktop', '開機時自動啟動':'Start with Windows',
@@ -40,7 +39,7 @@ const EN_TEXT = {
   '載入中…':'Loading…', '載入中...':'Loading...', '沒有紀錄':'No history',
   '讀不到紀錄':'Could not load history', '沒有符合的實體':'No matching entities',
   '雙擊重新命名':'Double-click to rename', '每次調整溫度的幅度':'Temperature step',
-  '跟隨螢幕':'Follow display', '測試中...':'Testing...', '連線成功':'Connection successful',
+  '測試中...':'Testing...', '連線成功':'Connection successful',
   '未知錯誤':'Unknown error', '秒':'sec', '分鐘':'min', '小時':'hours',
 };
 

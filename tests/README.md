@@ -10,7 +10,8 @@ node tests/layout.cjs
 
 - **Python unit tests** extract the relevant functions from `main.py` and
   `qtshell.py`, so they run without starting Qt or touching the desktop.
-  They cover GDI object selection, clipped captures, capture-exclusion and
+  `test_dxgi_capture.py` covers Desktop Duplication's rotation mapping and
+  change tracking without a GPU. They cover GDI object selection, clipped captures, capture-exclusion and
   DWM rollback logic, capture worker timeout/restart, and per-page push
   delivery during loading. Resume checks cover short sleeps, preserving
   manually hidden widgets, and tray recovery independent of desktop visibility.

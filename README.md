@@ -26,7 +26,7 @@ appearance. The glass effect varies with your wallpaper.
 - **Live updates:** device states update through Home Assistant's WebSocket API.
 - **Quick access:** click the tray icon to open a panel beside the taskbar.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
-- **Personalization:** light and dark themes; classic, liquid, and Windows glass; columns, zoom, fixed size, and glass sample rate.
+- **Personalization:** light and dark themes; classic, liquid, and Windows glass; columns, zoom, and fixed size. Glass follows the display's own refresh rate; there is no rate to set.
 - **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it.
 - **Languages:** Traditional Chinese and English.
 
@@ -38,8 +38,10 @@ for offline use.
 The liquid appearance ports the rounded-rectangle distance and edge
 displacement from [KMPLiquidGlass's Skia Lens.kt](https://github.com/Kashif-E/KMPLiquidGlass/blob/master/backdrop/src/skiaMain/kotlin/com/kashif_e/backdrop/effects/Lens.kt)
 to a WebGL shader (with a Canvas fallback) over a capture of the desktop.
-It samples once per display frame, and may fall below the refresh rate when
-capturing takes longer than a frame.
+Screen capture uses DXGI Desktop Duplication: Windows reports which parts of
+the screen changed, and the glass is refreshed only when the area behind a
+window did, at up to the display's refresh rate. A still desktop costs no
+captures at all.
 
 ## Glass source
 

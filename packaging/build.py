@@ -92,7 +92,7 @@ def main():
     (bundle / 'build-info.json').write_text(json.dumps({
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'capture_worker.py',
+                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
                                     ROOT / 'web/app.js', ROOT / 'web/bridge.js',
                                     ROOT / 'web/i18n.js', ROOT / 'web/mdi-paths.js']},
     }, indent=2), encoding='utf-8')

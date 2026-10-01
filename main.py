@@ -35,6 +35,7 @@ import time
 import zlib
 
 from capture_worker import CaptureWorker
+from dxgi_capture import DesktopDuplication
 
 if sys.platform == "win32":
     # Must happen before Qt creates anything. Per-monitor-v2 awareness keeps
@@ -111,6 +112,9 @@ class Api:
         # DWM applies a capture-affinity change on its next composition, so
         # frames captured across such a change are dropped.
         self._capture_epoch = 0
+        # Per window kind: (rectangle, frame) last answered through Desktop
+        # Duplication, so the next read waits for that rectangle to change.
+        self._duplication_after = {}
         self._capture_transition_until = 0.0
         # The main window's latest screen capture. A liquid-mode popover over
         # the excluded widget restores this region instead of a black hole.
@@ -202,7 +206,6 @@ class Api:
             "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
             "system_glass_active": self._system_glass_status(),
             "panel_theme": self._cfg.get("panel_theme", "follow"),
-            "sample_fps": int(self._cfg.get("sample_fps", 16)),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
             "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
             "tiles": self._cfg.get("tiles", []),
@@ -315,8 +318,6 @@ class Api:
         "fixed_width": lambda v: max(120, int(v)),
         "fixed_height": lambda v: max(90, int(v)),
         "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",
-        # Ceiling on the backdrop sample rate; the page paces itself below it.
-        "sample_fps": lambda v: max(2, min(30, int(v))),
         "dim_when_idle": bool,
         "dim_after_sec": lambda v: max(10, min(3600, int(v))),
     }
@@ -870,8 +871,31 @@ class Api:
                 over = _windows_below(hwnd, (x, y, x + w, y + h))
             from PIL import Image, ImageFilter
             widget = None
-            raw = _desktop_capture.grab_screen(
-                x, y, w, h) if can_read_screen or compose_widget else None
+            raw = None
+            paced = False
+            if can_read_screen or compose_widget:
+                # Answered when the screen under the window changes, at the
+                # display's own rate; GDI only if duplication is unavailable.
+                rect = (x, y, w, h)
+                seen = self._duplication_after.get(window_kind)
+                after = seen[1] if seen and seen[0] == rect and last_hash is not None else None
+                if compose_widget:
+                    # The widget drawn into this frame changes on its own,
+                    # so the screen under it cannot set the pace.
+                    after = None
+                got = _screen_duplication.grab(x, y, w, h, after, _DUPLICATION_WAIT_SECS)
+                if got is not None:
+                    paced = not compose_widget
+                    self._duplication_after[window_kind] = (rect, got[0])
+                    if got[1] is None:
+                        if capture_epoch != self._capture_epoch:
+                            return {"skip": True, "retry_ms": 80}
+                        return {"unchanged": True, "hash": last_hash, "paced": True,
+                                "system_glass": False}
+                    raw = got[1]
+                else:
+                    self._duplication_after.pop(window_kind, None)
+                    raw = _desktop_capture.grab_screen(x, y, w, h)
             if raw and compose_widget:
                 widget = _grab_widget_rgba(self._window)
                 frame = self._main_backdrop_frame
@@ -901,7 +925,7 @@ class Api:
             cost_ms = (time.perf_counter() - started) * 1000.0
             if last_hash is not None and int(last_hash) == digest:
                 return {"unchanged": True, "hash": digest, "ms": cost_ms,
-                        "system_glass": False}
+                        "paced": paced, "system_glass": False}
             # Decode BGRA straight to RGB, which both encoders need.
             img = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
 
@@ -938,6 +962,8 @@ class Api:
                 # The capture's own cost; the page paces itself from this
                 # rather than from the bridge round trip.
                 "ms": (time.perf_counter() - started) * 1000.0,
+                # The screen set the pace; ask again straight away.
+                "paced": paced,
             }
         except Exception:
             return None
@@ -1621,6 +1647,11 @@ class _DesktopCapture:
 
 _desktop_capture = _DesktopCapture()
 _compat_capture = CaptureWorker()
+_screen_duplication = DesktopDuplication()
+_screen_duplication.set_logger(webview.log)
+# How long a read waits for the screen under a window to change before
+# answering "unchanged", so the page can notice it has been hidden.
+_DUPLICATION_WAIT_SECS = 0.5
 
 
 def _get_hwnd(window):
