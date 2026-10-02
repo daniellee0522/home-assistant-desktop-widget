@@ -25,8 +25,8 @@ import render                                                     # noqa: E402
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "native", "out")
 os.makedirs(OUT, exist_ok=True)
-W, H = render.widget_size("2x4")
-SIZE = (W + 40, H + 40)          # a margin of picture around the card, as on a desktop
+W4, H4 = render.widget_size("4x4")
+SIZE = (W4 + 40, H4 + 40)          # a margin of picture around the card, as on a desktop
 ORIGIN = 20
 
 TILES = [
@@ -70,7 +70,16 @@ buf = io.BytesIO()
 bg.save(buf, "PNG")
 bg_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 bg_qimage = QImage.fromData(buf.getvalue())
-themes = ["light", "dark"]
+# (name, widget size, how many of the demo tiles, theme, dimmed)
+SCENES = []
+for theme in ("light", "dark"):
+    for dim in (False, True):
+        tag = theme + ("-dim" if dim else "")
+        SCENES += [("small-" + tag, "2x4", 8, theme, dim), ("bar-" + tag, "2x4", 4, theme, dim),
+                   ("big-" + tag, "2x4", 2, theme, dim), ("4x4-" + tag, "4x4", 16, theme, dim)]
+ONLY = sys.argv[2].split(",") if len(sys.argv) > 2 else None
+if ONLY:
+    SCENES = [sc for sc in SCENES if any(o in sc[0] for o in ONLY)]
 state = {"i": 0, "web": {}, "native": {}}
 
 view = QWebEngineView()
@@ -79,41 +88,49 @@ view.resize(*SIZE)
 view.page().setBackgroundColor(QColor("#000000"))
 
 
-def native_render(theme):
+def tiles_for(count):
+    return [dict(TILES[i % len(TILES)], id="t%d" % i) for i in range(count)]
+
+
+def native_render(scene):
+    name, size, count, theme, dim = scene
     img = QImage(SIZE[0], SIZE[1], QImage.Format_ARGB32_Premultiplied)
     img.fill(Qt.transparent)
     p = QPainter(img)
     p.drawImage(0, 0, bg_qimage)
     p.translate(ORIGIN, ORIGIN)
-    render.draw_widget(p, "2x4", TILES, STATES, theme)
+    render.draw_widget(p, size, tiles_for(count), STATES, theme, None, 1.0, dim)
     p.end()
     return img
 
 
 def next_theme():
-    if state["i"] >= len(themes):
+    if state["i"] >= len(SCENES):
         report()
         return
-    theme = themes[state["i"]]
+    scene = SCENES[state["i"]]
+    name, size, count, theme, dim = scene
     script = """
-      CONFIG = Object.assign(CONFIG, {widgets: [{id: 'w1', size: '2x4', tiles: %s}],
+      CONFIG = Object.assign(CONFIG, {widgets: [{id: 'w1', size: %s, tiles: %s}],
         glass_style: 'classic', theme: %s, language: 'zh-TW', zoom: 100, dim_when_idle: false});
       STATES = %s;
       window.pywebview.api = new Proxy({}, {get: () => () => Promise.resolve(null)});
       resolveWindowTiles(); applyTheme(); renderGrid();
+      document.documentElement.classList.toggle('is-dimmed', %s);
       document.documentElement.style.zoom = '1';
       document.body.style.background = 'url(%s) 0 0 / auto no-repeat';
       document.querySelector('#stage').style.cssText = 'margin: %dpx 0 0 %dpx';
       document.querySelector('#backdrop-glass').style.display = 'none';
-    """ % (json.dumps(TILES), json.dumps(theme), json.dumps(STATES), bg_url, ORIGIN, ORIGIN)
+    """ % (json.dumps(size), json.dumps(tiles_for(count)), json.dumps(theme), json.dumps(STATES),
+           "true" if dim else "false", bg_url, ORIGIN, ORIGIN)
     view.page().runJavaScript(script)
 
     def grab():
-        state["web"][theme] = view.grab().toImage()
-        state["native"][theme] = native_render(theme)
+        state["web"][name] = view.grab().toImage()
+        state["native"][name] = native_render(scene)
         state["i"] += 1
         QTimer.singleShot(50, next_theme)
-    QTimer.singleShot(900, grab)
+    QTimer.singleShot(1300, grab)
 
 
 def to_pil(qimg):
@@ -122,22 +139,22 @@ def to_pil(qimg):
 
 
 def report():
-    for theme in themes:
-        web, nat = to_pil(state["web"][theme]), to_pil(state["native"][theme])
-        web.save(os.path.join(OUT, "web-%s.png" % theme))
-        nat.save(os.path.join(OUT, "native-%s.png" % theme))
+    for name, size, count, theme, dim in SCENES:
+        W, H = render.widget_size(size)
+        web, nat = to_pil(state["web"][name]), to_pil(state["native"][name])
+        web.save(os.path.join(OUT, "web-%s.png" % name))
+        nat.save(os.path.join(OUT, "native-%s.png" % name))
         diff = ImageChops.difference(web, nat)
-        box = (ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)
-        d = diff.crop(box)
+        d = diff.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H))
         px = list(d.getdata())
         mean = sum(sum(p) / 3 for p in px) / len(px)
         big = sum(1 for p in px if max(p) > 24) / len(px) * 100
-        side = Image.new("RGB", (SIZE[0] * 2 + 10, SIZE[1]))
-        side.paste(web, (0, 0))
-        side.paste(nat, (SIZE[0] + 10, 0))
-        side.save(os.path.join(OUT, "side-%s.png" % theme))
-        d.point(lambda v: min(255, v * 4)).save(os.path.join(OUT, "diff-%s.png" % theme))
-        print("%-5s mean abs difference %.2f / 255, pixels off by more than 24: %.1f%%" % (theme, mean, big))
+        side = Image.new("RGB", (W * 2 + 50, H + 40))
+        side.paste(web.crop((0, 0, W + 40, H + 40)), (0, 0))
+        side.paste(nat.crop((0, 0, W + 40, H + 40)), (W + 50, 0))
+        side.save(os.path.join(OUT, "side-%s.png" % name))
+        d.point(lambda v: min(255, v * 4)).save(os.path.join(OUT, "diff-%s.png" % name))
+        print("%-14s mean abs difference %.2f / 255, pixels off by more than 24: %.1f%%" % (name, mean, big))
     app.quit()
 
 
@@ -150,5 +167,5 @@ def loaded(ok):
 view.loadFinished.connect(loaded)
 view.load(QUrl.fromLocalFile(os.path.join(ROOT, "web", "index.html")))
 view.show()
-QTimer.singleShot(30000, app.quit)
+QTimer.singleShot(120000, app.quit)
 app.exec()

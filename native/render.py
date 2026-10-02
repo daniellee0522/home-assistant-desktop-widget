@@ -36,6 +36,21 @@ THEMES = {
         "edge": (255, 255, 255, 0.14), "edge_top": (255, 255, 255, 0.22), "edge_on": (0, 0, 0, 0.1),
     },
 }
+# html.is-dimmed: the widget recedes by restyling its tokens, not fading a layer.
+DIM = {"panel": (104, 120, 140, 0.26), "tile_on": (255, 255, 255, 0.30),
+       "on_text1": (255, 255, 255, 0.95), "on_text2": (255, 255, 255, 0.74),
+       "tile_off": (150, 160, 176, 0.18), "off_text1": (255, 255, 255, 0.85),
+       "off_text2": (255, 255, 255, 0.64), "edge": (255, 255, 255, 0.14),
+       "edge_on": (255, 255, 255, 0.22)}
+
+
+def tokens(theme, dim=False):
+    t = dict(THEMES[theme])
+    if dim:
+        t.update(DIM)
+    return t
+
+
 ACCENT = {"yellow": "#ffb320", "blue": "#409cff", "cyan": "#48aaff", "green": "#34c759",
           "teal": "#2fd0c2", "red": "#ff5b4a"}
 LIGHT_THEME_BULB = "#ffbe6c"
@@ -43,6 +58,18 @@ HVAC_COLORS = {"cool": "#3fa9f5", "heat": "#ff7a45", "heat_cool": "#34c759",
                "auto": "#34c759", "dry": "#f0b429", "fan_only": "#8e9aaf"}
 EMBOLDEN = float(os.environ.get('NATIVE_EMBOLDEN', '0'))
 FAMILIES = ["Segoe UI Variable", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei"]
+
+
+def parse_color(c):
+    """A CSS colour ('#rrggbb', 'rgb(r,g,b)') or an (r, g, b[, a]) tuple as a QColor."""
+    if isinstance(c, QColor):
+        return c
+    if isinstance(c, tuple):
+        return rgba(c)
+    if c.startswith("rgb("):
+        r, g, b = (int(v) for v in c[4:-1].split(",")[:3])
+        return QColor(r, g, b)
+    return QColor(c)
 
 
 def rgba(c, alpha=None):
@@ -287,7 +314,7 @@ def _variable_font():
     return _app_font
 
 
-def font(px, weight):
+def font(px, weight, spacing=0.0):
     f = QFont()
     var = _variable_font()
     f.setFamilies(([var] if var else []) + FAMILIES)
@@ -297,6 +324,8 @@ def font(px, weight):
     if var:
         f.setVariableAxis(QFont.Tag("wght"), min(900, int(getattr(weight, "value", weight)) + WOFF))
         f.setVariableAxis(QFont.Tag("opsz"), px)
+    if spacing:
+        f.setLetterSpacing(QFont.AbsoluteSpacing, spacing * 10)
     f.setStyleStrategy(QFont.PreferAntialias | QFont.NoSubpixelAntialias)
     f.setHintingPreference(QFont.PreferNoHinting)
     return f
@@ -345,7 +374,7 @@ def draw_text_fade(p, text, f, color, rect, shadow):
         p.translate(0, 1)
         p.drawPath(halo)
         p.restore()
-    col = QColor(color)
+    col = parse_color(color)
     # The page's mask always fades the last 16 px of the box, whatever the text.
     g = QLinearGradient(rect.left(), 0, rect.right(), 0)
     g.setColorAt(0, col)
@@ -368,10 +397,189 @@ def draw_text_fade(p, text, f, color, rect, shadow):
     p.restore()
 
 
-def draw_tile(p, tile, st, x, y, w, h, theme, tcol):
+FORM_SPAN = {"small": (1, 1), "bar": (2, 1), "big": (2, 2)}
+BIG_ZOOM = 1.4
+
+
+def form_for(cols, rows, count):
+    """Which tile form fills the widget for this many tiles (tileFormFor)."""
+    cells = cols * rows
+    if count > 0 and cells >= 4 and count <= cells / 4:
+        return "big"
+    if count > 0 and cells >= 2 and count <= cells / 2:
+        return "bar"
+    return "small"
+
+
+def tile_layout(size, count):
+    """(form, [(x, y, w, h) per tile that fits]) of a widget, in CSS pixels."""
+    cols, rows = SIZES.get(size, SIZES["2x4"])
+    form = form_for(cols, rows, count)
+    sc, sr = FORM_SPAN[form]
+    per_row = cols // sc
+    w, h = sc * CELL_W + (sc - 1) * GAP, sr * CELL_H + (sr - 1) * GAP
+    rects = []
+    for i in range(min(count, per_row * (rows // sr))):
+        rects.append((PAD + (i % per_row) * sc * (CELL_W + GAP),
+                      PAD + (i // per_row) * sr * (CELL_H + GAP), w, h))
+    return form, rects
+
+
+def mini_buttons(form, cw, ch):
+    """The climate tile's round - and + in the tile's own units: [(rect, delta sign)]."""
+    if form == "bar":
+        x, top = cw - 16 - 40, (ch - 90) / 2
+        return [(QRectF(x, top, 40, 40), -1), (QRectF(x, top + 50, 40, 40), 1)]
+    if form == "big":
+        x, y = cw - 14 - 44, ch - 14 - 44
+        return [(QRectF(x - 12 - 44, y, 44, 44), -1), (QRectF(x, y, 44, 44), 1)]
+    return []
+
+
+def draw_icon(p, name, color, rect):
+    """An icon in a colour that may be translucent (an rgba tuple)."""
+    opacity = 1.0
+    if isinstance(color, tuple):
+        opacity = color[3] if len(color) == 4 else 1.0
+        color = "#%02x%02x%02x" % tuple(color[:3])
+    p.save()
+    p.setOpacity(p.opacity() * opacity)
+    svg_renderer(name, color).render(p, rect)
+    p.restore()
+
+
+def draw_centred(p, text, f, color, rect):
+    """A short text centred in a box, as a flex box centres a line."""
+    fm = QFontMetricsF(f)
+    tw = fm.horizontalAdvance(text) / 10 * HSCALE
+    p.setPen(Qt.NoPen)
+    p.setBrush(parse_color(color))
+    p.drawPath(text_path(QPointF(0, 0), f, text, rect.left() + (rect.width() - tw) / 2,
+                         rect.top() + (rect.height() - fm.height() / 10) / 2 + fm.ascent() / 10))
+
+
+def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
+    """What is on a tile, in the tile's own units (a big tile is these units
+    zoomed by 1.4), from its top-left corner."""
     domain = tile["domain"]
     ok = st is not None
     on = ok and domain not in MOMENTARY and is_on(domain, st)
+    roomy = form != "small"
+    shown = climate_badge(st, on) if domain == "climate" and ok and not tile.get("icon") else None
+    reading = shown if roomy else None
+    badge = None if roomy else shown
+    readonly = domain in READONLY
+    value = value_text(domain, st) if ok and not badge and not reading else ""
+    readout = readonly and bool(value)
+    c1 = tcol["on_text1"] if on else tcol["off_text1"]
+    c2 = tcol["on_text2"] if on else tcol["off_text2"]
+    label = ((tile.get("label") or default_label(domain, st)) if ok else "無法連線")
+    name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
+    icolor = icon_color(tile, st, on, theme, tcol) if ok else tcol["off_text1"]
+    if dim:
+        icolor = (255, 255, 255, 0.95) if on else tcol["off_text1"]
+
+    # -- the icon ------------------------------------------------------
+    if form == "bar":
+        dx, dy = 23, (ch - 100) / 2
+        if reading:
+            text = reading["text"].replace("°", "") + " °C"
+            f = font(34, QFont.Bold, -0.5)
+            fm = QFontMetricsF(f)
+            p.setPen(Qt.NoPen)
+            p.setBrush(parse_color(c1))
+            p.drawPath(text_path(QPointF(0, 0), f, text, dx,
+                                 (ch - fm.height() / 10) / 2 + fm.ascent() / 10))
+        else:
+            if dim:
+                disc = (255, 255, 255, 0.20 if on else 0.10)
+                glyph = (255, 255, 255, 0.92)
+            else:
+                disc = parse_color(icolor) if on else QColor(14, 18, 24, 51)
+                glyph = "#ffffff" if on else icolor
+            p.setPen(Qt.NoPen)
+            p.setBrush(parse_color(disc))
+            p.drawEllipse(QRectF(dx, dy, 100, 100))
+            draw_icon(p, icon_name(tile, st), glyph, QRectF(dx + 26, dy + 26, 48, 48))
+    else:
+        pad = 18 if form == "big" else 14
+        size = 52 if form == "big" else 40
+        ix, iy = pad, pad
+        if reading:
+            f = font(60, QFont.Bold, -0.5)
+            fm = QFontMetricsF(f)
+            p.setPen(Qt.NoPen)
+            p.setBrush(parse_color(c1))
+            p.drawPath(text_path(QPointF(0, 0), f, reading["text"].replace("°", "") + " °C", ix,
+                                 iy + (60 - fm.height() / 10) / 2 + fm.ascent() / 10))
+        elif badge:
+            box = QRectF(ix, iy, size, size)
+            if dim:
+                bg = (255, 255, 255, 0.12) if on else None
+                fg = (255, 255, 255, 0.95) if on else tcol["off_text1"]
+            else:
+                bg, fg = QColor(badge["bg"]), badge["fg"]
+            if bg is not None:
+                p.setPen(Qt.NoPen)
+                p.setBrush(parse_color(bg))
+                p.drawEllipse(box)
+            draw_centred(p, badge["text"], font(17.5, QFont.Bold), fg, box)
+        else:
+            draw_icon(p, icon_name(tile, st), icolor, QRectF(ix, iy, size, size))
+
+    # -- the text ------------------------------------------------------
+    if form == "bar":
+        tx, tw = 139, cw - 23 - 139
+        items = []
+        if value:
+            items.append((value, font(32, QFont.Bold), c1, 35.2, 0))
+        items.append((name, font(25, QFont.Medium if readonly else QFont.DemiBold),
+                      (c1 if on else tcol["off_text2"]) if readout else c1, 30,
+                      1 if readout else 0))
+        if not readout:
+            items.append((label, font(20, QFont.Medium), c2, 24, 1))
+        y = (ch - sum(h + before for _, _, _, h, before in items)) / 2
+        for text, f, color, h, before in items:
+            y += before
+            draw_text_fade(p, text, f, color, QRectF(tx, y, tw, h), False)
+            y += h
+    else:
+        big = form == "big"
+        pad = 18 if big else 14
+        textw = cw - 2 * pad
+        bottom = ch - pad
+        if not readout:
+            lh = (17.5 if big else 16.5) * 1.2
+            draw_text_fade(p, label, font(17.5 if big else 16.5, QFont.Medium), c2,
+                           QRectF(pad, bottom - lh, textw, lh), False)
+            bottom -= lh + 1
+        if readout:
+            draw_text_fade(p, name, font(16.5, QFont.Medium), c1 if on else tcol["off_text2"],
+                           QRectF(pad, bottom - 19.8, textw, 19.8), False)
+            bottom -= 19.8 + 1
+            draw_text_fade(p, value, font(27, QFont.Bold), c1,
+                           QRectF(pad, bottom - 29.7, textw, 29.7), False)
+        else:
+            nh = (21 if big else 19.5) * 1.2
+            draw_text_fade(p, name, font(21 if big else 19.5, QFont.DemiBold), c1,
+                           QRectF(pad, bottom - nh, textw, nh), False)
+            if value:
+                draw_text_fade(p, value, font(25.5, QFont.Bold), c1,
+                               QRectF(pad, 78 if big else 56, textw, 28), False)
+
+    # -- the climate buttons, always there on a long or big tile ----------
+    if domain == "climate" and on:
+        f = font(26 if form == "bar" else 28, QFont.Bold)
+        for rect, sign in mini_buttons(form, cw, ch):
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 20))
+            p.drawEllipse(rect)
+            draw_centred(p, "+" if sign > 0 else "\u2212", f, "#1d1d1f", rect)
+
+
+def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False):
+    domain = tile["domain"]
+    on = st is not None and domain not in MOMENTARY and is_on(domain, st)
     shape = squircle(x, y, w, h, RADIUS_TILE)
     p.setPen(Qt.NoPen)
     p.setBrush(rgba(tcol["tile_on"] if on else tcol["tile_off"]))
@@ -381,52 +589,12 @@ def draw_tile(p, tile, st, x, y, w, h, theme, tcol):
     else:
         inner_shadow(p, shape, rgba(tcol["edge"]))
         inner_shadow(p, shape, rgba(tcol["edge_top"]), dy=1, spread=0)
-
-    # icon (a climate reading is a circle with its temperature)
-    ix, iy = x + 14, y + 14
-    badge = climate_badge(st, on) if domain == "climate" and ok and not tile.get("icon") else None
-    if badge:
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(badge["bg"]))
-        p.drawEllipse(QRectF(ix, iy, 40, 40))
-        bf = font(17.5, QFont.Bold)
-        fm = QFontMetricsF(bf)
-        tw = fm.horizontalAdvance(badge["text"]) / 10 * HSCALE
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(badge["fg"]))
-        p.drawPath(text_path(QPointF(0, 0), bf, badge["text"], ix + (40 - tw) / 2,
-                             iy + (40 - fm.height() / 10) / 2 + fm.ascent() / 10))
-    else:
-        color = icon_color(tile, st, on, theme, tcol) if ok else tcol["off_text1"]
-        svg_renderer(icon_name(tile, st), color).render(p, QRectF(ix, iy, 40, 40))
-
-    # text, from the bottom up
-    shadow = False      # no text shadow
-    c1 = tcol["on_text1"] if on else tcol["off_text1"]
-    c2 = tcol["on_text2"] if on else tcol["off_text2"]
-    value = value_text(domain, st) if ok and not badge else ""
-    bottom = y + h - 14
-    textw = w - 28
-    readout = domain in READONLY and bool(value)
-    if not readout:
-        label = (tile.get("label") or default_label(domain, st)) if ok else "無法連線"
-        draw_text_fade(p, label, font(16.5, QFont.Medium), c2,
-                       QRectF(x + 14, bottom - 19.8, textw, 19.8), shadow)
-        bottom -= 19.8 + 1
-    name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
-    if readout:
-        # A read-only tile leads with its reading, captioned by the name.
-        draw_text_fade(p, name, font(16.5, QFont.Medium), c1 if on else tcol["off_text2"],
-                       QRectF(x + 14, bottom - 19.8, textw, 19.8), shadow)
-        bottom -= 19.8 + 1
-        draw_text_fade(p, value, font(27, QFont.Bold), c1,
-                       QRectF(x + 14, bottom - 29.7, textw, 29.7), shadow)
-    else:
-        draw_text_fade(p, name, font(19.5, QFont.DemiBold), c1,
-                       QRectF(x + 14, bottom - 23.4, textw, 23.4), shadow)
-        if value:
-            draw_text_fade(p, value, font(25.5, QFont.Bold), c1,
-                           QRectF(x + 14, y + 56, textw, 28), shadow)
+    zoom = BIG_ZOOM if form == "big" else 1.0
+    p.save()
+    p.translate(x, y)
+    p.scale(zoom, zoom)
+    draw_content(p, tile, st, w / zoom, h / zoom, form, theme, tcol, dim)
+    p.restore()
 
 
 def widget_size(size):
@@ -434,12 +602,12 @@ def widget_size(size):
     return (cols * CELL_W + (cols - 1) * GAP + 2 * PAD, rows * CELL_H + (rows - 1) * GAP + 2 * PAD)
 
 
-def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0):
+def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
     the desktop behind it (a QImage), stretched over the card."""
-    tcol = THEMES[theme]
+    tcol = tokens(theme, dim)
     W, H = widget_size(size)
-    cols = SIZES.get(size, SIZES["2x4"])[0]
+    form, rects = tile_layout(size, len(tiles))
     p.save()
     p.scale(scale, scale)
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
@@ -454,8 +622,6 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0):
     p.drawPath(card)
     inner_shadow(p, card, rgba(tcol["edge"]))
     inner_shadow(p, card, rgba(tcol["edge_top"]), dy=1, spread=0)
-    for i, tile in enumerate(tiles[: cols * SIZES.get(size, SIZES["2x4"])[1]]):
-        col, row = i % cols, i // cols
-        draw_tile(p, tile, states.get(tile["entity"]),
-                  PAD + col * (CELL_W + GAP), PAD + row * (CELL_H + GAP), CELL_W, CELL_H, theme, tcol)
+    for tile, (x, y, w, h) in zip(tiles, rects):
+        draw_tile(p, tile, states.get(tile["entity"]), x, y, w, h, theme, tcol, form, dim)
     p.restore()

@@ -21,11 +21,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, Signal   # noqa: E402
+from PySide6.QtCore import (QElapsedTimer, QObject, QPoint, QPointF, QRectF, Qt, QTimer,  # noqa: E402
+                            Signal)
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget                       # noqa: E402
 
 import config as cfgmod                                                   # noqa: E402
+import idle                                                               # noqa: E402
 import render                                                             # noqa: E402
 from ha_client import HAClient                                            # noqa: E402
 
@@ -36,6 +38,7 @@ WDA_EXCLUDEFROMCAPTURE = 0x11
 class Bridge(QObject):
     states = Signal(object)            # {entity: state}
     backdrop = Signal(object)          # QImage, the small blurred picture
+    dim = Signal(bool)                 # the desktop is out of sight (or back)
 
 
 class NativeWidget(QWidget):
@@ -70,20 +73,30 @@ class NativeWidget(QWidget):
         self.theme = theme
         self.backdrop_img = None
         self.overlay = None            # the card tint and the tiles, drawn once per change
+        self.overlay_dim = None        # the same in its dimmed colours, made when first needed
+        self.dim_t, self.dim_from, self.dim_target = 0.0, 0.0, False   # 0 lit, 1 dimmed
+        self.dim_clock = QElapsedTimer()
+        self.dim_timer = QTimer(self)
+        self.dim_timer.setInterval(16)
+        self.dim_timer.timeout.connect(self.step_dim)
+        self.mix = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
+        self.form, self.rects = render.tile_layout(self.size_key, len(self.tiles))
+        self.setMouseTracking(True)
         self.mask = None               # the card's shape, to cut the backdrop to
         self.frame = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
         self._press = None
         bridge.states.connect(self.on_states)
         bridge.backdrop.connect(self.on_backdrop)
+        bridge.dim.connect(self.set_dim)
 
     # -- what is drawn ----------------------------------------------------
-    def build_overlay(self):
+    def build_overlay(self, dim=False):
         img = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
-        render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None, self.scale)
+        render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None, self.scale, dim)
         p.end()
-        self.overlay = QPixmap.fromImage(img)
+        pix = QPixmap.fromImage(img)
         if self.mask is None:
             m = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
             m.fill(Qt.transparent)
@@ -96,10 +109,42 @@ class NativeWidget(QWidget):
             q.drawPath(render.squircle(0, 0, cw, ch, render.RADIUS_PANEL))
             q.end()
             self.mask = m
+        return pix
+
+    # -- dimming ----------------------------------------------------------
+    def set_dim(self, on):
+        if on == self.dim_target:
+            return
+        self.dim_target = on
+        self.dim_from = self.dim_t
+        self.dim_clock.start()
+        self.dim_timer.start()
+
+    def step_dim(self):
+        # 700 ms to dim, 260 ms to come back, eased as the page's transitions are.
+        dur = 700 if self.dim_target else 260
+        k = min(1.0, self.dim_clock.elapsed() / dur)
+        k = k * k * (3 - 2 * k)
+        goal = 1.0 if self.dim_target else 0.0
+        self.dim_t = self.dim_from + (goal - self.dim_from) * k
+        if k >= 1.0:
+            self.dim_t = goal
+            self.dim_timer.stop()
+            if not self.dim_target:
+                self.overlay_dim = None            # lit again: its picture is not kept
+        self.update()
+
+    def wake(self):
+        if self.dim_target and watcher:
+            watcher.wake()
+            return True
+        return False
 
     def paintEvent(self, event):
         if self.overlay is None:
-            self.build_overlay()
+            self.overlay = self.build_overlay()
+        if self.dim_t > 0 and self.overlay_dim is None:
+            self.overlay_dim = self.build_overlay(True)
         p = QPainter(self)
         if self.backdrop_img is not None:
             f = QPainter(self.frame)
@@ -111,12 +156,28 @@ class NativeWidget(QWidget):
             f.drawImage(0, 0, self.mask)
             f.end()
             p.drawImage(0, 0, self.frame)
-        p.drawPixmap(0, 0, self.overlay)
+        if self.dim_t <= 0:
+            p.drawPixmap(0, 0, self.overlay)
+        elif self.dim_t >= 1:
+            p.drawPixmap(0, 0, self.overlay_dim)
+        else:
+            # A cross-fade: (1 - t) of the lit picture plus t of the dimmed one.
+            m = QPainter(self.mix)
+            m.setCompositionMode(QPainter.CompositionMode_Source)
+            m.fillRect(self.mix.rect(), Qt.transparent)
+            m.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            m.setOpacity(1 - self.dim_t)
+            m.drawPixmap(0, 0, self.overlay)
+            m.setCompositionMode(QPainter.CompositionMode_Plus)
+            m.setOpacity(self.dim_t)
+            m.drawPixmap(0, 0, self.overlay_dim)
+            m.end()
+            p.drawImage(0, 0, self.mix)
         p.end()
 
     def on_states(self, changed):
         self.states.update(changed)
-        self.overlay = None
+        self.overlay = self.overlay_dim = None
         self.update()
 
     def on_backdrop(self, image):
@@ -125,33 +186,46 @@ class NativeWidget(QWidget):
 
     # -- the mouse --------------------------------------------------------
     def tile_at(self, pos):
+        """(tile, +1/-1 when a climate button was hit) at a window position."""
         x, y = pos.x() / self.scale, pos.y() / self.scale
-        cols = render.SIZES[self.size_key][0]
-        for i, tile in enumerate(self.tiles[: cols * render.SIZES[self.size_key][1]]):
-            tx = render.PAD + (i % cols) * (render.CELL_W + render.GAP)
-            ty = render.PAD + (i // cols) * (render.CELL_H + render.GAP)
-            if tx <= x < tx + render.CELL_W and ty <= y < ty + render.CELL_H:
-                return tile
-        return None
+        zoom = render.BIG_ZOOM if self.form == "big" else 1.0
+        for tile, (tx, ty, tw, th) in zip(self.tiles, self.rects):
+            if tx <= x < tx + tw and ty <= y < ty + th:
+                st = self.states.get(tile["entity"])
+                if tile["domain"] == "climate" and st and st.get("state") != "off":
+                    local = QPointF((x - tx) / zoom, (y - ty) / zoom)
+                    for rect, sign in render.mini_buttons(self.form, tw / zoom, th / zoom):
+                        if rect.contains(local):
+                            return tile, sign
+                return tile, 0
+        return None, 0
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self._press = (e.globalPosition().toPoint(), self.pos(), self.tile_at(e.position().toPoint()), False)
+            if self.wake():                    # the waking touch goes no further
+                self._press = None
+                return
+            hit = self.tile_at(e.position().toPoint())
+            self._press = (e.globalPosition().toPoint(), self.pos(), hit, False)
 
     def mouseMoveEvent(self, e):
+        if not e.buttons():
+            self.wake()
+            return
         if self._press and e.buttons() & Qt.LeftButton:
-            start, origin, tile, moved = self._press
+            start, origin, hit, moved = self._press
             d = e.globalPosition().toPoint() - start
             if moved or abs(d.x()) + abs(d.y()) > 6:
-                self._press = (start, origin, tile, True)
+                self._press = (start, origin, hit, True)
                 self.move(origin + QPoint(d.x(), d.y()))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.RightButton and self.preview:
             QApplication.quit()
             return
-        if self._press and not self._press[3] and self._press[2]:
-            threading.Thread(target=quick_action, args=(self._press[2], self.states), daemon=True).start()
+        if self._press and not self._press[3] and self._press[2][0]:
+            tile, sign = self._press[2]
+            threading.Thread(target=quick_action, args=(tile, self.states, sign), daemon=True).start()
         self._press = None
 
     def keyPressEvent(self, e):
@@ -160,12 +234,31 @@ class NativeWidget(QWidget):
 
 
 client = None
+watcher = None
 
 
-def quick_action(tile, states):
+def quick_action(tile, states, step=0):
     domain, entity = tile["domain"], tile["entity"]
     try:
-        if domain in ("light", "switch", "fan", "input_boolean"):
+        if domain == "climate":
+            st = states.get(entity) or {}
+            attrs = st.get("attributes") or {}
+            if step:                            # the round - and + on a long or big tile
+                if attrs.get("temperature") is not None:
+                    delta = step * float(tile.get("temp_step") or 1)
+                    client.call_service("climate", "set_temperature", entity,
+                                        {"temperature": round((attrs["temperature"] + delta) * 10) / 10})
+            else:
+                mode = "off" if st.get("state") != "off" else (tile.get("on_mode") or "cool")
+                client.call_service("climate", "set_hvac_mode", entity, {"hvac_mode": mode})
+        elif domain == "vacuum":
+            cleaning = (states.get(entity) or {}).get("state") in ("cleaning", "returning")
+            client.call_service("vacuum", "pause" if cleaning else "start", entity)
+        elif domain in ("scene", "script"):
+            client.call_service(domain, "turn_on", entity)
+        elif domain == "automation":
+            client.call_service("automation", "trigger", entity)
+        elif domain in ("light", "switch", "fan", "input_boolean"):
             client.call_service(domain, "toggle", entity)
         elif domain == "lock":
             locked = (states.get(entity) or {}).get("state") == "locked"
@@ -212,9 +305,14 @@ def backdrop_loop(win, bridge, stop):
 
 
 def main():
-    global client
+    global client, watcher
     cfg = cfgmod.load_config()
     widget = cfg["widgets"][0]
+    # NATIVE_SIZE=4x4 / NATIVE_TILES=4: look at other sizes and tile forms.
+    if os.environ.get("NATIVE_SIZE") or os.environ.get("NATIVE_TILES"):
+        tiles = widget["tiles"] * 4
+        widget = dict(widget, size=os.environ.get("NATIVE_SIZE", widget["size"]),
+                      tiles=tiles[:int(os.environ.get("NATIVE_TILES", len(widget["tiles"])))])
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
     bridge = Bridge()
@@ -228,6 +326,15 @@ def main():
         v = ctypes.c_uint(val)
         dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(v), 4)
     stop = threading.Event()
+    watcher = idle.IdleWatcher(lambda: cfg.get("dim_when_idle", True), lambda: cfg.get("dim_after_sec", 120),
+                               lambda: {hwnd}, bridge.dim.emit)
+    watcher.start()
+    # NATIVE_DIM=n: dim n seconds after the start (light again after 2n with NATIVE_DIM_BACK).
+    if os.environ.get("NATIVE_DIM"):
+        n = float(os.environ["NATIVE_DIM"])
+        QTimer.singleShot(int(n * 1000), lambda: win.set_dim(True))
+        if os.environ.get("NATIVE_DIM_BACK"):
+            QTimer.singleShot(int(2 * n * 1000), lambda: win.set_dim(False))
 
     client = HAClient(on_event=lambda eid, st: bridge.states.emit({eid: st}))
     client.configure(cfg["ha_url"], cfg["ha_token"])
@@ -249,6 +356,7 @@ def main():
         QTimer.singleShot(int(float(os.environ["NATIVE_RUN_SECONDS"]) * 1000), app.quit)
     app.exec()
     stop.set()
+    watcher.stop()
     client.stop()
 
 
