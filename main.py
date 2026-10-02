@@ -493,6 +493,7 @@ class Api:
             hwnd = _get_hwnd(window) if window else None
             time.sleep(0.02)
         pt = _POINT(0, 0)
+        told = 0.0
         while hwnd and _user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
             _user32.GetCursorPos(ctypes.byref(pt))
             rect = _window_rect(hwnd)
@@ -503,6 +504,9 @@ class Api:
                 if widget:
                     widget["x"], widget["y"] = x, y
                 _run_on_ui_thread(window, lambda: _set_window_pos(hwnd, x, y))
+                if time.monotonic() - told > 0.08:
+                    told = time.monotonic()
+                    self._tell_widget_moved(window)
             time.sleep(0.012)
         self._on_widget_moved(widget_id)
         cfgmod.save_config(self._cfg)
@@ -1699,6 +1703,17 @@ class Api:
         timer.daemon = True
         self._widget_move_timers[widget_id] = timer
         timer.start()
+        self._tell_widget_moved(window)
+
+    def _tell_widget_moved(self, window):
+        """A widget on 'still' sampling only looks at the desktop again when
+        told it moved; one on 'live' follows the screen by itself."""
+        if self._cfg.get("glass_sampling") != "still":
+            return
+        try:
+            window.evaluate_js("window.__widgetMoved && window.__widgetMoved()")
+        except Exception:
+            pass
 
     def _refresh_now(self):
         def go():

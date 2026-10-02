@@ -438,7 +438,6 @@ const BACKDROP_FLOOR_MS = 16;
 // page), so it samples faster and never backs off.
 const PANEL_DUTY = 2;
 const PANEL_FLOOR_MS = 16;
-const STILL_SAMPLING_MS = 4000;       // 'still' sampling: how often to look
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 // Identical frames in a row before the desktop counts as still.
 const BACKDROP_STILL_BEFORE_IDLE = 4;
@@ -1063,9 +1062,10 @@ let streamSeq = 0;
 let queuedShot = null;
 const STREAM_BEAT_MS = 5000;
 
-// 'Still' sampling: a widget looks at the desktop behind it now and then
-// instead of following every change (a video wallpaper changes it all the
-// time). Dragging, and the overlay windows, always sample live.
+// 'Still' sampling: a widget takes the desktop behind it once and keeps that
+// picture until it moves, resizes or changes (a video wallpaper changes the
+// picture all the time). Dragging, and the overlay windows, always sample
+// live.
 function stillSampling() {
   return CONFIG.glass_sampling === 'still' && WINDOW_ROLE === 'grid' && !backdropAt;
 }
@@ -1176,6 +1176,11 @@ function refreshBackdropSoon(delay) {
   backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 60 : delay);
 }
 
+// Python moved a widget (the editor, a drag from Settings, snapping).
+window.__widgetMoved = function () {
+  if (stillSampling()) refreshBackdropSoon(0);
+};
+
 // The sampling mode changed: end any stream and start over in the new one.
 function restartSampling() {
   stopBackdropTicker();
@@ -1215,9 +1220,15 @@ function startBackdropTicker() {
     // A screen-paced read already waited for a change. Otherwise the widget
     // backs off over still wallpaper; the open panel never does, since the
     // window behind it may start scrolling at any time.
+    // A still widget waits to be told (see __widgetMoved), unless it is
+    // hidden or covered: then it keeps looking for the moment it is not.
+    if (stillSampling() && !backdropSkipMs && !flyoutAnimating) {
+      backdropTimer = null;
+      return;
+    }
     const openPanel = IS_FLYOUT_WINDOW && flyoutOpen;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
-      || (stillSampling() ? STILL_SAMPLING_MS : backdropPaced ? 0 : openPanel
+      || (backdropPaced ? 0 : openPanel
         ? Math.max(PANEL_FLOOR_MS, Math.round(backdropFrameMs * PANEL_DUTY))
         : backdropStill >= BACKDROP_STILL_BEFORE_IDLE
           ? BACKDROP_IDLE_MS
@@ -1279,7 +1290,12 @@ function installWindowDrag() {
     });
   });
 
-  const end = () => { start = null; dragTo = null; backdropAt = null; };
+  const end = () => {
+    const moved = start && start.moved;
+    start = null; dragTo = null; backdropAt = null;
+    // A still widget now takes the picture where it was dropped.
+    if (moved && stillSampling()) refreshBackdropSoon(0);
+  };
   document.addEventListener('mouseup', end);
   window.addEventListener('blur', end);
 }
@@ -1568,7 +1584,10 @@ function flyoutLayers() {
 // the entrance and capture the backdrop there, then report back through
 // backdrop_armed (see _arm_backdrop in main.py).
 window.__armBackdrop = function () {
-  for (const el of flyoutLayers()) el.classList.remove('flyout-enter', 'flyout-leave');
+  for (const el of flyoutLayers()) {
+    el.classList.remove('flyout-enter', 'flyout-leave');
+    el.classList.add('flyout-hold');
+  }
   const done = () => {
     if (window.pywebview && window.pywebview.api) {
       window.pywebview.api.backdrop_armed().catch(() => {});
@@ -1607,7 +1626,7 @@ window.__flyoutEnter = function () {
   setTimeout(settled, 500);       // in case the animation never reports
   restartBackdropTicker();
   for (const el of flyoutLayers()) {
-    el.classList.remove('flyout-enter', 'flyout-leave');
+    el.classList.remove('flyout-enter', 'flyout-leave', 'flyout-hold');
     void el.offsetWidth;
     el.classList.add('flyout-enter');
   }
@@ -1619,7 +1638,7 @@ window.__flyoutLeave = function () {
   flyoutAnimating = true;
   leaveStream(true);
   for (const el of flyoutLayers()) {
-    el.classList.remove('flyout-enter');
+    el.classList.remove('flyout-enter', 'flyout-hold');
     void el.offsetWidth;
     el.classList.add('flyout-leave');
   }
