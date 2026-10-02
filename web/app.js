@@ -422,7 +422,7 @@ window.addEventListener('resize', () => {
  * Frosted backdrop
  * ============================================================ */
 // Python captures the desktop behind this window and returns a blurred copy
-// (plus, in liquid mode, the sharp pixels for the lens). The page paints it
+// (the liquid lens refracts that picture too). The page paints it
 // into #backdrop-glass, clipped to the card. Outside the card the window is
 // transparent, so the rounded corners show the live desktop.
 //
@@ -443,7 +443,6 @@ const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 const BACKDROP_STILL_BEFORE_IDLE = 4;
 let backdropPending = false;
 let backdropTimer = null;
-let backdropRaf = null;
 let backdropHash = null;
 let backdropGeneration = 0;
 let backdropStill = 0;
@@ -642,12 +641,12 @@ function initLiquidGpu() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  const upload = document.createElement('canvas');
   const uniforms = Object.fromEntries([
     'backdrop', 'canvasSize', 'cardRect', 'cornerRadius',
     'refractionHeight', 'refractionAmount', 'lensSoftness', 'lensOpacity',
   ].map(name => [name, gl.getUniformLocation(program, name)]));
-  liquidGpu = { canvas, gl, program, texture, upload, uniforms };
+  liquidGpu = { canvas, gl, program, texture, uniforms, half: document.createElement('canvas'),
+                textureW: 0, textureH: 0 };
   canvas.addEventListener('webglcontextlost', () => {
     liquidGpu = null;
     liquidGpuUnavailable = true;
@@ -658,26 +657,31 @@ function initLiquidGpu() {
 function paintLiquidLensGpu(ctx, image, width, height, card) {
   const gpu = initLiquidGpu();
   if (!gpu) return false;
-  const { canvas, gl, program, texture, upload, uniforms } = gpu;
+  const { canvas, gl, program, texture, uniforms } = gpu;
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
   gl.viewport(0, 0, width, height);
-  if (upload.width !== width || upload.height !== height) {
-    upload.width = width;
-    upload.height = height;
-    gpu.textureAllocated = false;
-  }
   gl.useProgram(program);
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  upload.getContext('2d').drawImage(image, 0, 0, width, height);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  if (gpu.textureAllocated) {
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, upload);
+  // The texture is the small picture stretched (smoothly) to half the
+  // window's size. The GPU's own bilinear stretch of the raw picture leaves
+  // faint diagonal creases where the lens bends the sampling across texels.
+  const half = gpu.half;
+  const hw = Math.max(1, Math.ceil(width / 2)), hh = Math.max(1, Math.ceil(height / 2));
+  if (half.width !== hw || half.height !== hh) { half.width = hw; half.height = hh; }
+  const halfCtx = half.getContext('2d');
+  halfCtx.imageSmoothingEnabled = true;
+  halfCtx.imageSmoothingQuality = 'high';
+  halfCtx.drawImage(image, 0, 0, hw, hh);
+  if (gpu.textureW === hw && gpu.textureH === hh) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, half);
   } else {
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, upload);
-    gpu.textureAllocated = true;
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, half);
+    gpu.textureW = hw;
+    gpu.textureH = hh;
   }
   gl.uniform1i(uniforms.backdrop, 0);
   gl.uniform2f(uniforms.canvasSize, width, height);
@@ -880,7 +884,7 @@ function applyGlassClip(glass, card, dpr) {
   glass.style.clipPath = "path('" + d + "')";
 }
 
-function paintBackdrop(blurred, lens, w, h) {
+function paintBackdrop(blurred, w, h) {
   const glass = document.getElementById('backdrop-glass');
   if (!glass) return;
   if (!glassCtx) glassCtx = glass.getContext('2d');
@@ -890,10 +894,10 @@ function paintBackdrop(blurred, lens, w, h) {
   }
   // A frame without a picture leaves the previous one in place rather than
   // flickering the card bare.
-  if (!blurred && !lens) return;
+  if (!blurred) return;
   // The liquid lens paints around the card's edge, so it clips the canvas
-  // itself; every other picture is opaque and simply fills it.
-  const lensed = CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW && !!lens;
+  // itself; every other picture simply fills it.
+  const lensed = CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW;
   const resized = glass.width !== w || glass.height !== h;
   if (resized) {
     glass.width = w;
@@ -909,14 +913,18 @@ function paintBackdrop(blurred, lens, w, h) {
     // smooth filter, or the interpolation grid shows through as noise.
     glassCtx.imageSmoothingEnabled = true;
     glassCtx.imageSmoothingQuality = 'high';
-    glassCtx.drawImage(blurred || lens, 0, 0, w, h);
+    glassCtx.drawImage(blurred, 0, 0, w, h);
     return;
   }
   if (glassClipKey) { glass.style.clipPath = ''; glassClipKey = ''; }
+  // The same small picture is the card's fill and what the lens refracts,
+  // so the rim is as soft as the rest.
+  glassCtx.imageSmoothingEnabled = true;
+  glassCtx.imageSmoothingQuality = 'high';
   glassCtx.save();
   glassCtx.clip(superellipsePath(card));
-  glassCtx.drawImage(blurred || lens, 0, 0, w, h);
-  paintLiquidLens(glassCtx, lens, w, h, card);
+  glassCtx.drawImage(blurred, 0, 0, w, h);
+  paintLiquidLens(glassCtx, blurred, w, h, card);
   glassCtx.restore();
 }
 
@@ -947,23 +955,6 @@ function rawToCanvas(shot) {
   return rawScratch;
 }
 
-// Decoded off the main thread and closed after drawing, so frames never
-// accumulate in Chromium's decoded-image cache.
-function decodeShot(url) {
-  // The blurred frame is a few KB: decoding it here skips a trip through
-  // the network stack that only pays for itself on the large lens frame.
-  if (url.length < 40000) {
-    try {
-      const bin = atob(url.slice(url.indexOf(',') + 1));
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const mime = url.slice(5, url.indexOf(';'));
-      return createImageBitmap(new Blob([bytes], { type: mime }));
-    } catch (e) { /* fall through */ }
-  }
-  return fetch(url).then((r) => r.blob()).then(createImageBitmap);
-}
-
 // Paints one answer from Python, whether it came back from a call or was
 // pushed by the stream below.
 function applyShot(shot, generation, startedAt) {
@@ -991,7 +982,7 @@ function applyShot(shot, generation, startedAt) {
   if (!shot) { backdropPending = false; return; }
   if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
   backdropStill = 0;
-  if (!shot.blur_raw && !shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
+  if (!shot.blur_raw) { backdropPending = false; return; }
   // The window may have been resized while this was in flight; a frame
   // of the old size would be stretched, so drop it and ask again.
   const live = viewportBox();
@@ -1006,34 +997,12 @@ function applyShot(shot, generation, startedAt) {
   }
   // The blurred picture arrives as raw pixels and is drawn straight onto a
   // small canvas: no file to decode, nothing to release.
-  const rawBlur = shot.blur_raw ? rawToCanvas(shot) : null;
-  return Promise.allSettled([
-    rawBlur ? null : (shot.blur_url ? decodeShot(shot.blur_url) : null),
-    shot.lens_url ? decodeShot(shot.lens_url) : null,
-  ]).then((results) => {
-    const [decodedBlur, lens] = results.map(result =>
-      result.status === 'fulfilled' ? result.value : null);
-    const blurred = rawBlur || decodedBlur;
-    try {
-      const failure = results.find(result => result.status === 'rejected');
-      if (failure) throw failure.reason;
-      const current = viewportBox();
-      const ratio = window.devicePixelRatio || 1;
-      if (generation !== backdropGeneration ||
-          Math.abs(shot.w - Math.round(current.width * ratio)) > 3 ||
-          Math.abs(shot.h - Math.round(current.height * ratio)) > 3) {
-        backdropHash = null;
-        return;
-      }
-      paintBackdrop(blurred, lens, shot.w, shot.h);
-      backdropHash = shot.hash;
-    } finally {
-      if (decodedBlur) decodedBlur.close();
-      if (lens) lens.close();
-      backdropPending = false;
-    }
-  });
-
+  try {
+    paintBackdrop(rawToCanvas(shot), shot.w, shot.h);
+    backdropHash = shot.hash;
+  } finally {
+    backdropPending = false;
+  }
 }
 
 function refreshBackdrop() {
@@ -1094,7 +1063,7 @@ const STREAM_BEAT_MS = 5000;
 
 function canStream() {
   return !streamUnavailable && backdropPaced && !backdropSkipMs && !backdropAt
-    && !flyoutAnimating && !document.hidden && !backdropTicksOnVsync()
+    && !flyoutAnimating && !document.hidden
     && !!(window.pywebview && window.pywebview.api);
 }
 
@@ -1134,13 +1103,15 @@ function leaveStream(resume) {
 
 function paintPushed(shot) {
   backdropPending = true;
-  Promise.resolve(applyShot(shot, backdropGeneration, performance.now()))
-    .catch(() => { backdropHash = null; backdropPending = false; })
-    .then(() => {
-      const next = queuedShot;
-      queuedShot = null;
-      if (next && streaming && next.token === streamToken) paintPushed(next);
-    });
+  try {
+    applyShot(shot, backdropGeneration, performance.now());
+  } catch (e) {
+    backdropHash = null;
+    backdropPending = false;
+  }
+  const next = queuedShot;
+  queuedShot = null;
+  if (next && streaming && next.token === streamToken) paintPushed(next);
 }
 
 window.__backdropPush = function (shot) {
@@ -1199,9 +1170,7 @@ function refreshBackdropSoon(delay) {
 function stopBackdropTicker() {
   leaveStream(false);
   clearTimeout(backdropTimer);
-  if (backdropRaf) cancelAnimationFrame(backdropRaf);
   backdropTimer = null;
-  backdropRaf = null;
 }
 
 // A hidden window has booked its next look up to a second away; coming on
@@ -1213,32 +1182,15 @@ function restartBackdropTicker() {
   startBackdropTicker();
 }
 
-// Liquid glass refracts sharp pixels, where lag is visible, so it samples
-// once per display frame; other styles use the paced timer.
-function backdropTicksOnVsync() {
-  return CONFIG.glass_style === 'liquid' &&
-    (!IS_POPOVER_WINDOW || !!currentDetailTileId) &&
-    !document.hidden && !flyoutAnimating;
-}
-
 function startBackdropTicker() {
-  if (backdropTimer || backdropRaf) return;
+  if (backdropTimer) return;
   const again = () => {
     const idle = document.hidden || flyoutAnimating;
     (idle ? Promise.resolve() : refreshBackdrop()).then(tick, tick);
   };
   const tick = () => {
-    if (backdropTicksOnVsync() && !backdropSkipMs) {
-      backdropTimer = null;
-      backdropRaf = requestAnimationFrame(() => {
-        backdropRaf = null;
-        again();
-      });
-      return;
-    }
     if (canStream()) {
       backdropTimer = null;
-      backdropRaf = null;
       enterStream();
       return;
     }
@@ -1252,7 +1204,6 @@ function startBackdropTicker() {
         : backdropStill >= BACKDROP_STILL_BEFORE_IDLE
           ? BACKDROP_IDLE_MS
           : Math.max(BACKDROP_FLOOR_MS, Math.round(backdropFrameMs * BACKDROP_DUTY))));
-    backdropRaf = null;
     backdropTimer = setTimeout(again, wait);
   };
   refreshBackdrop().then(tick, tick);

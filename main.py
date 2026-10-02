@@ -24,7 +24,6 @@ Run:  python main.py
 import base64
 import ctypes
 import datetime
-import io
 import json
 import multiprocessing
 import os
@@ -1134,7 +1133,7 @@ class Api:
         if shot and shot.get("paced") and shot.get("unchanged"):
             entry["hash"] = shot.get("hash")
             return False
-        if shot and shot.get("paced") and (shot.get("blur_raw") or shot.get("lens_url")):
+        if shot and shot.get("paced") and shot.get("blur_raw"):
             entry["hash"] = shot.get("hash")
             self._push_to(kind, entry, shot)
             return True
@@ -1184,7 +1183,7 @@ class Api:
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
                              at_x=None, at_y=None, wait_secs=None, prefetched=None):
-        """The desktop behind a window, blurred, as base64 JPEG data URLs.
+        """The desktop behind a window, blurred, as a small raw-pixel picture.
 
         `last_hash` is the page's previous frame; an identical capture is
         answered with {"unchanged": True} and costs no encoding.
@@ -1305,60 +1304,44 @@ class Api:
                 return {"skip": True, "retry_ms": 80}
             if _is_widget_kind(window_kind) and can_read_screen:
                 self._widget_frames[window_kind] = (x, y, w, h, raw)
-            liquid_lens = (self._cfg.get("glass_style") == "liquid"
-                           and not is_popover)
-            img = None
-            if liquid_lens:
-                # The lens refracts the full-size pixels.
-                digest = zlib.crc32(raw) & 0xFFFFFFFF
-                if last_hash is not None and int(last_hash) == digest:
-                    return {"unchanged": True, "hash": digest,
-                            "ms": (time.perf_counter() - started) * 1000.0,
-                            "paced": paced, "system_glass": False}
-                img = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
-                small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+            liquid = (self._cfg.get("glass_style") == "liquid"
+                      and not is_popover)
+            # Only a blur is drawn, so a box reduce of the raw pixels is
+            # plenty, and skips converting the full frame. The liquid lens
+            # refracts this picture too, so it
+            # keeps more detail (1/4 scale, a light blur); the rest is 1/8.
+            scale = 4 if liquid else 8
+            small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
+            if w % scale or h % scale:
+                # Not a whole number of cells: stretch the picture over
+                # the window exactly rather than past its edge.
+                small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
+                                     Image.BOX)
             else:
-                # Only a blur is drawn, so a box reduce of the raw pixels to
-                # 1/8 scale is plenty, and skips converting the full frame.
-                small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
-                if w % 8 or h % 8:
-                    # Not a whole number of cells: stretch the picture over
-                    # the window exactly rather than past its edge.
-                    small = small.resize((max(1, round(w / 8)), max(1, round(h / 8))),
-                                         Image.BOX)
-                else:
-                    small = small.reduce(8)
-                small = Image.frombytes("RGB", small.size, small.tobytes(),
-                                        "raw", "BGRX")
-                # A frame that differs from the one on screen by less than the
-                # eye can tell, once blurred, is not worth sending and painting.
-                sent = self._backdrop_sent.get(window_kind)
-                if (last_hash is not None and sent and sent[0] == int(last_hash)
-                        and sent[1].size == small.size
-                        and max(hi for _, hi in ImageChops.difference(
-                            sent[1], small).getextrema()) <= _BACKDROP_NOISE):
-                    return {"unchanged": True, "hash": int(last_hash),
-                            "ms": (time.perf_counter() - started) * 1000.0,
-                            "paced": paced, "system_glass": False}
-                digest = zlib.crc32(small.tobytes()) & 0xFFFFFFFF
-                self._backdrop_sent[window_kind] = (digest, small)
+                small = small.reduce(scale)
+            small = Image.frombytes("RGB", small.size, small.tobytes(),
+                                    "raw", "BGRX")
+            # A frame that differs from the one on screen by less than the
+            # eye can tell, once blurred, is not worth sending and painting.
+            sent = self._backdrop_sent.get(window_kind)
+            if (last_hash is not None and sent and sent[0] == int(last_hash)
+                    and sent[1].size == small.size
+                    and max(hi for _, hi in ImageChops.difference(
+                        sent[1], small).getextrema()) <= _BACKDROP_NOISE):
+                return {"unchanged": True, "hash": int(last_hash),
+                        "ms": (time.perf_counter() - started) * 1000.0,
+                        "paced": paced, "system_glass": False}
+            digest = zlib.crc32(small.tobytes()) & 0xFFFFFFFF
+            self._backdrop_sent[window_kind] = (digest, small)
             # Blurring the source avoids the dark wedges a canvas blur leaves
             # in rounded corners by sampling past its edges.
-            blur_radius = 0.75 if liquid_lens else 2
+            blur_radius = 0.5 if liquid else 2
             small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
             # Raw pixels, not an image file: a JPEG this small, stretched back
             # up to the window, shows its 8x8 blocks as mottling, and a file
             # needs decoding (and leaves memory behind) for a few KB of data.
             blur_raw = base64.b64encode(small.tobytes()).decode("ascii")
             blur_size = small.size
-
-            # The liquid lens refracts the actual pixels behind the pane.
-            lens_buf = None
-            if liquid_lens:
-                lens_buf = io.BytesIO()
-                # Full chroma: 4:2:0 subsampling turns fine patterns into
-                # coloured moire once the lens displaces them.
-                img.save(lens_buf, format="JPEG", quality=88, subsampling=0)
 
             if capture_epoch != self._capture_epoch:
                 return {"skip": True, "retry_ms": 80}
@@ -1367,7 +1350,6 @@ class Api:
                 "blur_raw": blur_raw,
                 "blur_w": blur_size[0],
                 "blur_h": blur_size[1],
-                "lens_url": _image_data_url(lens_buf, "image/jpeg") if lens_buf else None,
                 "w": w,
                 "h": h,
                 "hash": digest,
@@ -1738,10 +1720,6 @@ class Api:
                 pass
         _compat_capture.close()
         os._exit(0)
-
-
-def _image_data_url(buf, mime):
-    return "data:%s;base64," % mime + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _startup_command():
