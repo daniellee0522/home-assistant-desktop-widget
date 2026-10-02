@@ -100,6 +100,10 @@ class Api:
         self._desktop_visible = True
         # Idle dimming state; see _watch_for_idle.
         self._dimmed = False
+        # The last small backdrop sent to each window: (hash, image).
+        self._backdrop_sent = {}
+        # Windows being sent backdrop frames as they happen: kind -> state.
+        self._streams = {}
         self._woke_at = 0.0
         self._off_desktop_since = 0.0
         self._dim_stop = threading.Event()
@@ -794,6 +798,87 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
+    # How long a stream outlives its page's last sign of life, and the least
+    # time between two pushes to one page: a blurred backdrop gains nothing
+    # from more than about thirty a second.
+    _STREAM_LEASE_S = 15.0
+    _STREAM_MIN_GAP_S = 0.030
+
+    def backdrop_stream(self, window_kind, token, want_w=0, want_h=0, last_hash=None):
+        """Send this window's backdrop to its page as the screen changes,
+        instead of waiting to be asked for each frame.
+
+        Called again with the same token it only renews the lease; with a
+        token of None it stops. The page ends a stream whenever what it
+        wants changes (size, position), and Python ends it when a frame
+        cannot be paced by the screen, with a final {"stream_end": True}
+        answer to be handled like the answer to a call.
+        """
+        if token is None:
+            self._streams.pop(window_kind, None)
+            return True
+        entry = self._streams.get(window_kind)
+        if entry and entry["token"] == token:
+            entry["beat"] = time.monotonic()
+            return True
+        entry = {"token": token, "w": want_w, "h": want_h, "hash": last_hash,
+                 "beat": time.monotonic()}
+        self._streams[window_kind] = entry
+        threading.Thread(target=self._stream_loop, args=(window_kind, entry),
+                         daemon=True, name="backdrop-stream-" + window_kind).start()
+        return True
+
+    def _stream_loop(self, kind, entry):
+        def live():
+            return self._streams.get(kind) is entry and not self._dim_stop.is_set()
+
+        def push(shot):
+            window = self._window_for(kind)
+            if not window:
+                return
+            payload = dict(shot or {})
+            payload["token"] = entry["token"]
+            try:
+                window.evaluate_js("window.__backdropPush && window.__backdropPush(%s)"
+                                   % json.dumps(payload, ensure_ascii=False,
+                                                separators=(",", ":")))
+            except Exception:
+                pass
+
+        last_push = 0.0
+        try:
+            while live():
+                if time.monotonic() - entry["beat"] > self._STREAM_LEASE_S:
+                    break
+                # Wait before reading, not after, so what is sent is current.
+                wait = self._STREAM_MIN_GAP_S - (time.monotonic() - last_push)
+                if wait > 0:
+                    time.sleep(wait)
+                shot = self.get_desktop_backdrop(
+                    kind, entry["hash"], entry["w"], entry["h"])
+                if not live():
+                    return                  # superseded; the page has moved on
+                if shot and shot.get("paced") and shot.get("unchanged"):
+                    entry["hash"] = shot.get("hash")
+                    continue
+                if shot and shot.get("paced") and (shot.get("blur_url") or shot.get("lens_url")):
+                    entry["hash"] = shot.get("hash")
+                    last_push = time.monotonic()
+                    push(shot)
+                    continue
+                # Skipped, unpaced or failed: hand back to the page's ticker.
+                final = dict(shot or {})
+                final["stream_end"] = True
+                if self._streams.get(kind) is entry:
+                    del self._streams[kind]
+                push(final)
+                return
+        except Exception:
+            pass
+        if self._streams.get(kind) is entry:
+            del self._streams[kind]
+            push({"stream_end": True})
+
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
                              at_x=None, at_y=None):
         """The desktop behind a window, blurred, as base64 JPEG data URLs.
@@ -869,7 +954,7 @@ class Api:
                 # Compatibility mode cannot read a screen containing itself;
                 # render the windows beneath the panel over the wallpaper.
                 over = _windows_below(hwnd, (x, y, x + w, y + h))
-            from PIL import Image, ImageFilter
+            from PIL import Image, ImageChops, ImageFilter
             widget = None
             raw = None
             paced = False
@@ -921,30 +1006,53 @@ class Api:
                 return {"skip": True, "retry_ms": 80}
             if window_kind == 'main' and can_read_screen:
                 self._main_backdrop_frame = (x, y, w, h, raw)
-            digest = zlib.crc32(raw) & 0xFFFFFFFF
-            cost_ms = (time.perf_counter() - started) * 1000.0
-            if last_hash is not None and int(last_hash) == digest:
-                return {"unchanged": True, "hash": digest, "ms": cost_ms,
-                        "paced": paced, "system_glass": False}
-            # Decode BGRA straight to RGB, which both encoders need.
-            img = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
-
-            # Blurred here at quarter scale (~1ms) rather than by the page:
-            # a CSS backdrop-filter repainted the whole window on the GPU
-            # every frame and doubled the cost of each capture.
-            small = img.resize(
-                (max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+            liquid_lens = (self._cfg.get("glass_style") == "liquid"
+                           and not is_popover)
+            img = None
+            if liquid_lens:
+                # The lens refracts the full-size pixels.
+                digest = zlib.crc32(raw) & 0xFFFFFFFF
+                if last_hash is not None and int(last_hash) == digest:
+                    return {"unchanged": True, "hash": digest,
+                            "ms": (time.perf_counter() - started) * 1000.0,
+                            "paced": paced, "system_glass": False}
+                img = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
+                small = img.resize((max(1, w // 4), max(1, h // 4)), Image.BILINEAR)
+            else:
+                # Only a blur is drawn, so a box reduce of the raw pixels to
+                # 1/8 scale is plenty, and skips converting the full frame.
+                small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
+                if w % 8 or h % 8:
+                    # Not a whole number of cells: stretch the picture over
+                    # the window exactly rather than past its edge.
+                    small = small.resize((max(1, round(w / 8)), max(1, round(h / 8))),
+                                         Image.BOX)
+                else:
+                    small = small.reduce(8)
+                small = Image.frombytes("RGB", small.size, small.tobytes(),
+                                        "raw", "BGRX")
+                # A frame that differs from the one on screen by less than the
+                # eye can tell, once blurred, is not worth sending and painting.
+                sent = self._backdrop_sent.get(window_kind)
+                if (last_hash is not None and sent and sent[0] == int(last_hash)
+                        and sent[1].size == small.size
+                        and max(hi for _, hi in ImageChops.difference(
+                            sent[1], small).getextrema()) <= _BACKDROP_NOISE):
+                    return {"unchanged": True, "hash": int(last_hash),
+                            "ms": (time.perf_counter() - started) * 1000.0,
+                            "paced": paced, "system_glass": False}
+                digest = zlib.crc32(small.tobytes()) & 0xFFFFFFFF
+                self._backdrop_sent[window_kind] = (digest, small)
             # Blurring the source avoids the dark wedges a canvas blur leaves
             # in rounded corners by sampling past its edges.
-            blur_radius = (0.75 if self._cfg.get("glass_style") == "liquid"
-                           and not is_popover else 4)
+            blur_radius = 0.75 if liquid_lens else 2
             small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
             blur_buf = io.BytesIO()
             small.save(blur_buf, format="JPEG", quality=80)
 
             # The liquid lens refracts the actual pixels behind the pane.
             lens_buf = None
-            if self._cfg.get("glass_style") == "liquid" and not is_popover:
+            if liquid_lens:
                 lens_buf = io.BytesIO()
                 # Full chroma: 4:2:0 subsampling turns fine patterns into
                 # coloured moire once the lens displaces them.
@@ -1121,9 +1229,14 @@ class Api:
                             10, int(self._cfg.get("dim_after_sec", 120)))
                         mine = self._own_hwnds()
                         now = time.monotonic()
-                        if _desktop_is_front(mine):
+                        front = _desktop_is_front(_get_hwnd(self._window), mine)
+                        if front:
                             self._off_desktop_since = 0.0
                             wanted = False
+                        elif front is None:
+                            # Taskbar, Start menu, our panel: neither a
+                            # reason to wake nor to start counting.
+                            wanted = self._dimmed
                         else:
                             if not self._off_desktop_since:
                                 self._off_desktop_since = now
@@ -1950,8 +2063,15 @@ _user32.WindowFromPoint.restype = ctypes.c_void_p
 GA_ROOT = 2
 
 
-_SHELL_CLASSES = {"Progman", "WorkerW",
-                  "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}
+# Per-channel difference, out of 255, below which two blurred backdrops
+# look the same.
+_BACKDROP_NOISE = 3
+
+_DESKTOP_CLASSES = {"Progman", "WorkerW"}
+_SHELL_CLASSES = _DESKTOP_CLASSES | {
+    "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow",
+    "TopLevelWindowForOverflowXamlIsland", "XamlExplorerHostIslandWindow",
+    "NotifyIconOverflowWindow"}
 
 
 def _monitor_info(mon):
@@ -1972,14 +2092,21 @@ def _foreground_root():
     return _user32.GetAncestor(fg, GA_ROOT) or fg
 
 
-def _desktop_is_front(ours=()):
-    """True when the desktop itself (or one of our windows) has the user's
-    attention."""
+def _desktop_is_front(main=0, ours=()):
+    """Whether the desktop has the user's attention: True when the desktop
+    or the widget itself is in front, False when some other app is, and
+    None when the foreground is only passing through (taskbar, Start menu,
+    our own panel) and says nothing either way."""
     try:
         root = _foreground_root()
-        if not root or root in ours:
+        if not root or root == main:
             return True
-        return _class_name(root) in _SHELL_CLASSES
+        if root in ours:
+            return None
+        name = _class_name(root)
+        if name in _DESKTOP_CLASSES:
+            return True
+        return None if name in _SHELL_CLASSES else False
     except Exception:
         return True
 

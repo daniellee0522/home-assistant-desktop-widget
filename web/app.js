@@ -718,11 +718,25 @@ function paintLiquidLens(ctx, image, width, height, card) {
     x0, y0, x1 - x0, y1 - y0);
 }
 
+// The outline only changes with the card's box, which is the same from one
+// frame to the next, so it is traced once and reused.
+let outlineKey = '';
+let outlinePath = null;
+function superellipsePath(shape) {
+  const key = [shape.x, shape.y, shape.w, shape.h, shape.radius].join(',');
+  if (key !== outlineKey || !outlinePath) {
+    outlinePath = new Path2D();
+    traceSuperellipse(outlinePath, shape);
+    outlineKey = key;
+  }
+  return outlinePath;
+}
+
 function traceSuperellipse(ctx, shape) {
   const { x, y, w, h } = shape;
   const r = Math.max(0, Math.min(shape.radius, w / 2, h / 2));
   const curvePower = 0.5;
-  ctx.beginPath();
+  if (ctx.beginPath) ctx.beginPath();
   if (!r) { ctx.rect(x, y, w, h); return; }
   const corner = (cx, cy, start) => {
     for (let i = 0; i <= 16; i++) {
@@ -741,6 +755,29 @@ function traceSuperellipse(ctx, shape) {
   ctx.closePath();
 }
 
+// The card's outline as a CSS clip-path in the canvas's own CSS pixels. Clipping in the
+// compositor, set only when the card's box changes, costs nothing per frame;
+// clipping the canvas itself re-rasterised the outline every time.
+let glassClipKey = '';
+function applyGlassClip(glass, card, dpr) {
+  // The page is scaled by CSS zoom, which scales the path as well.
+  const unit = dpr * currentZoom;
+  const key = [card.x, card.y, card.w, card.h, card.radius, unit].join(',');
+  if (key === glassClipKey) return;
+  glassClipKey = key;
+  let d = '';
+  const f = (n) => Math.round(n / unit * 100) / 100;
+  traceSuperellipse({
+    moveTo(x, y) { d += 'M' + f(x) + ' ' + f(y); },
+    lineTo(x, y) { d += 'L' + f(x) + ' ' + f(y); },
+    rect(x, y, rw, rh) {
+      d += 'M' + f(x) + ' ' + f(y) + 'h' + f(rw) + 'v' + f(rh) + 'h' + f(-rw) + 'Z';
+    },
+    closePath() { d += 'Z'; },
+  }, card);
+  glass.style.clipPath = "path('" + d + "')";
+}
+
 function paintBackdrop(blurred, lens, w, h) {
   const glass = document.getElementById('backdrop-glass');
   if (!glass) return;
@@ -752,27 +789,113 @@ function paintBackdrop(blurred, lens, w, h) {
   // A frame without a picture leaves the previous one in place rather than
   // flickering the card bare.
   if (!blurred && !lens) return;
-  if (glass.width !== w || glass.height !== h) {
+  // The liquid lens paints around the card's edge, so it clips the canvas
+  // itself; every other picture is opaque and simply fills it.
+  const lensed = CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW && !!lens;
+  const resized = glass.width !== w || glass.height !== h;
+  if (resized) {
     glass.width = w;
     glass.height = h;
-  } else {
+  } else if (lensed) {
     glassCtx.clearRect(0, 0, w, h);
   }
   const card = cardGeometry();
   if (!card) return;
+  if (!lensed) {
+    applyGlassClip(glass, card, window.devicePixelRatio || 1);
+    glassCtx.drawImage(blurred || lens, 0, 0, w, h);
+    return;
+  }
+  if (glassClipKey) { glass.style.clipPath = ''; glassClipKey = ''; }
   glassCtx.save();
-  traceSuperellipse(glassCtx, card);
-  glassCtx.clip();
+  glassCtx.clip(superellipsePath(card));
   glassCtx.drawImage(blurred || lens, 0, 0, w, h);
-  if (CONFIG.glass_style === 'liquid' && !IS_POPOVER_WINDOW && lens)
-    paintLiquidLens(glassCtx, lens, w, h, card);
+  paintLiquidLens(glassCtx, lens, w, h, card);
   glassCtx.restore();
 }
 
 // Decoded off the main thread and closed after drawing, so frames never
 // accumulate in Chromium's decoded-image cache.
 function decodeShot(url) {
+  // The blurred frame is a few KB: decoding it here skips a trip through
+  // the network stack that only pays for itself on the large lens frame.
+  if (url.length < 40000) {
+    try {
+      const bin = atob(url.slice(url.indexOf(',') + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+    } catch (e) { /* fall through */ }
+  }
   return fetch(url).then((r) => r.blob()).then(createImageBitmap);
+}
+
+// Paints one answer from Python, whether it came back from a call or was
+// pushed by the stream below.
+function applyShot(shot, generation, startedAt) {
+  if (generation !== backdropGeneration) { backdropPending = false; return; }
+  if (shot && typeof shot.system_glass === 'boolean') {
+    const previous = systemGlass();
+    CONFIG.system_glass_active = Object.assign({}, CONFIG.system_glass_active,
+      { [WINDOW_KIND]: shot.system_glass });
+    if (previous !== systemGlass()) {
+      applySystemGlass();
+      backdropHash = null;
+    }
+  }
+  // Python skipped the capture (hidden or covered window).
+  if (shot && shot.skip) {
+    backdropSkipMs = shot.retry_ms || 500;
+    backdropPending = false;
+    return;
+  }
+  backdropSkipMs = 0;
+  backdropPaced = !!(shot && shot.paced);
+  // Paced from the capture's own cost, not the bridge round trip; a
+  // screen-paced answer's time is mostly waiting, not cost.
+  if (!backdropPaced) noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
+  if (!shot) { backdropPending = false; return; }
+  if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
+  backdropStill = 0;
+  if (!shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
+  // The window may have been resized while this was in flight; a frame
+  // of the old size would be stretched, so drop it and ask again.
+  const live = viewportBox();
+  const liveDpr = window.devicePixelRatio || 1;
+  const liveW = Math.round(live.width * liveDpr);
+  const liveH = Math.round(live.height * liveDpr);
+  if (Math.abs(shot.w - liveW) > 3 || Math.abs(shot.h - liveH) > 3) {
+    backdropHash = null;            // that frame was never painted
+    backdropPending = false;
+    refreshBackdropSoon(0);
+    return;
+  }
+  return Promise.allSettled([
+    shot.blur_url ? decodeShot(shot.blur_url) : null,
+    shot.lens_url ? decodeShot(shot.lens_url) : null,
+  ]).then((results) => {
+    const [blurred, lens] = results.map(result =>
+      result.status === 'fulfilled' ? result.value : null);
+    try {
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      const current = viewportBox();
+      const ratio = window.devicePixelRatio || 1;
+      if (generation !== backdropGeneration ||
+          Math.abs(shot.w - Math.round(current.width * ratio)) > 3 ||
+          Math.abs(shot.h - Math.round(current.height * ratio)) > 3) {
+        backdropHash = null;
+        return;
+      }
+      paintBackdrop(blurred, lens, shot.w, shot.h);
+      backdropHash = shot.hash;
+    } finally {
+      if (blurred) blurred.close();
+      if (lens) lens.close();
+      backdropPending = false;
+    }
+  });
+
 }
 
 function refreshBackdrop() {
@@ -788,79 +911,103 @@ function refreshBackdrop() {
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr),
                           backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null)
-    .then((shot) => {
-      if (generation !== backdropGeneration) { backdropPending = false; return; }
-      if (shot && typeof shot.system_glass === 'boolean') {
-        const previous = systemGlass();
-        CONFIG.system_glass_active = Object.assign({}, CONFIG.system_glass_active,
-          { [WINDOW_KIND]: shot.system_glass });
-        if (previous !== systemGlass()) {
-          applySystemGlass();
-          backdropHash = null;
-        }
-      }
-      // Python skipped the capture (hidden or covered window).
-      if (shot && shot.skip) {
-        backdropSkipMs = shot.retry_ms || 500;
-        backdropPending = false;
-        return;
-      }
-      backdropSkipMs = 0;
-      backdropPaced = !!(shot && shot.paced);
-      // Paced from the capture's own cost, not the bridge round trip; a
-      // screen-paced answer's time is mostly waiting, not cost.
-      if (!backdropPaced) noteFrameCost((shot && shot.ms) || (performance.now() - startedAt));
-      if (!shot) { backdropPending = false; return; }
-      if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
-      backdropStill = 0;
-      if (!shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
-      // The window may have been resized while this was in flight; a frame
-      // of the old size would be stretched, so drop it and ask again.
-      const live = viewportBox();
-      const liveDpr = window.devicePixelRatio || 1;
-      const liveW = Math.round(live.width * liveDpr);
-      const liveH = Math.round(live.height * liveDpr);
-      if (Math.abs(shot.w - liveW) > 3 || Math.abs(shot.h - liveH) > 3) {
-        backdropHash = null;            // that frame was never painted
-        backdropPending = false;
-        refreshBackdropSoon(0);
-        return;
-      }
-      return Promise.allSettled([
-        shot.blur_url ? decodeShot(shot.blur_url) : null,
-        shot.lens_url ? decodeShot(shot.lens_url) : null,
-      ]).then((results) => {
-        const [blurred, lens] = results.map(result =>
-          result.status === 'fulfilled' ? result.value : null);
-        try {
-          const failure = results.find(result => result.status === 'rejected');
-          if (failure) throw failure.reason;
-          const current = viewportBox();
-          const ratio = window.devicePixelRatio || 1;
-          if (generation !== backdropGeneration ||
-              Math.abs(shot.w - Math.round(current.width * ratio)) > 3 ||
-              Math.abs(shot.h - Math.round(current.height * ratio)) > 3) {
-            backdropHash = null;
-            return;
-          }
-          paintBackdrop(blurred, lens, shot.w, shot.h);
-          backdropHash = shot.hash;
-        } finally {
-          if (blurred) blurred.close();
-          if (lens) lens.close();
-          backdropPending = false;
-        }
-      });
-    })
+    .then((shot) => applyShot(shot, generation, startedAt))
     .catch(() => { backdropHash = null; backdropPending = false; });
 }
+
+// ---- Pushed frames ----------------------------------------------------
+// While the screen sets the pace, asking Python for each frame costs an HTTP
+// round trip through Chromium's network service per frame. Instead Python
+// is told once to keep watching and runs JavaScript here when there is a new
+// picture. Anything that would change what is being asked for (a resize, a
+// drag, an animation) ends the stream and the ticker takes over again.
+let streaming = false;
+let streamToken = null;
+let streamBeat = 0;
+let streamUnavailable = false;
+let streamSeq = 0;
+let queuedShot = null;
+const STREAM_BEAT_MS = 5000;
+
+function canStream() {
+  return !streamUnavailable && backdropPaced && !backdropSkipMs && !backdropAt
+    && !flyoutAnimating && !document.hidden && !backdropTicksOnVsync()
+    && !!(window.pywebview && window.pywebview.api);
+}
+
+function enterStream() {
+  const box = viewportBox();
+  const dpr = window.devicePixelRatio || 1;
+  const token = WINDOW_KIND + ':' + (++streamSeq);
+  const w = Math.round(box.width * dpr);
+  const h = Math.round(box.height * dpr);
+  const send = () => window.pywebview.api
+    .backdrop_stream(WINDOW_KIND, token, w, h, backdropHash);
+  streaming = true;
+  streamToken = token;
+  queuedShot = null;
+  send().catch(() => {
+    if (streamToken !== token) return;
+    streamUnavailable = true;
+    leaveStream(true);
+  });
+  // Python lets go of a stream whose page stops answering.
+  streamBeat = setInterval(() => { send().catch(() => {}); }, STREAM_BEAT_MS);
+}
+
+function leaveStream(resume) {
+  if (!streaming) return false;
+  streaming = false;
+  streamToken = null;
+  queuedShot = null;
+  clearInterval(streamBeat);
+  streamBeat = 0;
+  if (window.pywebview && window.pywebview.api) {
+    window.pywebview.api.backdrop_stream(WINDOW_KIND, null).catch(() => {});
+  }
+  if (resume) startBackdropTicker();
+  return true;
+}
+
+function paintPushed(shot) {
+  backdropPending = true;
+  Promise.resolve(applyShot(shot, backdropGeneration, performance.now()))
+    .catch(() => { backdropHash = null; backdropPending = false; })
+    .then(() => {
+      const next = queuedShot;
+      queuedShot = null;
+      if (next && streaming && next.token === streamToken) paintPushed(next);
+    });
+}
+
+window.__backdropPush = function (shot) {
+  if (!streaming || !shot || shot.token !== streamToken) return;
+  if (shot.stream_end) {
+    // Python gave up the stream (window hidden or covered, capture
+    // unavailable): its answer is handled like a call's, then ticking resumes.
+    const pending = backdropPending;
+    streaming = false;
+    streamToken = null;
+    queuedShot = null;
+    clearInterval(streamBeat);
+    streamBeat = 0;
+    applyShot(shot, backdropGeneration, performance.now());
+    backdropPending = pending;
+    startBackdropTicker();
+    return;
+  }
+  if (backdropPending) { queuedShot = shot; return; }
+  paintPushed(shot);
+};
 
 // Anything that changes which pixels are behind the window invalidates the
 // frame comparison as well as the image.
 function invalidateBackdrop() {
+  const wasStreaming = leaveStream(false);
   backdropGeneration += 1;
   backdropHash = null;
   backdropStill = 0;
+  if (wasStreaming) startBackdropTicker();
 }
 
 // Called from Python after a suspend (see on_resume in main.py).
@@ -887,6 +1034,7 @@ function refreshBackdropSoon(delay) {
 }
 
 function stopBackdropTicker() {
+  leaveStream(false);
   clearTimeout(backdropTimer);
   if (backdropRaf) cancelAnimationFrame(backdropRaf);
   backdropTimer = null;
@@ -923,6 +1071,12 @@ function startBackdropTicker() {
         backdropRaf = null;
         again();
       });
+      return;
+    }
+    if (canStream()) {
+      backdropTimer = null;
+      backdropRaf = null;
+      enterStream();
       return;
     }
     // A screen-paced read already waited for a change. Otherwise the widget
@@ -1311,6 +1465,7 @@ window.__flyoutEnter = function () {
 window.__flyoutLeave = function () {
   flyoutOpen = false;
   flyoutAnimating = true;
+  leaveStream(true);
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter');
     void el.offsetWidth;

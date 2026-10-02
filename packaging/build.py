@@ -75,6 +75,8 @@ def main():
         '--workpath', str(work / 'pyinstaller'), '--specpath', str(work),
         '--distpath', str(
             output), '--add-data', f'{ROOT / "web"}{os.pathsep}web',
+        # numpy is optional for Qt and Pillow; loading it costs memory.
+        '--exclude-module', 'numpy', '--exclude-module', 'tkinter',
         '--hidden-import', 'PIL._imagingft',
         '--hidden-import', f'{qt_package}.QtCore',
         '--hidden-import', f'{qt_package}.QtWidgets',

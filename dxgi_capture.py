@@ -638,6 +638,9 @@ class DesktopDuplication:
             if got is None:
                 return None
             data, pitch, tw, th = got
+            if (canvas is None and part == rect and pitch == tw * 4
+                    and _untransposer(out.rotation) is None):
+                return data              # already tightly packed BGRA
             img = Image.frombuffer("RGBA", (tw, th), data, "raw", "BGRA", pitch, 1)
             turn = _untransposer(out.rotation)
             if turn is not None:
