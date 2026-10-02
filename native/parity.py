@@ -1,0 +1,154 @@
+"""Renders the same demo widget with the web page and with native/render.py
+and compares them: python native/parity.py [outdir]
+
+Both draw on the same picture (a generated gradient with some texture), so
+what differs is the card, the tiles and the text.
+"""
+import base64
+import io
+import json
+import os
+import sys
+
+from PIL import Image, ImageChops, ImageDraw
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "native"))
+
+from PySide6.QtCore import QTimer, Qt, QUrl                      # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter                # noqa: E402
+from PySide6.QtWebEngineWidgets import QWebEngineView             # noqa: E402
+from PySide6.QtWidgets import QApplication                        # noqa: E402
+
+import render                                                     # noqa: E402
+
+OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "native", "out")
+os.makedirs(OUT, exist_ok=True)
+W, H = render.widget_size("2x4")
+SIZE = (W + 40, H + 40)          # a margin of picture around the card, as on a desktop
+ORIGIN = 20
+
+TILES = [
+    {"id": "light", "entity": "light.desk", "domain": "light", "room": "Desk lamp", "label": ""},
+    {"id": "climate", "entity": "climate.living", "domain": "climate", "room": "Living room", "label": "Cooling"},
+    {"id": "fan", "entity": "fan.office", "domain": "fan", "room": "Office fan", "label": ""},
+    {"id": "cover", "entity": "cover.bedroom", "domain": "cover", "room": "Blinds", "label": ""},
+    {"id": "lock", "entity": "lock.front", "domain": "lock", "room": "Front door", "label": ""},
+    {"id": "vacuum", "entity": "vacuum.home", "domain": "vacuum", "room": "Vacuum", "label": "Cleaning"},
+    {"id": "sensor", "entity": "sensor.temperature", "domain": "sensor", "room": "Temperature", "label": ""},
+    {"id": "media", "entity": "media_player.speaker", "domain": "media_player", "room": "書房", "label": ""},
+]
+STATES = {
+    "light.desk": {"state": "on", "attributes": {"brightness": 180}},
+    "climate.living": {"state": "cool", "attributes": {"temperature": 24, "current_temperature": 27}},
+    "fan.office": {"state": "on", "attributes": {"percentage": 65}},
+    "cover.bedroom": {"state": "closed", "attributes": {}},
+    "lock.front": {"state": "unlocked", "attributes": {}},
+    "vacuum.home": {"state": "cleaning", "attributes": {}},
+    "sensor.temperature": {"state": "27.5", "attributes": {"device_class": "temperature", "unit_of_measurement": "°C"}},
+    "media_player.speaker": {"state": "paused", "attributes": {"media_title": "Tiny Giant", "media_artist": "Sãn"}},
+}
+
+
+def backdrop_png():
+    img = Image.new("RGB", SIZE)
+    d = ImageDraw.Draw(img)
+    for x in range(SIZE[0]):
+        t = x / SIZE[0]
+        d.line([(x, 0), (x, SIZE[1])], fill=(int(120 + 100 * t), int(150 + 60 * (1 - t)), int(190 - 40 * t)))
+    for i in range(0, SIZE[0], 90):
+        d.ellipse([i, 40 + (i % 3) * 60, i + 120, 160 + (i % 3) * 60], fill=(240, 200 - i % 80, 150 + i % 60))
+    return img
+
+
+os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
+app = QApplication([])
+bg = backdrop_png()
+buf = io.BytesIO()
+bg.save(buf, "PNG")
+bg_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+bg_qimage = QImage.fromData(buf.getvalue())
+themes = ["light", "dark"]
+state = {"i": 0, "web": {}, "native": {}}
+
+view = QWebEngineView()
+view.setAttribute(Qt.WA_DontShowOnScreen, True)
+view.resize(*SIZE)
+view.page().setBackgroundColor(QColor("#000000"))
+
+
+def native_render(theme):
+    img = QImage(SIZE[0], SIZE[1], QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.drawImage(0, 0, bg_qimage)
+    p.translate(ORIGIN, ORIGIN)
+    render.draw_widget(p, "2x4", TILES, STATES, theme)
+    p.end()
+    return img
+
+
+def next_theme():
+    if state["i"] >= len(themes):
+        report()
+        return
+    theme = themes[state["i"]]
+    script = """
+      CONFIG = Object.assign(CONFIG, {widgets: [{id: 'w1', size: '2x4', tiles: %s}],
+        glass_style: 'classic', theme: %s, language: 'zh-TW', zoom: 100, dim_when_idle: false});
+      STATES = %s;
+      window.pywebview.api = new Proxy({}, {get: () => () => Promise.resolve(null)});
+      resolveWindowTiles(); applyTheme(); renderGrid();
+      document.documentElement.style.zoom = '1';
+      document.body.style.background = 'url(%s) 0 0 / auto no-repeat';
+      document.querySelector('#stage').style.cssText = 'margin: %dpx 0 0 %dpx';
+      document.querySelector('#backdrop-glass').style.display = 'none';
+    """ % (json.dumps(TILES), json.dumps(theme), json.dumps(STATES), bg_url, ORIGIN, ORIGIN)
+    view.page().runJavaScript(script)
+
+    def grab():
+        state["web"][theme] = view.grab().toImage()
+        state["native"][theme] = native_render(theme)
+        state["i"] += 1
+        QTimer.singleShot(50, next_theme)
+    QTimer.singleShot(900, grab)
+
+
+def to_pil(qimg):
+    qimg = qimg.convertToFormat(QImage.Format_RGBA8888)
+    return Image.frombytes("RGBA", (qimg.width(), qimg.height()), bytes(qimg.constBits())).convert("RGB")
+
+
+def report():
+    for theme in themes:
+        web, nat = to_pil(state["web"][theme]), to_pil(state["native"][theme])
+        web.save(os.path.join(OUT, "web-%s.png" % theme))
+        nat.save(os.path.join(OUT, "native-%s.png" % theme))
+        diff = ImageChops.difference(web, nat)
+        box = (ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)
+        d = diff.crop(box)
+        px = list(d.getdata())
+        mean = sum(sum(p) / 3 for p in px) / len(px)
+        big = sum(1 for p in px if max(p) > 24) / len(px) * 100
+        side = Image.new("RGB", (SIZE[0] * 2 + 10, SIZE[1]))
+        side.paste(web, (0, 0))
+        side.paste(nat, (SIZE[0] + 10, 0))
+        side.save(os.path.join(OUT, "side-%s.png" % theme))
+        d.point(lambda v: min(255, v * 4)).save(os.path.join(OUT, "diff-%s.png" % theme))
+        print("%-5s mean abs difference %.2f / 255, pixels off by more than 24: %.1f%%" % (theme, mean, big))
+    app.quit()
+
+
+def loaded(ok):
+    if not ok:
+        raise SystemExit("could not load the page")
+    QTimer.singleShot(1000, next_theme)
+
+
+view.loadFinished.connect(loaded)
+view.load(QUrl.fromLocalFile(os.path.join(ROOT, "web", "index.html")))
+view.show()
+QTimer.singleShot(30000, app.quit)
+app.exec()
