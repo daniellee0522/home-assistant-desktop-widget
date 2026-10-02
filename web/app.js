@@ -1446,19 +1446,26 @@ function iconKind(icon) {
   return '';
 }
 
+// The warm yellow of a bulb on the light theme's white tile.
+const LIGHT_THEME_BULB = 'rgb(255, 190, 108)';
+
 function darkTheme() {
   const theme = document.documentElement.getAttribute('data-theme');
   return theme === 'dark' || (theme !== 'light' && !!window.matchMedia
     && window.matchMedia('(prefers-color-scheme: dark)').matches);
 }
 
-// What a bulb is coloured while it is on. In the dark theme a white light is
-// the same yellow as anything given a bulb icon, and only a colour light
-// shows its colour; in the light theme a light shows the colour it reports.
+// What a bulb is coloured while it is on.
 function lightColor(attrs) {
-  const colour = Array.isArray(attrs.rgb_color)
-    && (!darkTheme() || ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(attrs.color_mode));
-  return colour ? 'rgb(' + attrs.rgb_color.join(',') + ')' : 'var(--accent-yellow)';
+  // Only a light that is really set to a colour shows it. A white one is one
+  // fixed yellow for the theme, whatever its colour temperature reports and
+  // whether the state is the one just guessed on a press or the one that
+  // comes back: otherwise the icon changes colour a moment after it lit, and
+  // two lights lit together differ.
+  if (Array.isArray(attrs.rgb_color) && ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(attrs.color_mode)) {
+    return 'rgb(' + attrs.rgb_color.join(',') + ')';
+  }
+  return darkTheme() ? 'var(--accent-yellow)' : LIGHT_THEME_BULB;
 }
 
 // An icon chosen by hand for a device of another kind: coloured as that kind
@@ -1469,7 +1476,7 @@ function iconColorAs(kind, attrs, on) {
     case 'light': return lightColor(attrs);
     case 'climate': return 'var(--accent-cyan)';
     case 'media_player': return 'var(--accent-green)';
-    case 'lock': return 'var(--accent-green-soft)';
+    case 'lock': return 'var(--accent-teal)';
     default: return 'var(--accent-blue)';
   }
 }
@@ -1486,7 +1493,7 @@ function iconColorFor(domain, state, on) {
     case 'cover': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'media_player': return on ? 'var(--accent-green)' : 'var(--text-off-1)';
     // Unlocked is normal, not an alert: soft green.
-    case 'lock': return isUnlocked(state) ? 'var(--accent-green-soft)' : 'var(--text-off-1)';
+    case 'lock': return isUnlocked(state) ? 'var(--accent-teal)' : 'var(--text-off-1)';
     case 'vacuum': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'scene': case 'script': case 'automation': return 'var(--accent-blue)';
     case 'binary_sensor': return state && state.state === 'on' ? 'var(--accent-green)' : 'var(--text-off-1)';
@@ -1907,7 +1914,7 @@ let homeSummaryRaf = 0;
 const HOME_CATEGORIES = [
   { id: 'env', title: '環境', icon: 'thermometer', tint: 'cyan' },
   { id: 'light', title: '燈光', icon: 'light', tint: 'yellow', domains: ['light'] },
-  { id: 'security', title: '保全系統', icon: 'lock', tint: 'green', domains: ['lock', 'camera'] },
+  { id: 'security', title: '保全系統', icon: 'lock', tint: 'teal', domains: ['lock', 'camera'] },
   { id: 'media', title: '媒體音訊', icon: 'media', tint: 'green', domains: ['media_player'] },
 ];
 
@@ -2115,7 +2122,7 @@ function categoryPill(cat, members) {
   if (cat.id === 'security') {
     const locks = members.filter((e) => e.domain === 'lock');
     const open = locks.filter((e) => isUnlocked(STATES[e.entity_id])).length;
-    if (open) return { sub: open + ' 個未鎖上', tint: 'red', icon: 'lock-open' };
+    if (open) return { sub: open + ' 個未鎖上', tint: 'teal', icon: 'lock-open' };
     return { sub: locks.length ? '全部已鎖上' : members.length + ' 台攝影機', tint: cat.tint };
   }
   const playing = count((s) => s.state === 'playing');

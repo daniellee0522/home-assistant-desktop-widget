@@ -39,7 +39,7 @@
   --accent-blue: #409cff;
   --accent-cyan: #48aaff;
   --accent-green: #34c759;
-  --accent-green-soft: #6fdc9a;   /* an unlocked lock - present, not alarming */
+  --accent-teal: #2fd0c2;         /* a lock, whichever way it is */
   --accent-red: #ff5b4a;
   --btn-fill: rgba(0, 0, 0, 0.08);
   --btn-fill-strong: rgba(0, 0, 0, 0.14);
@@ -1559,6 +1559,7 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-pill.is-green .home-pill-icon { color: var(--accent-green); }
 .home-pill.is-blue .home-pill-icon { color: var(--accent-blue); }
 .home-pill.is-red .home-pill-icon { color: var(--accent-red); }
+.home-pill.is-teal .home-pill-icon { color: var(--accent-teal); }
 .home-pill-text { display: flex; flex-direction: column; white-space: nowrap; }
 .home-pill-title { font-size: 23px; font-weight: 700; line-height: 1.15; }
 .home-pill-sub { font-size: 19px; font-weight: 500; line-height: 1.2; opacity: 0.8; }
