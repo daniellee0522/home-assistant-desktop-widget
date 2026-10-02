@@ -29,6 +29,14 @@ SHELL_CLASSES = DESKTOP_CLASSES | {
     "NotifyIconOverflowWindow"}
 
 
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+user32.WindowFromPoint.argtypes = [POINT]
+user32.WindowFromPoint.restype = ctypes.c_void_p
+
+
 class MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint32), ("rcMonitor", wintypes.RECT),
                 ("rcWork", wintypes.RECT), ("dwFlags", ctypes.c_uint32)]
@@ -80,6 +88,29 @@ def fullscreen_app_present(ours):
             return False
         m = info.rcMonitor
         return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
+    except Exception:
+        return False
+
+
+def nothing_visible_of(hwnd):
+    """True when every sampled point of this window is covered by some other
+    window: the widget sits at the bottom of the z-order, so it is often
+    covered, and a covered glass need not be refreshed."""
+    try:
+        r = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return False
+        w, h = r.right - r.left, r.bottom - r.top
+        if w <= 0 or h <= 0:
+            return False
+        for fy in (0.08, 0.35, 0.65, 0.92):
+            for fx in (0.04, 0.3, 0.55, 0.8, 0.96):
+                top = user32.WindowFromPoint(POINT(int(r.left + w * fx), int(r.top + h * fy)))
+                if not top:
+                    continue
+                if (user32.GetAncestor(top, GA_ROOT) or top) == hwnd:
+                    return False
+        return True
     except Exception:
         return False
 

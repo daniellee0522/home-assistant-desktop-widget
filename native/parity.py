@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor, QImage, QPainter                # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView             # noqa: E402
 from PySide6.QtWidgets import QApplication                        # noqa: E402
 
+import liquid                                                     # noqa: E402
 import render                                                     # noqa: E402
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "native", "out")
@@ -72,11 +73,12 @@ bg_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 bg_qimage = QImage.fromData(buf.getvalue())
 # (name, widget size, how many of the demo tiles, theme, dimmed)
 SCENES = []
-for theme in ("light", "dark"):
-    for dim in (False, True):
-        tag = theme + ("-dim" if dim else "")
-        SCENES += [("small-" + tag, "2x4", 8, theme, dim), ("bar-" + tag, "2x4", 4, theme, dim),
-                   ("big-" + tag, "2x4", 2, theme, dim), ("4x4-" + tag, "4x4", 16, theme, dim)]
+for style in ("classic", "liquid"):
+    for theme in ("light", "dark"):
+        for dim in (False, True):
+            tag = ("liquid-" if style == "liquid" else "") + theme + ("-dim" if dim else "")
+            SCENES += [("small-" + tag, "2x4", 8, theme, dim, style), ("bar-" + tag, "2x4", 4, theme, dim, style),
+                       ("big-" + tag, "2x4", 2, theme, dim, style), ("4x4-" + tag, "4x4", 16, theme, dim, style)]
 ONLY = sys.argv[2].split(",") if len(sys.argv) > 2 else None
 if ONLY:
     SCENES = [sc for sc in SCENES if any(o in sc[0] for o in ONLY)]
@@ -93,15 +95,33 @@ def tiles_for(count):
 
 
 def native_render(scene):
-    name, size, count, theme, dim = scene
+    name, size, count, theme, dim, style = scene
     img = QImage(SIZE[0], SIZE[1], QImage.Format_ARGB32_Premultiplied)
     img.fill(Qt.transparent)
     p = QPainter(img)
     p.drawImage(0, 0, bg_qimage)
     p.translate(ORIGIN, ORIGIN)
-    render.draw_widget(p, size, tiles_for(count), STATES, theme, None, 1.0, dim)
+    if style == "liquid":
+        W, H = render.widget_size(size)
+        tcol = render.tokens(theme, dim, style)
+        form, rects = render.tile_layout(size, count)
+        crop = bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)).reduce(8).filter(ImageFilter.GaussianBlur(2))
+        lens = liquid.Lens(W, H, tcol["radius_panel"], 4)
+        frame = lens.frame(crop, lens.card_mask(), [(x, y, w, h, tcol["radius_tile"]) for x, y, w, h in rects], 12)
+        qf = QImage(frame.tobytes(), W, H, W * 4, QImage.Format_RGBA8888)
+        p.drawImage(0, 0, qf)
+    render.draw_widget(p, size, tiles_for(count), STATES, theme, None, 1.0, dim, style)
     p.end()
     return img
+
+
+def small_url(size):
+    """The picture the lens refracts: the card's part of the backdrop, as the capture makes it."""
+    W, H = render.widget_size(size)
+    small = bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)).reduce(8).filter(ImageFilter.GaussianBlur(2))
+    b = io.BytesIO()
+    small.save(b, "PNG")
+    return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
 
 
 def next_theme():
@@ -109,10 +129,11 @@ def next_theme():
         report()
         return
     scene = SCENES[state["i"]]
-    name, size, count, theme, dim = scene
+    name, size, count, theme, dim, style = scene
+    W, H = render.widget_size(size)
     script = """
       CONFIG = Object.assign(CONFIG, {widgets: [{id: 'w1', size: %s, tiles: %s}],
-        glass_style: 'classic', theme: %s, language: 'zh-TW', zoom: 100, dim_when_idle: false});
+        glass_style: %s, theme: %s, language: 'zh-TW', zoom: 100, dim_when_idle: false});
       STATES = %s;
       window.pywebview.api = new Proxy({}, {get: () => () => Promise.resolve(null)});
       resolveWindowTiles(); applyTheme(); renderGrid();
@@ -121,8 +142,27 @@ def next_theme():
       document.body.style.background = 'url(%s) 0 0 / auto no-repeat';
       document.querySelector('#stage').style.cssText = 'margin: %dpx 0 0 %dpx';
       document.querySelector('#backdrop-glass').style.display = 'none';
-    """ % (json.dumps(size), json.dumps(tiles_for(count)), json.dumps(theme), json.dumps(STATES),
-           "true" if dim else "false", bg_url, ORIGIN, ORIGIN)
+      if (%s) {
+        const W = %d, H = %d, O = %d;
+        document.body.style.background = 'transparent';
+        const glass = document.querySelector('#backdrop-glass');
+        glass.style.display = 'block';
+        const img = new Image();
+        img.onload = () => {
+          const full = document.createElement('canvas');
+          full.width = %d; full.height = %d;
+          const c = full.getContext('2d');
+          c.fillStyle = '#000'; c.fillRect(0, 0, full.width, full.height);
+          c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
+          c.drawImage(img, O, O, W, H);
+          glassCtx = null; restingCard = null;
+          paintBackdrop(full, full.width, full.height);
+        };
+        img.src = '%s';
+      }
+    """ % (json.dumps(size), json.dumps(tiles_for(count)), json.dumps(style), json.dumps(theme), json.dumps(STATES),
+           "true" if dim else "false", bg_url, ORIGIN, ORIGIN,
+           "true" if style == "liquid" else "false", W, H, ORIGIN, SIZE[0], SIZE[1], small_url(size))
     view.page().runJavaScript(script)
 
     def grab():
@@ -139,7 +179,7 @@ def to_pil(qimg):
 
 
 def report():
-    for name, size, count, theme, dim in SCENES:
+    for name, size, count, theme, dim, style in SCENES:
         W, H = render.widget_size(size)
         web, nat = to_pil(state["web"][name]), to_pil(state["native"][name])
         web.save(os.path.join(OUT, "web-%s.png" % name))

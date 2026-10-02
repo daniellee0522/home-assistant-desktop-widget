@@ -47,3 +47,26 @@ rest is text and icon edges.
 Liquid glass (the lens is a shader), Windows glass, the dimmed look, the bar
 and large tile forms, the other sizes, long press and right-click detail,
 dragging with snapping, the tray panel, the Home panel, settings.
+
+## Second round: dimming, tile forms, liquid glass
+
+Added to the prototype (all measured against the web page with `python native/parity.py [outdir] [filter]`,
+32 scenes: classic and liquid, light and dark, lit and dimmed, small/bar/big tiles, 2x4 and 4x4):
+
+- **Dimming** (`idle.py`): the same rule as `_watch_for_idle`, eased 700 ms in and 260 ms out by
+  cross-fading two cached pictures of the tiles (lit and dimmed colours); mouse move or press wakes it.
+- **Tile forms** (`render.tile_layout`): 1x1, 2x2, 2x4, 4x4; bar (2x1) and big (2x2, zoom 1.4) chosen
+  from the tile count as `tileFormFor` does; the climate reading (`24 °C`) and round − / + buttons.
+- **Liquid glass** (`liquid.py`): the shader's sampling ring depends only on the card's shape, so it is
+  worked out once as a mesh of 4 px quads and each new desktop picture is warped through it by Pillow's
+  C code (no GPU, no numpy). Against a numpy port of the shader the ring differs by 0.3/255 on average.
+  The tiles' `backdrop-filter: blur(12px)` is a blur of a quarter-size copy.
+- **Sampling**: `glass_sampling: still` takes the desktop once and again only when the widget is dropped
+  or its tiles change; a widget covered by other windows does not sample at all.
+
+Measured here (preview, animated wallpaper behind it): USS 62-67 MB; CPU 1.3-1.9 % of a core on
+`still`, about 18 % on `live` with a wallpaper that moves (the cost is Desktop Duplication itself).
+
+Not done: Windows glass, the right-click / long-press detail card, the tray panel and settings (they stay
+web pages, opened on demand), drag snapping, several widgets in one process, and the chromatic split at the
+lens rim (it changes the result by less than 0.01/255 on a blurred picture).

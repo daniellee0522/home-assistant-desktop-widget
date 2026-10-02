@@ -44,10 +44,37 @@ DIM = {"panel": (104, 120, 140, 0.26), "tile_on": (255, 255, 255, 0.30),
        "edge_on": (255, 255, 255, 0.22)}
 
 
-def tokens(theme, dim=False):
+# data-glass-style="liquid": clearer glass, tiles 62 px round, and the tint of the
+# card, the tiles and their rims are lighter (the rims are literals in the stylesheet).
+LIQUID = {
+    "light": {"panel": (226, 239, 248, 0.18), "tile_off": (39, 55, 73, 0.3),
+              "tile_on": (245, 251, 255, 0.44)},
+    "dark": {"panel": (26, 29, 34, 0.7), "tile_off": (18, 26, 37, 0.54),
+             "tile_on": (232, 242, 250, 0.68)},
+}
+LIQUID_RIMS = {"edge": (255, 255, 255, 0.2), "edge_top": (255, 255, 255, 0.48),
+               "edge_on": (255, 255, 255, 0.35), "edge_on_top": (255, 255, 255, 0.7),
+               "card_edge": (255, 255, 255, 0.24), "card_edge_top": (255, 255, 255, 0.42)}
+LIQUID_DARK_DIM = {"panel": (26, 29, 34, 0.52), "tile_on": (53, 63, 76, 0.52),
+                   "on_text1": (255, 255, 255, 0.9), "on_text2": (226, 235, 242, 0.72),
+                   "tile_off": (18, 26, 37, 0.4)}
+RADII = {"classic": 70, "liquid": 62}
+
+
+def tokens(theme, dim=False, style="classic"):
     t = dict(THEMES[theme])
+    t["card_edge"], t["card_edge_top"], t["edge_on_top"] = t["edge"], t["edge_top"], None
+    t["style"] = style
+    t["radius_tile"] = RADII.get(style, 70)
+    t["radius_panel"] = t["radius_tile"] + PAD
+    if style == "liquid":
+        t.update(LIQUID[theme])
+        t.update(LIQUID_RIMS)
     if dim:
-        t.update(DIM)
+        # The rims of the liquid tiles are literals: the dimmed tokens do not reach them.
+        t.update({k: v for k, v in DIM.items() if not (style == "liquid" and k.startswith("edge"))})
+        if style == "liquid" and theme == "dark":
+            t.update(LIQUID_DARK_DIM)
     return t
 
 
@@ -580,12 +607,14 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
 def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False):
     domain = tile["domain"]
     on = st is not None and domain not in MOMENTARY and is_on(domain, st)
-    shape = squircle(x, y, w, h, RADIUS_TILE)
+    shape = squircle(x, y, w, h, tcol["radius_tile"])
     p.setPen(Qt.NoPen)
     p.setBrush(rgba(tcol["tile_on"] if on else tcol["tile_off"]))
     p.drawPath(shape)
     if on:
         inner_shadow(p, shape, rgba(tcol["edge_on"]))
+        if tcol["edge_on_top"]:
+            inner_shadow(p, shape, rgba(tcol["edge_on_top"]), dy=1, spread=0)
     else:
         inner_shadow(p, shape, rgba(tcol["edge"]))
         inner_shadow(p, shape, rgba(tcol["edge_top"]), dy=1, spread=0)
@@ -602,16 +631,43 @@ def widget_size(size):
     return (cols * CELL_W + (cols - 1) * GAP + 2 * PAD, rows * CELL_H + (rows - 1) * GAP + 2 * PAD)
 
 
-def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False):
+def _fade_gradient(h, stops):
+    g = QLinearGradient(0, 0, 0, h)
+    for at, c in stops:
+        g.setColorAt(at, QColor(*c))
+    return g
+
+
+def draw_liquid_rim(p, W, H, radius, dark):
+    """The light that runs along the rim of the liquid card (its ::before and
+    ::after) and the wash over the pane."""
+    clear = (255, 255, 255, 0)
+    ring = squircle(0, 0, W, H, radius).subtracted(squircle(2, 2, W - 4, H - 4, radius - 2))
+    p.save()
+    p.setOpacity(0.72 if dark else 1.0)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(_fade_gradient(H, [
+        (0, (255, 255, 255, 209)), (0.10, (235, 249, 255, 102)), (0.28, (235, 249, 255, 0)),
+        (0.72, (166, 222, 255, 0)), (0.90, (166, 222, 255, 71)), (1, (222, 247, 255, 158))])))
+    p.drawPath(ring)
+    p.setOpacity(0.75 if dark else 1.0)
+    p.setBrush(QBrush(_fade_gradient(H, [
+        (0, (255, 255, 255, 36)), (0.12, (245, 252, 255, 17)), (0.28, (245, 252, 255, 0)),
+        (0.72, (188, 231, 255, 0)), (0.88, (188, 231, 255, 13)), (1, (166, 222, 255, 28))])))
+    p.drawPath(squircle(0, 0, W, H, radius))
+    p.restore()
+
+
+def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic"):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
     the desktop behind it (a QImage), stretched over the card."""
-    tcol = tokens(theme, dim)
+    tcol = tokens(theme, dim, style)
     W, H = widget_size(size)
     form, rects = tile_layout(size, len(tiles))
     p.save()
     p.scale(scale, scale)
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
-    card = squircle(0, 0, W, H, RADIUS_PANEL)
+    card = squircle(0, 0, W, H, tcol["radius_panel"])
     if backdrop is not None:
         p.save()
         p.setClipPath(card)
@@ -620,8 +676,10 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
     p.setPen(Qt.NoPen)
     p.setBrush(rgba(tcol["panel"]))
     p.drawPath(card)
-    inner_shadow(p, card, rgba(tcol["edge"]))
-    inner_shadow(p, card, rgba(tcol["edge_top"]), dy=1, spread=0)
+    inner_shadow(p, card, rgba(tcol["card_edge"]))
+    inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
+    if style == "liquid":
+        draw_liquid_rim(p, W, H, tcol["radius_panel"], theme == "dark")
     for tile, (x, y, w, h) in zip(tiles, rects):
         draw_tile(p, tile, states.get(tile["entity"]), x, y, w, h, theme, tcol, form, dim)
     p.restore()

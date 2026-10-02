@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QApplication, QWidget                       # noqa
 
 import config as cfgmod                                                   # noqa: E402
 import idle                                                               # noqa: E402
+import liquid                                                             # noqa: E402
 import render                                                             # noqa: E402
 from ha_client import HAClient                                            # noqa: E402
 
@@ -39,6 +40,7 @@ class Bridge(QObject):
     states = Signal(object)            # {entity: state}
     backdrop = Signal(object)          # QImage, the small blurred picture
     dim = Signal(bool)                 # the desktop is out of sight (or back)
+    frame = Signal(object)             # QImage, the finished liquid glass
 
 
 class NativeWidget(QWidget):
@@ -71,6 +73,10 @@ class NativeWidget(QWidget):
         if theme == "auto":
             theme = "dark" if QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
         self.theme = theme
+        # Windows glass is not drawn here yet: it shows as the classic one.
+        self.style = "liquid" if os.environ.get("NATIVE_STYLE", cfg.get("glass_style")) == "liquid" else "classic"
+        self.tcol = render.tokens(theme, False, self.style)
+        self.frame_img = None          # liquid: the whole glass, made off the GUI thread
         self.backdrop_img = None
         self.overlay = None            # the card tint and the tiles, drawn once per change
         self.overlay_dim = None        # the same in its dimmed colours, made when first needed
@@ -85,16 +91,20 @@ class NativeWidget(QWidget):
         self.mask = None               # the card's shape, to cut the backdrop to
         self.frame = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
         self._press = None
+        self.dragging = False
+        self.sample_now = threading.Event()        # tells a 'still' glass to look again
+        self.sampling = os.environ.get("NATIVE_SAMPLING", cfg.get("glass_sampling", "live"))
         bridge.states.connect(self.on_states)
         bridge.backdrop.connect(self.on_backdrop)
         bridge.dim.connect(self.set_dim)
+        bridge.frame.connect(self.on_frame)
 
     # -- what is drawn ----------------------------------------------------
     def build_overlay(self, dim=False):
         img = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
-        render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None, self.scale, dim)
+        render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None, self.scale, dim, self.style)
         p.end()
         pix = QPixmap.fromImage(img)
         if self.mask is None:
@@ -106,7 +116,7 @@ class NativeWidget(QWidget):
             cw, ch = render.widget_size(self.size_key)
             q.setPen(Qt.NoPen)
             q.setBrush(QColor(0, 0, 0))
-            q.drawPath(render.squircle(0, 0, cw, ch, render.RADIUS_PANEL))
+            q.drawPath(render.squircle(0, 0, cw, ch, self.tcol["radius_panel"]))
             q.end()
             self.mask = m
         return pix
@@ -146,7 +156,10 @@ class NativeWidget(QWidget):
         if self.dim_t > 0 and self.overlay_dim is None:
             self.overlay_dim = self.build_overlay(True)
         p = QPainter(self)
-        if self.backdrop_img is not None:
+        if self.style == "liquid":
+            if self.frame_img is not None:
+                p.drawImage(0, 0, self.frame_img)
+        elif self.backdrop_img is not None:
             f = QPainter(self.frame)
             f.setCompositionMode(QPainter.CompositionMode_Source)
             f.fillRect(self.frame.rect(), Qt.transparent)
@@ -177,7 +190,12 @@ class NativeWidget(QWidget):
 
     def on_states(self, changed):
         self.states.update(changed)
+        self.sample_now.set()
         self.overlay = self.overlay_dim = None
+        self.update()
+
+    def on_frame(self, image):
+        self.frame_img = image
         self.update()
 
     def on_backdrop(self, image):
@@ -216,10 +234,14 @@ class NativeWidget(QWidget):
             start, origin, hit, moved = self._press
             d = e.globalPosition().toPoint() - start
             if moved or abs(d.x()) + abs(d.y()) > 6:
+                self.dragging = True
                 self._press = (start, origin, hit, True)
                 self.move(origin + QPoint(d.x(), d.y()))
 
     def mouseReleaseEvent(self, e):
+        if self.dragging:
+            self.dragging = False
+            self.sample_now.set()                  # a still glass takes the picture where it was dropped
         if e.button() == Qt.RightButton and self.preview:
             QApplication.quit()
             return
@@ -278,8 +300,30 @@ def backdrop_loop(win, bridge, stop):
     import dxgi_capture
     from PIL import Image, ImageChops, ImageFilter
     dup = dxgi_capture.DesktopDuplication()
+    lens = None
+    if win.style == "liquid":
+        lens = liquid.Lens(win.px_w, win.px_h, win.tcol["radius_panel"] * win.scale, 4)
+        card = lens.card_mask()
+        s = win.scale
+        tiles = [(round(x * s), round(y * s), round(w * s), round(h * s), round(win.tcol["radius_tile"] * s))
+                 for x, y, w, h in win.rects]
     after, last, sent = None, 0.0, None
+    taken, covered_at, covered = False, 0.0, False
     while not stop.is_set():
+        hwnd = int(win.winId())
+        # Nothing to refresh while other windows hide the whole widget.
+        if time.monotonic() - covered_at > 0.4:
+            covered_at, covered = time.monotonic(), (not win.preview and idle.nothing_visible_of(hwnd))
+        if covered:
+            time.sleep(0.5)
+            continue
+        # A 'still' glass takes the desktop once and again only when told (dropped, changed);
+        # while the widget is dragged it follows the screen.
+        if win.sampling == "still" and taken and not win.dragging:
+            if not win.sample_now.wait(1.0):
+                continue
+            after = None
+        win.sample_now.clear()
         x, y, w, h = win.x(), win.y(), win.px_w, win.px_h
         got = dup.grab(x, y, w, h, after, 0.25) if dup.available() else None
         if not got:
@@ -288,6 +332,7 @@ def backdrop_loop(win, bridge, stop):
         after = got[0]
         if got[1] is None:
             continue
+        taken = True
         wait = 1 / 30 - (time.monotonic() - last)
         if wait > 0:
             time.sleep(wait)
@@ -300,6 +345,11 @@ def backdrop_loop(win, bridge, stop):
             continue
         sent = small
         small = small.filter(ImageFilter.GaussianBlur(2))
+        if lens:
+            out = lens.frame(small, card, tiles, 12 * win.scale)
+            bridge.frame.emit(QImage(out.tobytes(), out.width, out.height, out.width * 4,
+                                     QImage.Format_RGBA8888).copy())
+            continue
         img = QImage(small.tobytes(), small.width, small.height, small.width * 3, QImage.Format_RGB888).copy()
         bridge.backdrop.emit(img)
 
