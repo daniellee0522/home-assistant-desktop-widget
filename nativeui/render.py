@@ -819,6 +819,26 @@ def squircle_pill(rect):
     return path
 
 
+def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False):
+    """The card's tint and rims over its glass. `plain`: the quiet pane of the detail card, which
+    has none of the liquid style's light along its rim."""
+    radius = radius or tcol["radius_panel"]
+    card = squircle(0, 0, W, H, radius)
+    p.setPen(Qt.NoPen)
+    if plain and style == "liquid":
+        p.setBrush(QColor(26, 29, 34, round(255 * 0.72)) if theme == "dark" else QColor(226, 239, 248, round(255 * 0.38)))
+        p.drawPath(card)
+        inner_shadow(p, card, QColor(255, 255, 255, round(255 * 0.35)))
+        return
+    p.setBrush(rgba(tcol["panel"]))
+    p.drawPath(card)
+    inner_shadow(p, card, rgba(tcol["card_edge"]))
+    if tcol["card_edge_top"]:
+        inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
+    if style == "liquid" and not plain:
+        draw_liquid_rim(p, W, H, radius, theme == "dark")
+
+
 def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic",
                 ui=None, raw_theme=None):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
@@ -837,14 +857,7 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
         p.setClipPath(card)
         p.drawImage(QRectF(0, 0, W, H), backdrop)
         p.restore()
-    p.setPen(Qt.NoPen)
-    p.setBrush(rgba(tcol["panel"]))
-    p.drawPath(card)
-    inner_shadow(p, card, rgba(tcol["card_edge"]))
-    if tcol["card_edge_top"]:
-        inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
-    if style == "liquid":
-        draw_liquid_rim(p, W, H, tcol["radius_panel"], theme == "dark")
+    draw_card_bg(p, W, H, tcol, style, theme)
     button = None
     if not tiles:
         button = draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim)
