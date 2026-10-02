@@ -24,7 +24,8 @@ from PySide6.QtWidgets import QWidget
 
 import qtshell
 
-from . import liquid, render
+from . import render
+from .glass import GlassMixin
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.GetDpiForWindow.argtypes = [ctypes.c_void_p]
@@ -33,7 +34,6 @@ _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)
 _user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                                  ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 
-PROFILE = bool(os.environ.get("HA_WIDGET_PROFILE"))
 HOLD_MS = 420                 # how long a press is held to open the detail card
 HOLD_SLOP_PX = 8              # moving further than this cancels the hold
 DRAG_PX = 5                   # moving further than this drags the widget
@@ -43,7 +43,6 @@ EASE_DIM_MS, EASE_WAKE_MS = 700, 260
 
 
 class _Signals(QObject):
-    glass = Signal()                      # a new picture of the desktop is ready
     states = Signal()                     # tiles changed: draw them again
 
 
@@ -60,7 +59,7 @@ def _rect(hwnd):
     return None
 
 
-class _Surface(QWidget):
+class _Surface(GlassMixin, QWidget):
     """The Qt window of one widget."""
 
     def __init__(self, facade, api, widget_id):
@@ -95,11 +94,8 @@ class _Surface(QWidget):
         self.tcol = render.tokens("light")
         # What is drawn.
         self.overlay = self.overlay_dim = None
-        self.glass = None
-        self.mask = None
         self.mix = None
-        self.latest = None
-        self.glass_queued = threading.Event()
+        self.init_glass()
         self.dim_t, self.dim_from, self.dim_target = 0.0, 0.0, False
         self.dim_clock = QElapsedTimer()
         self.dim_timer = QTimer(self)
@@ -118,14 +114,7 @@ class _Surface(QWidget):
         self._hold.setSingleShot(True)
         self._hold.timeout.connect(self._held)
         self.empty_button = None
-        # Pictures of the desktop.
-        self.sample_now = threading.Event()
-        self.force = threading.Event()            # the next picture must not be taken for the last one
-        self.dragging = False
-        self._stop = threading.Event()
-        self._thread = None
         self.signals = _Signals()
-        self.signals.glass.connect(self._on_glass)
         self.signals.states.connect(self._redraw_tiles, Qt.QueuedConnection)
         self._redraw_pending = False
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_: self._theme_changed())
@@ -216,7 +205,7 @@ class _Surface(QWidget):
         elif changed & {"theme_raw", "style", "language", "system_glass"}:
             self.rebuild(all_=True)
         if changed & {"style", "liquid_level", "size_key", "zoom", "system_glass"}:
-            self.glass = None
+            self.reset_glass()
             self.facade.invalidate_backdrop()
         if "sampling" in changed:
             self.sample_now.set()
@@ -234,8 +223,7 @@ class _Surface(QWidget):
         self.scroll = max(0.0, min(self.scroll, self.scroll_max))
         if hwnd:
             _user32.SetWindowPos(hwnd, None, 0, 0, self.pw, self.ph, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
-        self.mask = None
-        self.glass = None
+        self.reset_glass()
         self.rebuild(all_=True)
         self.facade.invalidate_backdrop()
 
@@ -262,18 +250,15 @@ class _Surface(QWidget):
         pix.setDevicePixelRatio(self.dpi)
         return pix
 
-    def _card_mask(self):
-        m = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
-        m.fill(Qt.transparent)
-        q = QPainter(m)
-        q.setRenderHint(QPainter.Antialiasing)
-        q.scale(self.scale, self.scale)
+    # -- the glass (nativeui/glass.py) asks what the card is -------------------------
+    def glass_card(self):
         cw, ch = render.widget_size(self.size_key)
-        q.setPen(Qt.NoPen)
-        q.setBrush(QColor(0, 0, 0))
-        q.drawPath(render.squircle(0, 0, cw, ch, self.tcol["radius_panel"]))
-        q.end()
-        return m
+        return cw, ch, self.tcol["radius_panel"]
+
+    def glass_tiles(self):
+        s, off, H = self.scale, self.scroll, render.widget_size(self.size_key)[1]
+        return [(round(x * s), round((y - off) * s), round(w * s), round(h * s), round(self.tcol["radius_tile"] * s))
+                for x, y, w, h in self.rects if 0 <= y - off and y - off + h <= H]
 
     def paintEvent(self, event):
         if self.overlay is None:
@@ -304,122 +289,6 @@ class _Surface(QWidget):
             m.end()
             p.drawImage(0, 0, self.mix)
         p.end()
-
-    # ---- the glass -------------------------------------------------------------
-    def start_glass(self):
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._glass_loop, daemon=True, name="glass-" + self.widget_id)
-            self._thread.start()
-
-    def _on_glass(self):
-        self.glass_queued.clear()
-        img = self.latest
-        if img is None:
-            return
-        if self.style == "liquid":
-            self.glass = img
-        else:
-            # The small blurred picture stretched over the card, cut to its shape.
-            if self.mask is None:
-                self.mask = self._card_mask()
-            out = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
-            out.fill(Qt.transparent)
-            f = QPainter(out)
-            f.setRenderHint(QPainter.SmoothPixmapTransform)
-            f.drawImage(QRectF(0, 0, self.pw, self.ph), img)
-            f.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-            f.drawImage(0, 0, self.mask)
-            f.end()
-            out.setDevicePixelRatio(self.dpi)
-            self.glass = out
-        self.update()
-
-    def _glass_loop(self):
-        from PIL import Image
-        api, kind = self.api, self.kind
-        last_hash, quiet, taken = None, 0, False
-        lens = card = tiles = key = None
-        last = 0.0
-        prof = {"n": 0, "get": 0.0, "lens": 0.0, "t0": time.monotonic(), "calls": 0}
-        while not self._stop.is_set():
-            try:
-                if self.force.is_set():
-                    self.force.clear()
-                    last_hash, taken = None, False
-                still = self.sampling == "still" and not self.dragging
-                if still and taken and not self.sample_now.is_set():
-                    self.sample_now.wait(0.5)
-                    continue
-                self.sample_now.clear()
-                # Paced before the look, not after it: the picture is as fresh as can be.
-                # At most 30 looks a second, as the page's glass was: an animated wallpaper behind the
-                # widget otherwise keeps the program busy for pictures nobody can tell apart.
-                wait = 1 / 30 - (time.monotonic() - last)
-                if wait > 0:
-                    time.sleep(wait)
-                last = time.monotonic()
-                pw, ph = self.pw, self.ph
-                t_get = time.perf_counter()
-                shot = api.get_desktop_backdrop(kind, last_hash, pw, ph, None, None,
-                                                0 if still else None, binary=True)
-                prof["get"] += time.perf_counter() - t_get
-                prof["calls"] += 1
-                if shot and isinstance(shot.get("system_glass"), bool) and shot["system_glass"] != self.system_glass:
-                    pass        # the preferences push says so too (Api._apply_system_glass)
-                if not shot:
-                    last_hash = None
-                    time.sleep(0.25)
-                    continue
-                if shot.get("skip"):
-                    taken = False
-                    time.sleep((shot.get("retry_ms") or 500) / 1000.0)
-                    continue
-                if not shot.get("paced"):
-                    time.sleep(max(0.016, (shot.get("ms") or 0) * 4 / 1000.0) if quiet < 4 else 3.0)
-                if shot.get("unchanged"):
-                    quiet += 1
-                    taken = True
-                    continue
-                quiet = 0
-                raw = shot.get("blur_raw")
-                if not raw:
-                    continue
-                if abs(shot["w"] - pw) > 3 or abs(shot["h"] - ph) > 3:
-                    last_hash = None
-                    continue
-                picture = Image.frombytes("RGB", (shot["blur_w"], shot["blur_h"]), raw)
-                last_hash = shot.get("hash")
-                taken = True
-                if self.style == "liquid":
-                    t = max(0, min(100, int(self.liquid_level))) / 100.0
-                    want = (pw, ph, self.tcol["radius_panel"], self.scale)
-                    if key != want:
-                        lens = liquid.Lens(pw, ph, self.tcol["radius_panel"] * self.scale)
-                        card = lens.card_mask()
-                        key = want
-                    s, off, H = self.scale, self.scroll, render.widget_size(self.size_key)[1]
-                    tiles = [(round(x * s), round((y - off) * s), round(w * s), round(h * s),
-                              round(self.tcol["radius_tile"] * s)) for x, y, w, h in self.rects
-                             if 0 <= y - off and y - off + h <= H]
-                    t_lens = time.perf_counter()
-                    out = lens.frame(picture, card, tiles, (8 + 4 * t) * self.scale)
-                    prof["lens"] += time.perf_counter() - t_lens
-                    self.latest = QImage(out.tobytes(), out.width, out.height, out.width * 4,
-                                         QImage.Format_RGBA8888).copy()
-                    self.latest.setDevicePixelRatio(self.dpi)
-                else:
-                    self.latest = QImage(picture.tobytes(), picture.width, picture.height,
-                                         picture.width * 3, QImage.Format_RGB888).copy()
-                prof["n"] += 1
-                if PROFILE and time.monotonic() - prof["t0"] > 5:
-                    print("glass: %d frames, %d looks in 5 s; look %.0f ms total, lens %.0f ms total" % (prof["n"], prof["calls"], prof["get"] * 1000, prof["lens"] * 1000), flush=True)
-                    prof.update(n=0, get=0.0, lens=0.0, calls=0, t0=time.monotonic())
-                if not self.glass_queued.is_set():           # only the newest is ever painted
-                    self.glass_queued.set()
-                    self.signals.glass.emit()
-            except Exception:
-                traceback.print_exc()
-                time.sleep(0.5)
 
     # ---- the states -----------------------------------------------------------
     def push_states(self, items):
@@ -643,9 +512,6 @@ class _Surface(QWidget):
             self.flash_timer.stop()
         self._invalidate_overlay()
 
-    def stop(self):
-        self._stop.set()
-        self.sample_now.set()
 
 
 def has_hold(domain):
