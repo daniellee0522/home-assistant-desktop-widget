@@ -521,10 +521,10 @@ def form_for(cols, rows, count):
     return "small"
 
 
-def tile_layout(size, count):
-    """(form, [(x, y, w, h) per tile that fits]) of a widget, in CSS pixels."""
+def tile_layout(size, count, form=None):
+    """(form, [(x, y, w, h) per tile that fits]) of a widget, in CSS pixels. `form` fixes the form."""
     cols, rows = SIZES.get(size, SIZES["2x4"])
-    form = form_for(cols, rows, count)
+    form = form or form_for(cols, rows, count)
     sc, sr = FORM_SPAN[form]
     per_row = cols // sc
     w, h = sc * CELL_W + (sc - 1) * GAP, sr * CELL_H + (sr - 1) * GAP
@@ -843,14 +843,14 @@ def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False):
 
 
 def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic",
-                ui=None, raw_theme=None):
+                ui=None, raw_theme=None, form=None):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
     the desktop behind it (a QImage), stretched over the card. `ui`: what the pointer is
     doing - {"hover": i, "pressed": i, "flash": {i: 1..0}, "scroll": px}."""
     ui = ui or {}
     tcol = tokens(theme, dim, style)
     W, H = widget_size(size)
-    form, rects = tile_layout(size, len(tiles))
+    form, rects = tile_layout(size, len(tiles), form)
     p.save()
     p.scale(scale, scale)
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)

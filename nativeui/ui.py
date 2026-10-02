@@ -131,7 +131,7 @@ class View:
         self.clip = False
         self.radius = None              # a squircle clip when set (with clip)
         self.on_press = self.on_release = self.on_move = self.on_click = None
-        self.on_enter = self.on_leave = self.on_wheel = None
+        self.on_enter = self.on_leave = self.on_wheel = self.on_dblclick = None
         self.interactive = False        # takes the pointer (otherwise the pointer goes through)
         self.hovered = self.pressed = False
         self.no_hit = False             # the pointer goes through it (a layer that is out of sight)
@@ -158,7 +158,10 @@ class View:
             if v in self.children:
                 self.children.remove(v)
                 v.parent = None
+                scene = v.scene
                 v._adopt(None)
+                if scene is not None:
+                    scene.fields[:] = [f for f in scene.fields if f.edit is not None]
         self.changed()
 
     def clear(self):
@@ -566,6 +569,7 @@ class TextField(View):
             scene.fields.append(self)
             self.restyle()
         elif scene is None and self.edit is not None:
+            self.edit.hide()
             self.edit.deleteLater()
             self.edit = None
 
@@ -1163,6 +1167,13 @@ class Scene(GlassMixin, QWidget):
 
     def hovered_over(self, target, gx, gy, e):
         """The pointer moved with no button down."""
+        v = target
+        while v is not None:
+            if getattr(v, "hovered_move", None):
+                lx, ly = v.to_local(gx, gy)
+                v.hovered_move(lx, ly)
+                break
+            v = v.parent
 
     def leaveEvent(self, e):
         for v in self._chain(self.hover_view):
@@ -1190,6 +1201,11 @@ class Scene(GlassMixin, QWidget):
 
     def released(self, gx, gy, e):
         """A button was let go (after the views had it)."""
+
+    def mouseDoubleClickEvent(self, e):
+        gx, gy = self._css(e)
+        target = self.view_at(gx, gy)
+        self._bubble(target, "on_dblclick", lambda v, fn: fn(self._ev(v, gx, gy, e)))
 
     def wheelEvent(self, e):
         gx, gy = self._css(e)

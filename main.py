@@ -67,6 +67,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
 import qtshell as webview  # noqa: E402
 from nativeui import detail as native_detail  # noqa: E402
 from nativeui import panel as native_panel  # noqa: E402
+from nativeui import settings as native_settings  # noqa: E402
 from nativeui import widget as native_widget  # noqa: E402
 
 import config as cfgmod  # noqa: E402
@@ -1259,8 +1260,11 @@ class Api:
             # Its page numbers its resizes from 1 again.
             self._settings_last_resize_seq = -1
             # Focusable (it has text fields) and ignores the widget's zoom.
-            window = _create_overlay_window(
-                self, "HA Widgets Settings", "settings", 420, 640, rehide=False)
+            if os.environ.get("HA_WIDGET_WEB"):
+                window = _create_overlay_window(
+                    self, "HA Widgets Settings", "settings", 420, 640, rehide=False)
+            else:
+                window = native_settings.create_settings(self)
             window.events.shown += self._apply_capture_exclusion
             self._bind_settings_window(window)
             return window
