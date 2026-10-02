@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
     #   "live"  - whenever the picture there changes (video wallpapers move it)
     #   "still" - now and then, and when the widget moves or changes
     "glass_sampling": "live",
+    # How blurred the liquid glass is, 0 (the clearest) to 100 (close to the classic frost).
+    "liquid_blur": 0,
     # The tray panel's own theme; "follow" uses the widget's.
     "panel_theme": "follow",
     # Dim the widget once the desktop has been covered for dim_after_sec

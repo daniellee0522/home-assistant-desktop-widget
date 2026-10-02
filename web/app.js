@@ -104,7 +104,7 @@ function iconNameFor(tile, state) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', glass_sampling: 'live', tiles: [],
+  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', glass_sampling: 'live', liquid_blur: 0, tiles: [],
   widgets: [], panel: { mode: 'grid', tiles: null },
   dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
@@ -3505,6 +3505,7 @@ function openSettingsView() {
   document.getElementById('language-select').value = CONFIG.language || 'zh-TW';
   document.getElementById('glass-style-select').value = CONFIG.glass_style || 'classic';
   setZoomSlider(CONFIG.zoom || 100);
+  setLiquidBlurSlider(CONFIG.liquid_blur || 0);
   document.getElementById('dim-idle-check').checked = CONFIG.dim_when_idle !== false;
   setDimAfterSlider(CONFIG.dim_after_sec || 120);
   document.getElementById('dim-after-block').hidden = CONFIG.dim_when_idle === false;
@@ -3534,6 +3535,13 @@ function setDimAfterSlider(sec) {
   const v = Math.max(10, Math.min(600, Number(sec) || 120));
   document.getElementById('dim-after-range').value = String(v);
   document.getElementById('dim-after-value').textContent = dimAfterText(v);
+}
+
+function setLiquidBlurSlider(level) {
+  const v = Math.max(0, Math.min(100, Number(level) || 0));
+  document.getElementById('liquid-blur-range').value = String(v);
+  document.getElementById('liquid-blur-value').textContent = v + '%';
+  document.getElementById('liquid-blur-block').hidden = (CONFIG.glass_style || 'classic') !== 'liquid';
 }
 
 function setZoomSlider(pct) {
@@ -4178,6 +4186,7 @@ function init() {
   });
   document.getElementById('glass-style-select').addEventListener('change', async (e) => {
     await savePref({ glass_style: e.target.value });
+    setLiquidBlurSlider(CONFIG.liquid_blur || 0);
     applyTheme();
     invalidateBackdrop();
     refreshBackdropSoon(0);
@@ -4236,6 +4245,17 @@ function init() {
   dimRange.addEventListener('change', async (e) => {
     await savePref({ dim_after_sec: Number(e.target.value) });
     setDimAfterSlider(CONFIG.dim_after_sec);
+  });
+
+  const blurRange = document.getElementById('liquid-blur-range');
+  blurRange.addEventListener('input', (e) => {
+    document.getElementById('liquid-blur-value').textContent = e.target.value + '%';
+  });
+  blurRange.addEventListener('change', async (e) => {
+    await savePref({ liquid_blur: Number(e.target.value) });
+    setLiquidBlurSlider(CONFIG.liquid_blur);
+    invalidateBackdrop();
+    refreshBackdropSoon(0);
   });
 
   const zoomRange = document.getElementById('zoom-range');

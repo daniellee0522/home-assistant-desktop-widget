@@ -17,6 +17,8 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient
                            QPainter, QPainterPath, QPen, QPolygonF, QTransform)
 from PySide6.QtSvg import QSvgRenderer
 
+from . import i18n
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Frozen, the web files live under PyInstaller's _MEIPASS.
 WEB = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(HERE)), "web")
@@ -112,6 +114,18 @@ def parse_color(c):
         r, g, b = (int(v) for v in c[4:-1].split(",")[:3])
         return QColor(r, g, b)
     return QColor(c)
+
+
+_language = "zh-TW"
+
+
+def set_language(language):
+    global _language
+    _language = language
+
+
+def tr(text):
+    return i18n.translate(text, _language)
 
 
 def rgba(c, alpha=None):
@@ -535,11 +549,11 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     reading = shown if roomy else None
     badge = None if roomy else shown
     readonly = is_readonly(domain)
-    value = value_text(domain, st) if ok and not badge and not reading else ""
+    value = tr(value_text(domain, st)) if ok and not badge and not reading else ""
     readout = readonly and bool(value)
     c1 = tcol["on_text1"] if on else tcol["off_text1"]
     c2 = tcol["on_text2"] if on else tcol["off_text2"]
-    label = ((tile.get("label") or default_label(domain, st)) if ok else "無法連線")
+    label = tr((tile.get("label") or default_label(domain, st)) if ok else "無法連線")
     name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
     icolor = icon_color(tile, st, on, theme, tcol) if ok else tcol["off_text1"]
     if dim:
@@ -718,9 +732,9 @@ def draw_empty(p, W, H, small, theme, raw_theme, dim):
     if dim:
         title_c, sub_c = tcol["off_text1"], tcol["off_text2"]
     items = [("\u2302", font(60 if small else 80, QFont.Normal), ACCENT["blue"], 60 if small else 80),
-             ("尚未設定任何配件", font(26 if small else 40, QFont.Bold), title_c, (26 if small else 40) * 1.2)]
+             (tr("尚未設定任何配件"), font(26 if small else 40, QFont.Bold), title_c, (26 if small else 40) * 1.2)]
     if not small:
-        items += [("按這裡開始設定 Home Assistant", font(26, QFont.Normal), sub_c, 26 * 1.25)]
+        items += [(tr("按這裡開始設定 Home Assistant"), font(26, QFont.Normal), sub_c, 26 * 1.25)]
     btn_h = 26 * 1.33 + 28
     total = sum(h for *_, h in items) + 8 * (len(items) - 1) + (0 if small else 8 + 8 + btn_h)
     y = (H - total) / 2
@@ -730,12 +744,12 @@ def draw_empty(p, W, H, small, theme, raw_theme, dim):
     if small:
         return None
     f = font(26, QFont.DemiBold)
-    tw = QFontMetricsF(f).horizontalAdvance("開啟設定") / 10 * HSCALE
+    tw = QFontMetricsF(f).horizontalAdvance(tr("開啟設定")) / 10 * HSCALE
     rect = QRectF((W - tw - 72) / 2, y + 8, tw + 72, btn_h)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(ACCENT["blue"]))
     p.drawPath(squircle_pill(rect))
-    draw_centred(p, "開啟設定", f, "#ffffff", rect)
+    draw_centred(p, tr("開啟設定"), f, "#ffffff", rect)
     return rect
 
 
@@ -771,8 +785,9 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
         inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
     if style == "liquid":
         draw_liquid_rim(p, W, H, tcol["radius_panel"], theme == "dark")
+    button = None
     if not tiles:
-        draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim)
+        button = draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim)
     else:
         p.save()
         p.setClipRect(QRectF(PAD, PAD, W - 2 * PAD, H - 2 * PAD))
@@ -792,3 +807,4 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
             p.restore()
         p.restore()
     p.restore()
+    return button

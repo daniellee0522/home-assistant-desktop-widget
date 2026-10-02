@@ -12,6 +12,7 @@ const EN_TEXT = {
   '長效存取權杖 (Long-Lived Access Token)':'Long-lived access token', '貼上你的 token':'Paste your token',
   '測試連線':'Test connection', '外觀':'Appearance', '語言':'Language', '繁體中文':'Traditional Chinese',
   '主題':'Theme', '跟隨系統':'Follow system', '淺色':'Light', '深色':'Dark',
+  '液態玻璃模糊度':'Liquid glass blur', '0 最透明，折射最清楚；越往右越模糊，最右接近經典毛玻璃。':'0 is the clearest, with the sharpest refraction; further right is blurrier, and the far end is close to classic frost.',
   '玻璃外觀':'Glass appearance', '經典毛玻璃':'Classic frost', '液態玻璃':'Liquid glass',
   'Windows 玻璃':'Windows glass', '每列數量':'Columns', '工作列面板':'Tray panel', '同上':'Same as widget',
   '毛玻璃更新':'Glass updates', '動態 (桌布變動時即時更新)':'Live (follows every wallpaper change)', '靜態 (只在移動 widget 時更新，最省資源)':'Still (updates only when the widget moves, lightest)',
