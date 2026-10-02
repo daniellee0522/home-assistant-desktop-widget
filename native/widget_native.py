@@ -50,12 +50,20 @@ class NativeWidget(QWidget):
         self.scale = max(0.5, min(2.0, cfg.get("zoom", 100) / 100.0)) * dpr
         cw, ch = render.widget_size(self.size_key)
         self.px_w, self.px_h = round(cw * self.scale), round(ch * self.scale)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnBottomHint
+        # NATIVE_PREVIEW=1: on top, in the middle of the screen, so it can be looked
+        # at without touching the real widgets; right-click quits.
+        self.preview = os.environ.get("NATIVE_PREVIEW") == "1"
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool
+                            | (Qt.WindowStaysOnTopHint if self.preview else Qt.WindowStaysOnBottomHint)
                             | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(self.px_w, self.px_h)
-        self.move(widget["x"], widget["y"])
+        if self.preview:
+            geo = screen.geometry()
+            self.move(geo.x() + (geo.width() - self.px_w) // 2, geo.y() + (geo.height() - self.px_h) // 2)
+        else:
+            self.move(widget["x"], widget["y"])
         theme = cfg.get("theme", "auto")
         if theme == "auto":
             theme = "dark" if QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
@@ -139,6 +147,9 @@ class NativeWidget(QWidget):
                 self.move(origin + QPoint(d.x(), d.y()))
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.RightButton and self.preview:
+            QApplication.quit()
+            return
         if self._press and not self._press[3] and self._press[2]:
             threading.Thread(target=quick_action, args=(self._press[2], self.states), daemon=True).start()
         self._press = None
