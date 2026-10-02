@@ -111,6 +111,7 @@ class _Surface(QWidget):
         self.flash_timer.timeout.connect(self._step_flash)
         self.hover = -1
         self.pressed = -1
+        self._wake_sent = 0.0
         # The pointer.
         self._press = None
         self._hold = QTimer(self)
@@ -119,6 +120,7 @@ class _Surface(QWidget):
         self.empty_button = None
         # Pictures of the desktop.
         self.sample_now = threading.Event()
+        self.force = threading.Event()            # the next picture must not be taken for the last one
         self.dragging = False
         self._stop = threading.Event()
         self._thread = None
@@ -341,6 +343,9 @@ class _Surface(QWidget):
         prof = {"n": 0, "get": 0.0, "lens": 0.0, "t0": time.monotonic(), "calls": 0}
         while not self._stop.is_set():
             try:
+                if self.force.is_set():
+                    self.force.clear()
+                    last_hash, taken = None, False
                 still = self.sampling == "still" and not self.dragging
                 if still and taken and not self.sample_now.is_set():
                     self.sample_now.wait(0.5)
@@ -464,7 +469,12 @@ class _Surface(QWidget):
         """The first touch of a dimmed widget only wakes it, every widget at once."""
         if not self.dim_target:
             return False
-        threading.Thread(target=self.api.wake, daemon=True).start()
+        now = time.monotonic()
+        if now - self._wake_sent > 0.6:            # once, not for every mouse move that follows
+            self._wake_sent = now
+            threading.Thread(target=self.api.wake, daemon=True).start()
+            # Should Python never answer, wake this one on its own.
+            QTimer.singleShot(600, lambda: self.set_dim(False) if self.dim_target else None)
         return True
 
     # ---- the pointer -----------------------------------------------------------
@@ -742,6 +752,7 @@ class NativeWidget:
         self.invalidate_backdrop()
 
     def invalidate_backdrop(self):
+        self._native.force.set()
         self._native.sample_now.set()
 
     # -- actions -------------------------------------------------------------------
@@ -820,6 +831,9 @@ class NativeWidget:
     # -- the first moments ------------------------------------------------------------
     def boot(self):
         """Once the window is up: the states, and the first run's settings."""
+        if self.api._dimmed:                  # made while the others are dimmed: starts dimmed too
+            self.run_on_ui_thread(lambda: self._native.set_dim(True))
+
         def go():
             try:
                 states = self.api.fetch_initial_states()

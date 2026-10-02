@@ -282,10 +282,49 @@ def icon_name(tile, st):
     return DEFAULT_ICON.get(domain, "sensor")
 
 
+def icon_kind(icon):
+    """What an icon stands for, so a tile is coloured by its icon and not only by the kind
+    of device it controls: a plug given a bulb is yellow when it is on (iconKind in app.js)."""
+    if not icon:
+        return ""
+    name = icon[4:] if icon.startswith("mdi:") else icon
+    if name == "light" or re.search(r"lightbulb|lamp|ceiling-light|light-switch", name):
+        return "light"
+    if name == "switch" or re.search(r"outlet|power-plug|toggle", name):
+        return "switch"
+    if name == "fan" or name.startswith("fan"):
+        return "fan"
+    if re.search(r"air-conditioner|snowflake|thermostat|radiator|heat", name):
+        return "climate"
+    if re.search(r"blinds|curtains|window-shutter|garage", name):
+        return "cover"
+    if name in ("media", "monitor") or re.search(r"speaker|television|music|cast|play", name):
+        return "media_player"
+    if name in ("lock", "door") or re.search(r"^lock|door|shield", name):
+        return "lock"
+    if re.search(r"robot-vacuum|vacuum", name):
+        return "vacuum"
+    if name == "script" or re.search(r"palette|robot$", name):
+        return "scene"
+    return ""
+
+
 def icon_color(tile, st, on, theme, tcol):
     domain = tile["domain"]
     attrs = (st or {}).get("attributes") or {}
     off = tcol["off_text1"]
+    kind = icon_kind(tile.get("icon"))
+    if kind and kind != domain:
+        # An icon chosen by hand for a device of another kind: coloured as that kind is when
+        # it is on, plain when it is off.
+        if not on:
+            return off
+        if kind == "light":
+            if isinstance(attrs.get("rgb_color"), list) and attrs.get("color_mode") in ("hs", "rgb", "rgbw", "rgbww", "xy"):
+                return "rgb(%d,%d,%d)" % tuple(attrs["rgb_color"][:3])
+            return ACCENT["yellow"] if theme == "dark" else LIGHT_THEME_BULB
+        return {"climate": ACCENT["cyan"], "media_player": ACCENT["green"], "lock": ACCENT["teal"]}.get(
+            kind, ACCENT["blue"])
     if domain == "light":
         if not on:
             return off

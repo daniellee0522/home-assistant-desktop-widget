@@ -7,12 +7,16 @@ tile grid, with realtime updates over Home Assistant's WebSocket API. It
 lives at the bottom of the z-order like a desktop gadget and never takes
 focus away from other applications.
 
-Four windows share one page (web/index.html) and one Api instance:
+The desktop widgets are drawn natively (nativeui/), with no browser page; the other
+windows share one page (web/index.html) and, with the widgets, one Api instance:
 
-  * main     - the widget on the desktop
+  * widgets  - the widgets on the desktop (nativeui.widget)
   * popover  - an accessory's detail card, opened by right-click or hold
   * settings - connection, appearance and tile management
   * flyout   - the tray panel, opened by clicking the tray icon
+
+The three pages are made when first wanted and released after a while unused, so the
+browser engine is only in memory while one of them is open.
 
 Settings are saved to ha_widgets_config.json beside this script, or under
 %APPDATA%\\HA Widgets for an installed build (see config.py). Closing the
@@ -31,6 +35,10 @@ import sys
 import threading
 import time
 import zlib
+
+# Pillow imports numpy when it finds it, only to name a type: about 10 MB of memory for nothing.
+sys.modules.setdefault("numpy", None)
+sys.modules.setdefault("numpy.typing", None)
 
 from capture_worker import CaptureWorker
 from dxgi_capture import DesktopDuplication

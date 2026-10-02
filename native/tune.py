@@ -3,14 +3,15 @@ import itertools, os, sys
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
 os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "native"))
+sys.path.insert(0, ROOT)
 import numpy as np
 from PIL import Image, ImageDraw
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
-import render, parity_data
+from nativeui import render
+import parity_data
 W, H = render.widget_size("2x4")
 SIZE = (W + 40, H + 40)
 img = Image.new("RGB", SIZE); d = ImageDraw.Draw(img)
