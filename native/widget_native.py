@@ -305,7 +305,7 @@ def backdrop_loop(win, bridge, stop):
     dup = dxgi_capture.DesktopDuplication()
     lens = None
     if win.style == "liquid":
-        lens = liquid.Lens(win.px_w, win.px_h, win.tcol["radius_panel"] * win.scale, 4)
+        lens = liquid.Lens(win.px_w, win.px_h, win.tcol["radius_panel"] * win.scale)
         card = lens.card_mask()
         s = win.scale
         tiles = [(round(x * s), round(y * s), round(w * s), round(h * s), round(win.tcol["radius_tile"] * s))

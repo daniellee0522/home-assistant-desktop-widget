@@ -106,7 +106,7 @@ def native_render(scene):
         tcol = render.tokens(theme, dim, style)
         form, rects = render.tile_layout(size, count)
         crop = liquid.picture(bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)))
-        lens = liquid.Lens(W, H, tcol["radius_panel"], 4)
+        lens = liquid.Lens(W, H, tcol["radius_panel"])
         frame = lens.frame(crop, lens.card_mask(), [(x, y, w, h, tcol["radius_tile"]) for x, y, w, h in rects], 8)
         qf = QImage(frame.tobytes(), W, H, W * 4, QImage.Format_RGBA8888)
         p.drawImage(0, 0, qf)

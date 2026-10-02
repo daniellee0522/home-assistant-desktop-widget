@@ -34,18 +34,15 @@ def picture(rgb):
     cannot represent (fine patterns beat against it into stripes)."""
     w, h = rgb.size
     half = rgb.reduce(2) if not (w % 2 or h % 2) else rgb.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX)
-    half = half.filter(ImageFilter.GaussianBlur(0.8))
-    third = half.resize((max(1, round(w / 3)), max(1, round(h / 3))), Image.HAMMING)
-    return third.filter(ImageFilter.GaussianBlur(0.3))
+    return half.filter(ImageFilter.GaussianBlur(0.6))
 
 
 class Lens:
-    def __init__(self, w, h, radius, cell=2):
+    def __init__(self, w, h, radius):
         self.w, self.h = w, h
         self.height = min(46.0, radius * 1.05)          # how far in the lens reaches
         self.amount = min(58.0, self.height * 1.45)     # how far it shifts the sample
         self.radius = min(radius, w / 2, h / 2)
-        self.cell = cell
         self._field_cache = {}
         self.mesh = self._build_mesh()
         self.alpha, self.line = self._build_masks()
@@ -93,19 +90,27 @@ class Lens:
         return out
 
     def _build_mesh(self):
-        """[(target box, source quad)] for every cell that touches the ring."""
-        c, w, h = self.cell, self.w, self.h
+        """[(target box, source quad)] covering the ring. The sampling changes fastest at the
+        card's edge, so the quads are 2 px there and grow towards the inside: a mesh of
+        equal quads is either coarse at the edge (jagged) or slow (Pillow's cost is per quad)."""
+        B, w, h = 8, self.w, self.h
         mesh = []
-        for y0 in range(0, h, c):
-            y1 = min(h, y0 + c)
-            for x0 in range(0, w, c):
-                x1 = min(w, x0 + c)
-                sd = self._sd((x0 + x1) / 2, (y0 + y1) / 2)[0]
-                if sd > c or -sd >= self.height + c:
-                    continue
-                mesh.append(((x0, y0, x1, y1), (
-                    *self._sample_point(x0, y0), *self._sample_point(x0, y1),
-                    *self._sample_point(x1, y1), *self._sample_point(x1, y0))))
+        for by in range(0, h, B):
+            for bx in range(0, w, B):
+                bx1, by1 = min(w, bx + B), min(h, by + B)
+                depths = [-self._sd(x, y)[0] for x, y in
+                          ((bx, by), (bx1, by), (bx, by1), (bx1, by1), ((bx + bx1) / 2, (by + by1) / 2))]
+                near = min(depths)
+                if near >= self.height + B or max(depths) <= -B:
+                    continue                       # deep inside, or outside the card
+                c = 2 if near < 6 else 4 if near < 20 else 8
+                for y0 in range(by, by1, c):
+                    y1 = min(by1, y0 + c)
+                    for x0 in range(bx, bx1, c):
+                        x1 = min(bx1, x0 + c)
+                        mesh.append(((x0, y0, x1, y1), (
+                            *self._sample_point(x0, y0), *self._sample_point(x0, y1),
+                            *self._sample_point(x1, y1), *self._sample_point(x1, y0))))
         self._field_cache.clear()
         return mesh
 
