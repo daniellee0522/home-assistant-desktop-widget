@@ -134,6 +134,8 @@ class View:
         self.on_enter = self.on_leave = self.on_wheel = None
         self.interactive = False        # takes the pointer (otherwise the pointer goes through)
         self.hovered = self.pressed = False
+        self.no_hit = False             # the pointer goes through it (a layer that is out of sight)
+        self.lifted = False
 
     # -- tree ------------------------------------------------------------------------
     def add(self, *views):
@@ -210,7 +212,7 @@ class View:
 
     def hit(self, x, y):
         """The deepest interactive view at (x, y) in this view's own space, or None."""
-        if not self.visible or self.alpha <= 0:
+        if not self.visible or self.alpha <= 0 or self.no_hit:
             return None
         lx, ly = x - self.x - self.dx, y - self.y - self.dy
         if self.zoom != 1.0:
@@ -663,6 +665,10 @@ class TileView(View):
             self._cache = QPixmap.fromImage(img)
             self._cache.setDevicePixelRatio(s)
             self._key = key
+        if self.lifted:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 80))
+            p.drawPath(render.squircle(0, 18, self.w, self.h, self.scene.t["radius_tile"]))
         p.drawPixmap(0, 0, self._cache)
 
 
