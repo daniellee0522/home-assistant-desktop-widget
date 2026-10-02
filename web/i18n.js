@@ -32,6 +32,7 @@ const EN_TEXT = {
   '＋ 房間':'+ Room', '房間名稱':'Room name', '刪除房間':'Delete room', '把配件拖曳到這裡':'Drop devices here',
   '這個房間還沒有配件':'No devices in this room yet', '沒有已移除的配件。被移除的配件會列在這裡，按一下加回。':'Nothing removed. Removed devices are listed here; press one to bring it back.',
   '上鎖中':'Locking', '解鎖中':'Unlocking', '已開啟':'Open', '開啟中':'Opening', '卡住了':'Jammed', '狀態不明':'Unknown',
+  '選擇這個膠囊顯示哪些配件':'Choose which devices this capsule shows', '音響':'Speaker',
   '我的家':'My home',
   '隱藏房間':'Hide room', '顯示房間':'Show room', '主畫面隱藏的房間':'Rooms hidden on the main screen',
   '主畫面不顯示這個房間 (它的按鈕與膠囊不受影響)':'Hide this room on the main screen (its button and capsules are not affected)', '讓主畫面顯示這個房間':'Show this room on the main screen', '已隱藏的房間':'Hidden rooms', '已移除的配件':'Removed devices', '顯示':'Show',
@@ -87,6 +88,8 @@ function translateInterfaceText(source) {
     const patterns = [
       [/^配件 \((\d+)\)$/, m => `Devices (${m[1]})`],
       [/^已超過 (\d+) 個 Widget，每多一個都會多用一份記憶體 \(約 60 MB\)。$/, m => `More than ${m[1]} widgets: each extra one uses about 60 MB more memory.`],
+      [/^(\d+) 台攝影機$/, m => `${m[1]} camera${m[1] === '1' ? '' : 's'}`],
+      [/^(\d+) 個配件　顯示$/, m => `${m[1]} device${m[1] === '1' ? '' : 's'}　Show`],
       [/^(\d+) 個開著$/, m => `${m[1]} on`],
       [/^(\d+) 個未鎖上$/, m => `${m[1]} unlocked`],
       [/^(\d+) 個開啟$/, m => `${m[1]} open`],
