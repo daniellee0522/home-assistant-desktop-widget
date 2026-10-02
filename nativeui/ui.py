@@ -431,7 +431,8 @@ class Button(View):
             base = (self.h - fm.height() / 10) / 2 + fm.ascent() / 10
             p.setPen(Qt.NoPen)
             p.setBrush(resolve(self.scene, color))
-            p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.text), (self.w - tw) / 2, base))
+            left = 10 if getattr(self, "align_left", False) else (self.w - tw) / 2
+            p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.text), left, base))
 
 
 class Slider(View):
@@ -542,10 +543,11 @@ class TextField(View):
     """A line of text to edit: a real QLineEdit laid over the scene where this view is."""
 
     def __init__(self, x, y, w, h, text="", placeholder="", size=15, on_done=None, max_length=40, fill="input_bg",
-                 ring="input_border", radius=18):
+                 ring="input_border", radius=18, password=False, on_change=None):
         super().__init__(x, y, w, h)
         self.text, self.placeholder, self.size, self.on_done, self.max_length = text, placeholder, size, on_done, max_length
         self.fill, self.ring, self.radius_ = fill, ring, radius
+        self.password, self.on_change = password, on_change
         self.edit = None
 
     def _adopt(self, scene):
@@ -557,6 +559,10 @@ class TextField(View):
             self.edit.setText(self.text)
             self.edit.setFrame(False)
             self.edit.editingFinished.connect(self._finished)
+            if self.password:
+                self.edit.setEchoMode(QLineEdit.Password)
+            if self.on_change:
+                self.edit.textChanged.connect(lambda t: self.on_change(t))
             scene.fields.append(self)
             self.restyle()
         elif scene is None and self.edit is not None:
@@ -672,6 +678,126 @@ class TileView(View):
         p.drawPixmap(0, 0, self._cache)
 
 
+class CheckRow(View):
+    """A checkbox and its words."""
+    cursor = Qt.PointingHandCursor
+
+    def __init__(self, text, checked, w, on_change=None, size=12.5):
+        super().__init__(0, 0, w, 0)
+        self.interactive = True
+        self.text, self.checked, self.size, self.on_change = text, checked, size, on_change
+        self.lines = wrap_lines(render.tr(text), font(size), w - 26)
+        self.h = max(18, len(self.lines) * size * 1.35)
+        self.enabled = True
+        self.on_press = lambda e: True
+        self.on_click = self._toggle
+
+    def _toggle(self, e):
+        if not self.enabled:
+            return True
+        self.checked = not self.checked
+        self.changed()
+        if self.on_change:
+            self.on_change(self.checked)
+        return True
+
+    def paint(self, p):
+        box = QRectF(0, (self.size * 1.35 - 16) / 2, 16, 16)
+        p.setPen(QPen(resolve(self.scene, "input_border" if not self.checked else "accent_blue"), 1.2))
+        p.setBrush(resolve(self.scene, "accent_blue" if self.checked else "input_bg"))
+        p.drawRoundedRect(box, 4, 4)
+        if self.checked:
+            p.setPen(QPen(QColor(255, 255, 255), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            path = QPainterPath()
+            path.moveTo(box.x() + 3.6, box.y() + 8.4)
+            path.lineTo(box.x() + 6.8, box.y() + 11.4)
+            path.lineTo(box.x() + 12.4, box.y() + 4.8)
+            p.drawPath(path)
+        f = font(self.size)
+        fm = QFontMetricsF(f)
+        p.setPen(Qt.NoPen)
+        col = resolve(self.scene, "ink1")
+        if not self.enabled:
+            col.setAlphaF(0.5)
+        p.setBrush(col)
+        lh = self.size * 1.35
+        for i, line in enumerate(self.lines):
+            p.drawPath(render.text_path(QPointF(0, 0), f, line, 26, i * lh + (lh - fm.height() / 10) / 2 + fm.ascent() / 10))
+
+
+class Menu(View):
+    """The list a Select opens."""
+
+    def __init__(self, options, value, w, on_pick):
+        super().__init__(0, 0, w, 8 + len(options) * 34)
+        self.interactive = True
+        self.on_press = lambda e: True
+        for i, (val, label) in enumerate(options):
+            item = Button(label, x=4, y=4 + i * 34, w=w - 8, h=34, size=13, weight=QFont.Normal, color="ink1",
+                          fill="panel_solid" if val != value else "btn_fill", hover_fill="btn_fill_strong", radius=11,
+                          on_click=lambda e, v=val: on_pick(v))
+            item.align_left = True
+            self.add(item)
+
+    def paint(self, p):
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 40))
+        p.drawRoundedRect(QRectF(0, 4, self.w, self.h), 18, 18)
+        p.setBrush(resolve(self.scene, "panel_solid"))
+        p.setPen(QPen(resolve(self.scene, "input_border"), 1))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.w - 1, self.h - 1), 18, 18)
+
+
+class Select(View):
+    """A closed list: the choice shown in a field, a menu when pressed."""
+    cursor = Qt.PointingHandCursor
+
+    def __init__(self, x, y, w, options, value, on_change, h=36, size=13):
+        super().__init__(x, y, w, h)
+        self.interactive = True
+        self.options, self.value, self.on_change, self.size = options, value, on_change, size
+        self.on_press = lambda e: True
+        self.on_click = lambda e: self.open()
+
+    def label(self):
+        return next((l for v, l in self.options if v == self.value), "")
+
+    def open(self):
+        gx, gy = self.abs_pos()
+        menu = Menu(self.options, self.value, self.w, self.pick)
+        menu.x, menu.y = gx, gy + self.h + 2
+        if menu.y + menu.h > self.scene.css_h:
+            menu.y = max(0, gy - menu.h - 2)
+        self.scene.open_popup(menu)
+
+    def pick(self, value):
+        self.scene.close_popup()
+        if value != self.value:
+            self.value = value
+            self.changed()
+            self.on_change(value)
+
+    def paint(self, p):
+        p.setPen(QPen(resolve(self.scene, "input_border"), 1))
+        p.setBrush(resolve(self.scene, "input_bg"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.w - 1, self.h - 1), self.h / 2, self.h / 2)
+        f = font(self.size)
+        fm = QFontMetricsF(f)
+        p.setPen(Qt.NoPen)
+        p.setBrush(resolve(self.scene, "ink1"))
+        text = ellipsize(render.tr(self.label()), f, self.w - 40)
+        p.drawPath(render.text_path(QPointF(0, 0), f, text, 12, (self.h - fm.height() / 10) / 2 + fm.ascent() / 10))
+        c = QPointF(self.w - 16, self.h / 2)
+        tri = QPainterPath()
+        tri.moveTo(c.x() - 4, c.y() - 2)
+        tri.lineTo(c.x() + 4, c.y() - 2)
+        tri.lineTo(c.x(), c.y() + 3)
+        tri.closeSubpath()
+        p.setBrush(resolve(self.scene, "ink2"))
+        p.drawPath(tri)
+
+
 # ---------------------------------------------------------------------------------------
 # animation
 # ---------------------------------------------------------------------------------------
@@ -758,6 +884,9 @@ class Scene(GlassMixin, QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self.root = View()
         self.root.scene = self
+        self.layer = View()               # above the root: menus and the toast
+        self.layer.scene = self
+        self.popup = None
         self.fields = []
         self.tweens = Tweens(self)
         self.capture = None
@@ -861,6 +990,7 @@ class Scene(GlassMixin, QWidget):
         p.scale(self.scale / self.dpi, self.scale / self.dpi)
         self.paint_card(p)
         self.root.paint_tree(p)
+        self.layer.paint_tree(p)
         p.end()
 
     def paint_card(self, p):
@@ -930,7 +1060,7 @@ class Scene(GlassMixin, QWidget):
         return pos.x() * k, pos.y() * k
 
     def view_at(self, gx, gy):
-        return self.root.hit(gx, gy)
+        return self.layer.hit(gx, gy) or self.root.hit(gx, gy)
 
     def _ev(self, view, gx, gy, e):
         lx, ly = view.to_local(gx, gy) if view else (gx, gy)
@@ -948,9 +1078,40 @@ class Scene(GlassMixin, QWidget):
             view = view.parent
         return None
 
+    def open_popup(self, view):
+        self.close_popup()
+        self.popup = view
+        self.layer.add(view)
+        self.request_paint()
+
+    def close_popup(self):
+        if self.popup is not None:
+            self.layer.remove(self.popup)
+            self.popup = None
+            self.request_paint()
+
+    def toast(self, text):
+        """A short message at the bottom of the window."""
+        f = font(12)
+        w = text_width(render.tr(text), f) + 28
+        v = Rect((self.css_w - w) / 2, self.css_h - 14 - 30, w, 30, (20, 22, 26, 0.88), "full")
+        v.add(Label(text, 12, QFont.Normal, "white", x=14, y=(30 - 12 * 1.2) / 2))
+        v.alpha = 0.0
+        self.layer.add(v)
+        v.animate(250, "out", alpha=1.0)
+
+        def away():
+            v.animate(250, "out", alpha=0.0, done=lambda: self.layer.remove(v))
+        QTimer.singleShot(2200, away)
+
     def mousePressEvent(self, e):
         gx, gy = self._css(e)
         target = self.view_at(gx, gy)
+        if self.popup is not None:
+            inside = target is not None and (target is self.popup or self.popup in set(self._chain(target)))
+            if not inside:
+                self.close_popup()
+                return
         self.press_view = target
         self.press_at = (gx, gy)
         self.press_button = e.button()
