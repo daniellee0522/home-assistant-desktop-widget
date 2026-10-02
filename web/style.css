@@ -1900,10 +1900,46 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   line-height: 1;
   white-space: nowrap;
 }
-.tile.is-bar .tile-icon.is-reading { width: 100px; height: auto; flex: none; font-size: 31px; justify-content: flex-start; background: none; padding: 0; }
-.tile.is-big .tile-icon.is-reading { width: auto; height: auto; font-size: 40px; }
+.tile.is-bar .tile-icon.is-reading { width: 100px; height: auto; flex: none; font-size: 34px; justify-content: flex-start; background: none; padding: 0; }
+.tile.is-big .tile-icon.is-reading { width: auto; height: auto; font-size: 60px; }
 
 /* The temperature is set like the rest of the tile's text: dark on a lit
    tile, white on a dark one. */
 .tile .tile-icon.is-reading { color: var(--text-off-1); }
 .tile.is-on .tile-icon.is-reading { color: var(--tile-on-text-1); }
+
+/* A long tile has room: its text is bigger than a small tile's. */
+.tile.is-bar .tile-room { font-size: 25px; }
+.tile.is-bar .tile-label { font-size: 20px; }
+.tile.is-bar .tile-value, .tile.is-bar.is-readonly .tile-value { font-size: 32px; }
+
+/* The climate buttons are round. On a long or large tile they are always
+   there, in its lower half; on a small one they stay in the corner, on hover. */
+.tile .mini-btn {
+  width: 30px;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 20px;
+  line-height: 1;
+}
+.tile.is-bar .mini-btns, .tile.is-big .mini-btns {
+  top: auto;
+  bottom: 14px;
+  right: 14px;
+  gap: 12px;
+  opacity: 1;
+}
+.tile.is-bar .mini-btn, .tile.is-big .mini-btn { width: 44px; height: 44px; font-size: 28px; }
+
+/* On a long tile they stand one above the other at its right edge. */
+.tile.is-bar .mini-btns {
+  top: 50%;
+  bottom: auto;
+  right: 16px;
+  flex-direction: column;
+  gap: 10px;
+  transform: translateY(-50%);
+}
+.tile.is-bar .mini-btn { width: 40px; height: 40px; font-size: 26px; }
