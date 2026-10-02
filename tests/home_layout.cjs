@@ -35,4 +35,18 @@ for (const p of spots) for (const q of spots) {
   if (p === q) continue;
   assert.ok(p.x + p.w <= q.x || q.x + q.w <= p.x || p.y + p.h <= q.y || q.y + q.h <= p.y, 'tiles overlap');
 }
+// Dragged to the left, the tiles it lands on make way to the right, and push
+// what is in their way along.
+const row = [t('a', 1, 1, 0, 0, 0), t('b', 1, 1, 1, 1, 0), t('c', 1, 1, 2, 2, 0)];
+assert.deepEqual(L(row, { id: 'p', x: 1, y: 0, w: 1, h: 1, dir: { x: 1, y: 0 } }),
+  { p: [1, 0, 1, 1], a: [0, 0, 1, 1], b: [2, 0, 1, 1], c: [3, 0, 1, 1] });
+// ...and to the left when it is dragged to the right.
+assert.deepEqual(L([t('b', 1, 1, 0, 1, 0), t('c', 1, 1, 1, 2, 0)], { id: 'p', x: 2, y: 0, w: 1, h: 1, dir: { x: -1, y: 0 } }),
+  { p: [2, 0, 1, 1], c: [1, 0, 1, 1], b: [0, 0, 1, 1] });
+// With no room that way they go down instead.
+const crowded = [t('a', 1, 1, 0, 0, 0), t('b', 1, 1, 1, 1, 0), t('c', 1, 1, 2, 2, 0), t('d', 1, 1, 3, 3, 0)];
+const full = L(crowded, { id: 'p', x: 0, y: 0, w: 1, h: 1, dir: { x: 1, y: 0 } });
+assert.deepEqual(full.p, [0, 0, 1, 1]);
+assert.ok(full.d[1] > 0, 'the last one had no room to the right, so it went down');
+for (const id of ['a', 'b', 'c']) assert.equal(full[id][1], 0, 'the rest slid along the row');
 console.log('Home panel layout checks passed');

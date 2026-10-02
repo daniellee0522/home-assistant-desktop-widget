@@ -1579,7 +1579,6 @@ function tileEl(tile, form, preview) {
     // colour of the mode, with no circle behind it.
     iconWrap.classList.add('is-reading');
     iconWrap.textContent = reading.text.replace('°', '') + ' °C';
-    iconWrap.style.color = on ? (HVAC_COLORS[state.state] || 'var(--accent-cyan)') : 'var(--text-off-1)';
   } else if (badge) {
     iconWrap.classList.add('is-badge');
     iconWrap.textContent = badge.text;
@@ -1890,9 +1889,12 @@ function updateTileByEntity(entityId) {
     if (!tile) continue;
     const home = isHomeId(id) && homeEntityById(tile.entity);
     for (const old of document.querySelectorAll('.tile[data-id="' + id + '"]')) {
-      old.replaceWith(home
+      const fresh = home
         ? (old.closest('#home-category') ? homeCategoryNode(home) : homeTileNode(home, homeEditing))
-        : tileEl(tile));
+        : tileEl(tile);
+      // In a room, where it stands is set on the tile itself.
+      if (old.style.left) { fresh.style.left = old.style.left; fresh.style.top = old.style.top; }
+      old.replaceWith(fresh);
     }
   }
   if (currentDetailTileId && ids.includes(currentDetailTileId)) renderDetailBody();
@@ -2510,38 +2512,73 @@ function decorateHomeTile(node, e) {
 /* ---- where tiles are: a room is a grid four cells wide ---- */
 const HOME_COLS = 4;
 
-// Places a room's tiles on its grid. Tiles that have a place keep it, and any
-// that would overlap are pushed down; a tile with nothing above it moves up;
-// tiles with no place yet take the first free one, in their order. `pin` is a
-// tile held at a place (the one being moved or resized), which the others
-// make way for. Returns Map(id -> {x, y, w, h}).
+// Places a room's tiles on its grid. Tiles that have a place keep it; tiles
+// with no place yet take the first free one, in their order. `pin` is a tile
+// held at a place (the one being moved or resized), which the others make
+// way for: those it lands on are shoved on along `pin.dir` (the way its
+// movement pushes them: dragged left, they go right) and push what is in
+// their way in turn; where that runs out of room they go down. Then what has
+// nothing above it moves up. Returns Map(id -> {x, y, w, h}).
 function homeLayout(items, pin) {
-  const rects = [];
-  const free = (x, y, w, h) => x >= 0 && y >= 0 && x + w <= HOME_COLS && rects.every(
-    (r) => x + w <= r.x || r.x + r.w <= x || y + h <= r.y || r.y + r.h <= y);
-  const rest = pin ? items.filter((i) => i.id !== pin.id) : items.slice();
-  if (pin) {
-    const x = Math.max(0, Math.min(pin.x, HOME_COLS - pin.w));
-    rects.push({ id: pin.id, x, y: Math.max(0, pin.y), w: pin.w, h: pin.h });
-  }
   const placed = (i) => Number.isInteger(i.x) && Number.isInteger(i.y);
-  const keepers = rest.filter(placed).sort((a, b) => a.y - b.y || a.x - b.x);
-  for (const it of keepers) {
-    const x = Math.max(0, Math.min(it.x, HOME_COLS - it.w));
-    let y = Math.max(0, it.y);
-    while (y > 0 && free(x, y - 1, it.w, it.h)) y--;
-    while (!free(x, y, it.w, it.h)) y++;
-    rects.push({ id: it.id, x, y, w: it.w, h: it.h });
+  const clampX = (x, w) => Math.max(0, Math.min(x, HOME_COLS - w));
+  const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const rest = pin ? items.filter((i) => i.id !== pin.id) : items.slice();
+  const rects = [];
+
+  // Where everything is to begin with: the saved places, then the first free
+  // cell for the rest.
+  const taken = (x, y, w, h) => rects.some((r) => overlap({ x, y, w, h }, r));
+  for (const it of rest.filter(placed).sort((a, b) => a.y - b.y || a.x - b.x)) {
+    rects.push({ id: it.id, x: clampX(it.x, it.w), y: Math.max(0, it.y), w: it.w, h: it.h, order: it.order });
   }
   for (const it of rest.filter((i) => !placed(i)).sort((a, b) => a.order - b.order)) {
     let done = false;
     for (let y = 0; !done; y++) {
       for (let x = 0; x <= HOME_COLS - it.w; x++) {
-        if (free(x, y, it.w, it.h)) { rects.push({ id: it.id, x, y, w: it.w, h: it.h }); done = true; break; }
+        if (!taken(x, y, it.w, it.h)) { rects.push({ id: it.id, x, y, w: it.w, h: it.h, order: it.order }); done = true; break; }
       }
     }
   }
-  return new Map(rects.map((r) => [r.id, r]));
+
+  let pinRect = null;
+  if (pin) {
+    pinRect = { id: pin.id, x: clampX(pin.x, pin.w), y: Math.max(0, pin.y), w: pin.w, h: pin.h };
+    const dir = pin.dir || { x: 0, y: 1 };
+    const settled = new Set([pin.id]);
+    const queue = [pinRect];
+    let guard = 0;
+    while (queue.length && guard++ < 300) {
+      const by = queue.shift();
+      const hit = rects.filter((o) => !settled.has(o.id) && overlap(o, by))
+        .sort((a, b) => dir.x ? (a.x - b.x) * dir.x : (a.y - b.y) * dir.y);
+      for (const o of hit) {
+        if (dir.x) {
+          const nx = dir.x > 0 ? by.x + by.w : by.x - o.w;
+          if (nx < 0 || nx + o.w > HOME_COLS) o.y = by.y + by.h;      // no room that way
+          else o.x = nx;
+        } else {
+          const ny = dir.y > 0 ? by.y + by.h : by.y - o.h;
+          o.y = ny < 0 ? by.y + by.h : ny;
+        }
+        settled.add(o.id);
+        queue.push(o);
+      }
+    }
+  }
+
+  // Overlaps that are left (two shoved onto one place) go down in turn, and
+  // anything with room above it moves up. The held tile stays where it is.
+  const final = pinRect ? [pinRect] : [];
+  const free = (x, y, w, h) => x >= 0 && y >= 0 && x + w <= HOME_COLS
+    && !final.some((r) => overlap({ x, y, w, h }, r));
+  for (const o of rects.sort((a, b) => a.y - b.y || a.x - b.x || a.order - b.order)) {
+    let y = o.y;
+    while (y > 0 && free(o.x, y - 1, o.w, o.h)) y--;
+    while (!free(o.x, y, o.w, o.h)) y++;
+    final.push({ id: o.id, x: o.x, y, w: o.w, h: o.h });
+  }
+  return new Map(final.map((r) => [r.id, r]));
 }
 
 // A room's devices as layout items.
@@ -2661,7 +2698,7 @@ function attachHomeDrag(node, e) {
     const span = homeSpan(homeRecord(e.entity_id));
     const room0 = grid0.dataset.room;
     let lifted = false, slot = null, last = null, target = null, finalLayout = null;
-    let grabX = 0, grabY = 0;
+    let grabX = 0, grabY = 0, cell = null, push = { x: 0, y: 1 };
     // What each room has, apart from this tile.
     const others = (grid) => homeItems(homeData.entities.filter((x) => homeVisible(x)
       && roomKey(x.area) === grid.dataset.room && x.entity_id !== e.entity_id));
@@ -2676,6 +2713,10 @@ function attachHomeDrag(node, e) {
       slot = homeGhost(span, 'home-ghost is-slot');
       grid0.appendChild(slot);
       target = grid0;
+      // Where it starts, to tell which way it is dragged.
+      const mine = homeLayout(homeItems(homeData.entities.filter(
+        (x) => homeVisible(x) && roomKey(x.area) === room0))).get(e.entity_id);
+      cell = mine ? { x: mine.x, y: mine.y } : null;
     };
     const relayout = (m) => {
       const under = document.elementsFromPoint(m.clientX, m.clientY)
@@ -2695,7 +2736,14 @@ function attachHomeDrag(node, e) {
       const top = (m.clientY - rect.top) / gs - grabY;
       const x = Math.round(left / (HOME_TILE_W + HOME_GAP));
       const y = Math.max(0, Math.round(top / (HOME_TILE_H + HOME_GAP)));
-      finalLayout = homeLayout(others(target), { id: e.entity_id, x, y, w: span[0], h: span[1] });
+      // The tiles it lands on are pushed the way it came from: dragged to
+      // the left, they make way to the right.
+      if (cell && (x !== cell.x || y !== cell.y)) {
+        const dx = x - cell.x, dy = y - cell.y;
+        push = Math.abs(dx) >= Math.abs(dy) ? { x: -Math.sign(dx), y: 0 } : { x: 0, y: -Math.sign(dy) };
+        cell = { x, y };
+      }
+      finalLayout = homeLayout(others(target), { id: e.entity_id, x, y, w: span[0], h: span[1], dir: push });
       const mine = finalLayout.get(e.entity_id);
       const hide = new Map(finalLayout);
       hide.delete(e.entity_id);

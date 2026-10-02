@@ -1902,3 +1902,8 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 }
 .tile.is-bar .tile-icon.is-reading { width: 100px; height: auto; flex: none; font-size: 31px; justify-content: flex-start; background: none; padding: 0; }
 .tile.is-big .tile-icon.is-reading { width: auto; height: auto; font-size: 40px; }
+
+/* The temperature is set like the rest of the tile's text: dark on a lit
+   tile, white on a dark one. */
+.tile .tile-icon.is-reading { color: var(--text-off-1); }
+.tile.is-on .tile-icon.is-reading { color: var(--tile-on-text-1); }
