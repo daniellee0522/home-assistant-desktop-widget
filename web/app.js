@@ -1435,7 +1435,12 @@ function iconColorFor(domain, state, on) {
   switch (domain) {
     case 'light':
       if (!on) return 'var(--text-off-1)';
-      if (Array.isArray(attrs.rgb_color)) return 'rgb(' + attrs.rgb_color.join(',') + ')';
+      // A colour light shows its colour; a white one (and anything given a
+      // bulb icon) the same yellow, whichever kind of device it is.
+      if (Array.isArray(attrs.rgb_color) &&
+          ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(attrs.color_mode)) {
+        return 'rgb(' + attrs.rgb_color.join(',') + ')';
+      }
       return 'var(--accent-yellow)';
     case 'switch': case 'input_boolean': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'climate': return on ? 'var(--accent-cyan)' : 'var(--text-off-1)';
@@ -1575,28 +1580,9 @@ function tileEl(tile, form, preview) {
   }
 
   if (domain === 'climate' && on) addClimateMiniButtons(div, tile);
-  if (domain === 'media_player' && ok && !preview &&
-      (state.state === 'playing' || state.state === 'paused')) addMediaMiniButton(div, tile, state);
 
   if (!preview) attachTileInteraction(div, tile);
   return div;
-}
-
-// Play or pause without opening the card.
-function addMediaMiniButton(div, tile, state) {
-  const wrap = document.createElement('div');
-  wrap.className = 'mini-btns';
-  const b = document.createElement('button');
-  b.className = 'mini-btn';
-  b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
-    + (state.state === 'playing' ? ICON_PAUSE : ICON_PLAY) + '</svg>';
-  b.title = state.state === 'playing' ? '暫停' : '播放';
-  b.addEventListener('click', (e) => {
-    e.stopPropagation();
-    callService('media_player', 'media_play_pause', tile.entity);
-  });
-  wrap.appendChild(b);
-  div.appendChild(wrap);
 }
 
 function addClimateMiniButtons(div, tile) {
@@ -1851,7 +1837,7 @@ function updateTileByEntity(entityId) {
     const home = isHomeId(id) && homeEntityById(tile.entity);
     for (const old of document.querySelectorAll('.tile[data-id="' + id + '"]')) {
       old.replaceWith(home
-        ? homeTileNode(home, homeEditing && !old.closest('#home-category'))
+        ? (old.closest('#home-category') ? homeCategoryNode(home) : homeTileNode(home, homeEditing))
         : tileEl(tile));
     }
   }
@@ -2053,11 +2039,20 @@ function readingsText(sensors) {
 }
 
 /* ---- the capsules (the Home app's header) ---- */
+// Every device of a capsule's kind, whatever its room.
+function categoryAll(cat) {
+  const gone = (e) => { const r = homeRecord(e.entity_id); return !!(r && r.hidden); };
+  const list = cat.id === 'env' ? homeData.sensors
+    : homeData.entities.filter((e) => cat.domains.includes(e.domain));
+  return list.filter((e) => !gone(e));
+}
+
+function categoryChosen(e) { const r = homeRecord(e.entity_id); return !(r && r.cat_hidden); }
+
 function categoryMembers(cat) {
   // Looking at one room, the capsules are that room's status.
   const inRoom = (e) => !homeRoom || roomKey(e.area) === homeRoom;
-  if (cat.id === 'env') return homeSensorsIn().filter(inRoom);
-  return homeData.entities.filter((e) => cat.domains.includes(e.domain) && homeVisible(e) && inRoom(e));
+  return categoryAll(cat).filter((e) => categoryChosen(e) && inRoom(e));
 }
 
 function categoryPill(cat, members) {
@@ -2078,33 +2073,39 @@ function categoryPill(cat, members) {
   return { sub: playing ? playing + ' 個播放中' : '閒置', tint: cat.tint };
 }
 
+// The capsules change as devices do, often. They are updated where they
+// stand: a button that is rebuilt between the press and the release is never
+// clicked.
 function renderHomeStatus() {
   const host = document.getElementById('home-summary');
-  host.innerHTML = '';
+  const wanted = [];
   for (const cat of HOME_CATEGORIES) {
+    // While a capsule is being edited it stays, even with nothing chosen.
     const members = categoryMembers(cat);
-    if (!members.length) continue;
-    const info = categoryPill(cat, members);
-    const pill = document.createElement('button');
-    pill.className = 'home-pill is-' + info.tint + (homeCategory === cat.id ? ' is-active' : '');
-    const icon = document.createElement('span');
-    icon.className = 'home-pill-icon';
-    icon.innerHTML = svgIcon(info.icon || cat.icon);
-    const text = document.createElement('span');
-    text.className = 'home-pill-text';
-    const title = document.createElement('span');
-    title.className = 'home-pill-title';
-    title.textContent = cat.title;
-    const sub = document.createElement('span');
-    sub.className = 'home-pill-sub';
-    sub.textContent = info.sub;
-    text.appendChild(title);
-    text.appendChild(sub);
-    pill.appendChild(icon);
-    pill.appendChild(text);
-    pill.addEventListener('click', () => toggleHomeCategory(cat.id));
-    host.appendChild(pill);
+    if (!members.length && !(homeCategory === cat.id && homeEditing)) continue;
+    wanted.push([cat, members, categoryPill(cat, members)]);
   }
+  for (const pill of [...host.children]) {
+    if (!wanted.some(([cat]) => cat.id === pill.dataset.cat)) pill.remove();
+  }
+  wanted.forEach(([cat, , info], index) => {
+    let pill = host.querySelector('[data-cat="' + cat.id + '"]');
+    if (!pill) {
+      pill = document.createElement('button');
+      pill.dataset.cat = cat.id;
+      pill.innerHTML = '<span class="home-pill-icon"></span><span class="home-pill-text">'
+        + '<span class="home-pill-title"></span><span class="home-pill-sub"></span></span>';
+      pill.querySelector('.home-pill-title').textContent = cat.title;
+      pill.addEventListener('click', () => toggleHomeCategory(cat.id));
+    }
+    pill.className = 'home-pill is-' + info.tint + (homeCategory === cat.id ? ' is-active' : '');
+    const icon = pill.querySelector('.home-pill-icon');
+    const iconName = info.icon || cat.icon;
+    if (icon.dataset.icon !== iconName) { icon.dataset.icon = iconName; icon.innerHTML = svgIcon(iconName); }
+    const sub = pill.querySelector('.home-pill-sub');
+    if (sub.textContent !== info.sub) sub.textContent = info.sub;
+    if (host.children[index] !== pill) host.insertBefore(pill, host.children[index] || null);
+  });
   for (const el of document.querySelectorAll('.home-room-status')) {
     el.textContent = readingsText(homeSensorsIn(el.dataset.room));
   }
@@ -2131,13 +2132,50 @@ function toggleHomeCategory(id) {
   stage.classList.add('is-category');
 }
 
+// A device in a capsule's screen; when editing, with a round button on its
+// edge to leave it out of the capsule or put it back.
+function homeCategoryNode(e) {
+  const node = homeTileNode(e, false, homeEditing);
+  if (!homeEditing) return node;
+  const chosen = categoryChosen(e);
+  node.classList.add('is-editing');
+  node.classList.toggle('is-excluded', !chosen);
+  const button = document.createElement('button');
+  button.className = 'home-remove ' + (chosen ? 'is-minus' : 'is-plus');
+  button.textContent = chosen ? '−' : '＋';
+  button.title = chosen ? '不在這個膠囊顯示' : '加回這個膠囊';
+  button.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const rec = ensureHomeRecord(e.entity_id);
+    if (chosen) rec.cat_hidden = true; else delete rec.cat_hidden;
+    persistHome();
+    renderHome();
+  });
+  node.appendChild(button);
+  return node;
+}
+
 function renderHomeCategory() {
   const overlay = document.getElementById('home-category');
   overlay.innerHTML = '';
   const cat = HOME_CATEGORIES.find((c) => c.id === homeCategory);
   if (!cat) return;
+  const head = document.createElement('div');
+  head.className = 'home-category-head';
+  const title = document.createElement('span');
+  title.className = 'home-category-title';
+  title.textContent = cat.title + (homeRoom ? '　' + homeRoomLabel(homeRoom) : '');
+  const hint = document.createElement('span');
+  hint.className = 'home-category-hint';
+  hint.textContent = homeEditing ? '按 − 不顯示該配件，按 ＋ 加回' : '';
+  head.appendChild(title);
+  head.appendChild(hint);
+  overlay.appendChild(head);
+  const everyone = homeEditing
+    ? categoryAll(cat).filter((e) => !homeRoom || roomKey(e.area) === homeRoom)
+    : categoryMembers(cat);
   const groups = new Map();
-  for (const e of categoryMembers(cat)) {
+  for (const e of everyone) {
     const key = roomKey(e.area);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(e);
@@ -2153,7 +2191,7 @@ function renderHomeCategory() {
     const grid = document.createElement('div');
     grid.className = 'home-grid';
     for (const e of homeOrdered(list)) {
-      const node = homeTileNode(e, false);
+      const node = homeCategoryNode(e);
       node.style.setProperty('--i', n++);
       node.classList.add('is-popping');
       grid.appendChild(node);
@@ -2258,7 +2296,7 @@ function renderHome() {
     status.dataset.room = key;
     title.appendChild(name);
     title.appendChild(status);
-    if (homeEditing) {
+    if (homeEditing && !homeRoom) {
       const hide = document.createElement('button');
       hide.className = 'home-hide-room';
       hide.textContent = '隱藏房間';
@@ -2327,7 +2365,9 @@ function homeAddRoomControl() {
     if (ev.key === 'Enter') done(true);
     else if (ev.key === 'Escape') done(false);
   });
-  input.addEventListener('blur', () => done(true));
+  // Not at once: the press that took the focus away is on another button,
+  // which a redraw now would replace before the press is released.
+  input.addEventListener('blur', () => setTimeout(() => done(true), 220));
   setTimeout(() => input.focus(), 30);
   return input;
 }
@@ -2342,11 +2382,11 @@ function homeChipButton(label, onClick) {
 
 // One device's tile in its shape; when editing, with the means to move,
 // resize and remove it instead of its usual behaviour.
-function homeTileNode(e, editing) {
+function homeTileNode(e, editing, plain) {
   const tile = homeTileFor(e);
   const rec = homeRecord(e.entity_id);
   const span = homeSpan(rec);
-  const node = tileEl(tile, homeForm(span), !!editing);
+  const node = tileEl(tile, homeForm(span), !!(editing || plain));
   node.style.setProperty('--sc', span[0]);
   node.style.setProperty('--sr', span[1]);
   const ids = entityToTileIds[e.entity_id] || (entityToTileIds[e.entity_id] = []);
@@ -2358,6 +2398,14 @@ function homeTileNode(e, editing) {
 /* ---- editing: remove, resize, move ---- */
 function decorateHomeTile(node, e) {
   node.classList.add('is-editing');
+  const handle0 = document.createElement('div');
+  handle0.className = 'home-resize';
+  node.appendChild(handle0);
+  attachHomeResize(handle0, node, e);
+  attachHomeDrag(node, e);
+  // Looking at one room, tiles are only moved and resized; they are removed
+  // from the whole list.
+  if (homeRoom) return;
   const remove = document.createElement('button');
   remove.className = 'home-remove';
   remove.textContent = '✕';
@@ -2370,11 +2418,6 @@ function decorateHomeTile(node, e) {
     renderHome();
   });
   node.appendChild(remove);
-  const handle = document.createElement('div');
-  handle.className = 'home-resize';
-  node.appendChild(handle);
-  attachHomeResize(handle, node, e);
-  attachHomeDrag(node, e);
 }
 
 // Viewport pixels per CSS pixel of an element's own layout: what the page
@@ -2638,6 +2681,34 @@ function renderHomeSheet() {
 
   const list = document.createElement('div');
   list.className = 'home-sheet-list';
+  const hiddenNow = [...hiddenRooms()].filter((r) => homeRoomNames().includes(r));
+  if (hiddenNow.length) {
+    const label = document.createElement('div');
+    label.className = 'home-sheet-title';
+    label.textContent = '已隱藏的房間';
+    list.appendChild(label);
+    for (const room of hiddenNow) {
+      const row = document.createElement('button');
+      row.className = 'home-sheet-row';
+      const name = document.createElement('span');
+      name.textContent = homeRoomLabel(room);
+      const count = document.createElement('span');
+      count.className = 'home-sheet-room';
+      count.textContent = homeData.entities.filter((e) => roomKey(e.area) === room).length + ' 個配件　顯示';
+      row.appendChild(name);
+      row.appendChild(count);
+      row.addEventListener('click', () => {
+        homePanel().hidden_rooms = (homePanel().hidden_rooms || []).filter((r) => r !== room);
+        persistHome();
+        renderHome();
+      });
+      list.appendChild(row);
+    }
+  }
+  const goneLabel = document.createElement('div');
+  goneLabel.className = 'home-sheet-title';
+  goneLabel.textContent = '已移除的配件';
+  list.appendChild(goneLabel);
   const gone = homeData.entities.filter((e) => { const r = homeRecord(e.entity_id); return r && r.hidden; });
   if (!gone.length) {
     const none = document.createElement('div');

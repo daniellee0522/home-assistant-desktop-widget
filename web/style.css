@@ -1846,3 +1846,18 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-section.is-reordering .home-section-title { opacity: 0.85; }
 .home-view.is-editing .home-chip[data-room]:not([data-room=""]),
 .home-view.is-editing .home-section-title { cursor: grab; touch-action: none; }
+
+/* A capsule's own screen: its name first, then the rooms' devices. */
+.home-category { padding-top: 6px; }
+.home-category-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 4px 8px 16px;
+}
+.home-category-title { font-size: 32px; font-weight: 800; letter-spacing: -0.3px; }
+.home-category-hint { font-size: 20px; font-weight: 500; color: var(--text-on-2); }
+.home-grid .tile.is-excluded { opacity: 0.4; }
+.home-remove.is-minus { background: rgba(255, 91, 74, 0.96); }
+.home-remove.is-plus { background: rgba(52, 199, 89, 0.96); }
+.home-sheet-title { padding: 6px 4px 10px; font-size: 20px; font-weight: 700; color: var(--text-on-2); }

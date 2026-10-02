@@ -125,6 +125,9 @@ def tile_layout(t):
         out["h"] = 2 if t.get("h") == 2 else 1
     if t.get("hidden"):
         out["hidden"] = True
+    # Left out of its capsule (the lights, the locks...), not out of its room.
+    if t.get("cat_hidden"):
+        out["cat_hidden"] = True
     if isinstance(t.get("order"), (int, float)) and not isinstance(t.get("order"), bool):
         out["order"] = float(t["order"])
     return out
