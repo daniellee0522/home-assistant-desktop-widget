@@ -453,11 +453,8 @@ class Api:
                 "icon": (t.get("icon") or "").strip(),
                 "on_mode": t.get("on_mode") or "cool",
                 "temp_step": t.get("temp_step", 1),
-                # The Home panel's layout: spans in tile cells, deleted, order.
-                **({"w": 2 if t.get("w") == 2 else 1} if "w" in t else {}),
-                **({"h": 2 if t.get("h") == 2 else 1} if "h" in t else {}),
-                **({"hidden": True} if t.get("hidden") else {}),
-                **({"order": float(t["order"])} if isinstance(t.get("order"), (int, float)) else {}),
+                # The Home panel's layout: spans in tile cells, removed, order.
+                **cfgmod.tile_layout(t),
             })
         return clean
 

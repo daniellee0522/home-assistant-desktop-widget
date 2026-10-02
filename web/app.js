@@ -15,7 +15,8 @@ const ICON_PATHS = {
      + '<path d="M12 9.9c-.3-3.3.4-6 2.3-7 2.2-1.2 4.6.3 4.3 2.7-.3 2.5-2.9 4-6.6 4.3z" transform="rotate(120 12 12)"/>'
      + '<path d="M12 9.9c-.3-3.3.4-6 2.3-7 2.2-1.2 4.6.3 4.3 2.7-.3 2.5-2.9 4-6.6 4.3z" transform="rotate(240 12 12)"/>',
   cover: '<path d="M4 3h16v2H4zM4 6.5h16v2H4zM4 10h16v2H4zM6 13h4v8H6zM14 13h4v8h-4z"/>',
-  media: '<path d="M15 3v10.55A4 4 0 1013 17V8h5V3z"/>',
+  // A loudspeaker: the case, the tweeter and the woofer.
+  media: '<path d="M12,12A3,3 0 0,0 9,15A3,3 0 0,0 12,18A3,3 0 0,0 15,15A3,3 0 0,0 12,12M12,20A5,5 0 0,1 7,15A5,5 0 0,1 12,10A5,5 0 0,1 17,15A5,5 0 0,1 12,20M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8C10.89,8 10,7.1 10,6C10,4.89 10.89,4 12,4M17,2H7C5.89,2 5,2.89 5,4V20A2,2 0 0,0 7,22H17A2,2 0 0,0 19,20V4C19,2.89 18.1,2 17,2Z"/>',
   lock: '<path d="M12 2a4 4 0 00-4 4v3H7a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V10a1 1 0 00-1-1h-1V6a4 4 0 00-4-4zm-2 7V6a2 2 0 114 0v3zm2 4a1.5 1.5 0 011.5 1.5c0 .6-.34 1.1-.83 1.36l.33 2.14h-2l.33-2.14A1.5 1.5 0 0112 13z"/>',
   // Shackle swung open; the keyhole is cut out with evenodd so the glass
   // tile shows through it.
@@ -1412,6 +1413,23 @@ function isOnState(domain, state) {
   }
 }
 
+// What an icon stands for, so a tile coloured by its icon and not only by
+// the kind of device: a plug given a bulb is yellow when it is on.
+function iconKind(icon) {
+  if (!icon) return '';
+  const name = icon.startsWith('mdi:') ? icon.slice(4) : icon;
+  if (name === 'light' || /lightbulb|lamp|ceiling-light|light-switch/.test(name)) return 'light';
+  if (name === 'switch' || /outlet|power-plug|toggle/.test(name)) return 'switch';
+  if (name === 'fan' || /^fan/.test(name)) return 'fan';
+  if (/air-conditioner|snowflake|thermostat|radiator|heat/.test(name)) return 'climate';
+  if (/blinds|curtains|window-shutter|garage/.test(name)) return 'cover';
+  if (name === 'media' || name === 'monitor' || /speaker|television|music|cast|play/.test(name)) return 'media_player';
+  if (name === 'lock' || name === 'door' || /^lock|door|shield/.test(name)) return 'lock';
+  if (/robot-vacuum|vacuum/.test(name)) return 'vacuum';
+  if (name === 'script' || /^mdi:palette|palette|robot$/.test(name)) return 'scene';
+  return '';
+}
+
 function iconColorFor(domain, state, on) {
   const attrs = (state && state.attributes) || {};
   switch (domain) {
@@ -1511,7 +1529,10 @@ function tileEl(tile, form, preview) {
     iconWrap.style.color = badge.color;
   } else {
     iconWrap.innerHTML = svgIcon(iconNameFor(tile, state));
-    iconWrap.style.color = ok ? iconColorFor(domain, state, on) : 'var(--text-off-1)';
+    // The icon chosen by hand decides the colour, the device's kind otherwise.
+    iconWrap.style.color = ok
+      ? iconColorFor(tile.icon ? (iconKind(tile.icon) || domain) : domain, state, on)
+      : 'var(--text-off-1)';
   }
   div.appendChild(iconWrap);
 
@@ -1956,8 +1977,11 @@ function homeOrdered(list) {
   return [...list].sort((a, b) => key(a) - key(b));
 }
 
-const roomSort = ([a], [b]) =>
-  a === b ? 0 : a === OTHER_ROOM ? 1 : b === OTHER_ROOM ? -1 : a.localeCompare(b);
+const roomSort = ([a], [b]) => {
+  const names = homeRoomNames();
+  const rank = (k) => (k === OTHER_ROOM ? 1e9 : names.indexOf(k) < 0 ? 1e6 : names.indexOf(k));
+  return rank(a) - rank(b);
+};
 
 // [room, devices] for what the main screen shows. While editing, a room with
 // nothing in it is shown too, as somewhere to drop a device.
@@ -1982,9 +2006,12 @@ function homeGroups() {
 
 // Every room that can be chosen: Home Assistant's, and the ones made here.
 function homeRoomNames() {
-  const names = [...homeData.rooms];
-  for (const r of (homePanel().custom_rooms || [])) if (!names.includes(r)) names.push(r);
-  names.sort((a, b) => a.localeCompare(b));
+  // By default Home Assistant's rooms by name, then the ones made here in the
+  // order they were made; the user's own order comes before all of that.
+  const base = [...homeData.rooms].sort((a, b) => a.localeCompare(b));
+  for (const r of (homePanel().custom_rooms || [])) if (!base.includes(r)) base.push(r);
+  const chosen = (homePanel().room_order || []).filter((r) => base.includes(r));
+  const names = [...chosen, ...base.filter((r) => !chosen.includes(r))];
   if (homeData.entities.some((e) => !e.area)) names.push(OTHER_ROOM);
   return names;
 }
@@ -2027,8 +2054,10 @@ function readingsText(sensors) {
 
 /* ---- the capsules (the Home app's header) ---- */
 function categoryMembers(cat) {
-  if (cat.id === 'env') return homeSensorsIn();
-  return homeData.entities.filter((e) => cat.domains.includes(e.domain) && homeVisible(e));
+  // Looking at one room, the capsules are that room's status.
+  const inRoom = (e) => !homeRoom || roomKey(e.area) === homeRoom;
+  if (cat.id === 'env') return homeSensorsIn().filter(inRoom);
+  return homeData.entities.filter((e) => cat.domains.includes(e.domain) && homeVisible(e) && inRoom(e));
 }
 
 function categoryPill(cat, members) {
@@ -2167,6 +2196,7 @@ function renderHome() {
   const custom = new Set(homePanel().custom_rooms || []);
   const addChip = (key, label, off) => {
     const b = document.createElement('button');
+    b.dataset.room = key;
     b.className = 'home-chip' + (!homeEditing && homeRoom === key ? ' is-active' : '')
       + (off ? ' is-off' : '');
     b.textContent = (homeEditing && key !== '' ? (off ? '◌ ' : '● ') : '') + label;
@@ -2195,6 +2225,7 @@ function renderHome() {
       b.appendChild(x);
     }
     chips.appendChild(b);
+    if (homeEditing && key !== '' && key !== OTHER_ROOM) attachRoomReorder(b, chips, 'x');
   };
   addChip('', '全部', false);
   for (const key of names) {
@@ -2217,6 +2248,7 @@ function renderHome() {
   for (const [key, entities] of groups) {
     const section = document.createElement('section');
     section.className = 'home-section';
+    section.dataset.room = key;
     const title = document.createElement('div');
     title.className = 'home-section-title';
     const name = document.createElement('span');
@@ -2226,7 +2258,23 @@ function renderHome() {
     status.dataset.room = key;
     title.appendChild(name);
     title.appendChild(status);
+    if (homeEditing) {
+      const hide = document.createElement('button');
+      hide.className = 'home-hide-room';
+      hide.textContent = '隱藏房間';
+      hide.title = '不在主畫面顯示這個房間，可在上方房間列重新開啟';
+      hide.addEventListener('click', () => {
+        const set = hiddenRooms();
+        set.add(key);
+        homePanel().hidden_rooms = [...set];
+        if (homeRoom === key) homeRoom = '';
+        persistHome();
+        renderHome();
+      });
+      title.appendChild(hide);
+    }
     section.appendChild(title);
+    if (homeEditing && key !== OTHER_ROOM) attachRoomReorder(section, body, 'y', title);
     const grid = document.createElement('div');
     grid.className = 'home-grid' + (entities.length ? '' : ' is-empty');
     grid.dataset.room = key;
@@ -2263,7 +2311,12 @@ function homeAddRoomControl() {
     if (commit && name) {
       const panel = homePanel();
       const rooms = panel.custom_rooms || [];
-      if (!rooms.includes(name) && !homeData.rooms.includes(name)) rooms.push(name);
+      if (!rooms.includes(name) && !homeData.rooms.includes(name)) {
+        rooms.push(name);
+        // After every room there is, in the user's order too.
+        const order = homeRoomNames().filter((r) => r !== OTHER_ROOM);
+        panel.room_order = [...new Set([...order, name])];
+      }
       panel.custom_rooms = rooms;
       homeRoom = name;
       persistHome();
@@ -2487,6 +2540,78 @@ function moveHomeTile(e, room, ids) {
   renderHome();
 }
 
+/* ---- the order of the rooms: pull a capsule or a room's heading ---- */
+// While editing, a room capsule (sideways) or a room's heading (up and down)
+// is pulled to a new place; the rooms follow, in the capsules and on the main
+// screen alike.
+function attachRoomReorder(el, container, axis, handle) {
+  (handle || el).addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || ev.target.closest('button:not(.home-chip), input, .home-chip-x')) return;
+    const x = axis === 'x';
+    const start = x ? ev.clientX : ev.clientY;
+    const s = el.getBoundingClientRect().width / el.offsetWidth || 1;
+    let dragging = false, grab = 0;
+    const siblings = () => [...container.children].filter(
+      (c) => c !== el && c.dataset && c.dataset.room && c.dataset.room !== OTHER_ROOM);
+    const layoutPos = () => {
+      const keep = el.style.transform;
+      el.style.transform = '';
+      const r = el.getBoundingClientRect();
+      el.style.transform = keep;
+      return x ? r.left : r.top;
+    };
+    const follow = (m) => {
+      const p = x ? m.clientX : m.clientY;
+      const delta = (p - grab - layoutPos()) / s;
+      el.style.transform = x ? 'translateX(' + delta + 'px)' : 'translateY(' + delta + 'px)';
+    };
+    const move = (m) => {
+      const p = x ? m.clientX : m.clientY;
+      if (!dragging) {
+        if (Math.abs(p - start) < 8) return;
+        dragging = true;
+        grab = start - layoutPos();
+        el.classList.add('is-reordering');
+        el.setPointerCapture(ev.pointerId);
+      }
+      follow(m);
+      // Past a neighbour's middle: take its place.
+      const r = el.getBoundingClientRect();
+      const mid = x ? r.left + r.width / 2 : r.top + r.height / 2;
+      for (const other of siblings()) {
+        const o = other.getBoundingClientRect();
+        const omid = x ? o.left + o.width / 2 : o.top + o.height / 2;
+        const after = other.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING;
+        if (after && mid < omid) { container.insertBefore(el, other); follow(m); break; }
+        if (!after && mid > omid) { container.insertBefore(el, other.nextSibling); follow(m); break; }
+      }
+    };
+    const end = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', end);
+      el.removeEventListener('pointercancel', end);
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', end);
+      if (!dragging) return;
+      el.classList.remove('is-reordering');
+      el.style.transform = '';
+      const shown = [...container.children]
+        .map((c) => c.dataset && c.dataset.room)
+        .filter((k) => k && k !== OTHER_ROOM);
+      const full = homeRoomNames().filter((k) => k !== OTHER_ROOM);
+      let i = 0;
+      homePanel().room_order = full.map((k) => (shown.includes(k) ? shown[i++] : k));
+      persistHome();
+      renderHome();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', end);
+  });
+}
+
 /* ---- the add sheet: devices that were removed ---- */
 function removeHomeSheet() {
   const sheet = document.getElementById('home-sheet');
@@ -2683,7 +2808,7 @@ const ICON_CHOICES = [
   'thermometer', 'humidity', 'sensor',
 ];
 const ICON_LABELS = {
-  light: '燈', switch: '插座', fan: '風扇', media: '音樂', monitor: '螢幕',
+  light: '燈', switch: '插座', fan: '風扇', media: '音響', monitor: '螢幕',
   lock: '門鎖', door: '門', script: '腳本', thermometer: '溫度',
   humidity: '濕度', sensor: '感測器',
   'mdi:air-conditioner': '冷氣', 'mdi:blinds': '百葉窗',

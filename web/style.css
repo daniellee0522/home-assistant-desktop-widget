@@ -1629,6 +1629,7 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-body {
   flex: 1;
   min-height: 0;
+  padding-top: 18px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
@@ -1730,22 +1731,42 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   pointer-events: none;
 }
 .home-ghost.is-preview { position: absolute; z-index: 7; }
+/* A circle on the tile's edge, not inside it. */
+.home-grid .tile.is-editing { overflow: visible; }
 .home-remove {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: -15px;
+  right: 18px;
   z-index: 3;
-  width: 58px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border: 0;
-  border-radius: 999px;
-  background: rgba(255, 91, 74, 0.92);
+  border-radius: 50%;
+  background: rgba(255, 91, 74, 0.96);
   color: #fff;
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 34px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   cursor: pointer;
 }
+.is-big .home-remove { top: -11px; right: 12px; }
+.home-hide-room {
+  margin-left: auto;
+  height: 38px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--btn-fill);
+  color: var(--text-on-1);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.home-hide-room:hover { background: var(--btn-fill-strong); }
 .home-resize {
   position: absolute;
   right: 10px;
@@ -1807,3 +1828,21 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 }
 .home-sheet-row:hover { background: var(--btn-fill-strong); }
 .home-sheet-room { font-size: 19px; font-weight: 500; color: var(--text-on-2); white-space: nowrap; }
+
+/* Capsules and circles are true ones (semicircular ends), not the squircle
+   every other corner uses. */
+.home-pill, .home-pill-icon, .home-tool, .home-chip, .home-chip-x, .home-chip-input,
+.home-remove, .home-resize, .home-hide-room, .home-sheet-row, .tile .mini-btn {
+  corner-shape: round;
+}
+
+/* A room being pulled to a new place. */
+.home-chip.is-reordering, .home-section.is-reordering {
+  position: relative;
+  z-index: 8;
+  transition: none;
+}
+.home-chip.is-reordering { box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3); }
+.home-section.is-reordering .home-section-title { opacity: 0.85; }
+.home-view.is-editing .home-chip[data-room]:not([data-room=""]),
+.home-view.is-editing .home-section-title { cursor: grab; touch-action: none; }

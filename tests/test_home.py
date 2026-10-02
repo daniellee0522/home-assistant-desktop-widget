@@ -89,13 +89,26 @@ class PanelConfig(unittest.TestCase):
                                     'home_tiles': [{'entity': 'a'}],
                                     'room_overrides': {'light.a': ' Study ', 'b': '', 3: 'x'}}, keep)
         self.assertEqual(panel, {'mode': 'grid', 'tiles': None, 'home_tiles': [{'entity': 'a'}],
-                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'custom_rooms': [],
+                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'custom_rooms': [], 'room_order': [],
                                  'bg_image': '', 'bg_blur': 28})
         self.assertEqual(config.clean_panel({'custom_rooms': [' Den ', 'Den', '', 4]}, keep)['custom_rooms'], ['Den'])
         loud = config.clean_panel({'hidden_rooms': ['Garage', 3], 'bg_image': 'x.jpg', 'bg_blur': 999}, keep)
         self.assertEqual((loud['hidden_rooms'], loud['bg_image'], loud['bg_blur']),
                          (['Garage'], 'x.jpg', 80))
         self.assertEqual(config.clean_panel({'mode': 'home', 'tiles': []}, keep)['mode'], 'home')
+
+
+    def test_the_layout_survives_a_restart(self):
+        # What is saved is read back by the loader, which once dropped the
+        # layout fields along with the rest of a tile's unknown keys.
+        saved = {'mode': 'home', 'home_tiles': [
+            {'id': 'home:light.a', 'entity': 'light.a', 'w': 2, 'h': 2, 'order': 3, 'hidden': True},
+            {'id': 'home:light.b', 'entity': 'light.b', 'w': 2}]}
+        loaded = config.clean_panel(saved, lambda tiles: [config._migrate_tile(t) for t in tiles])
+        a, b = loaded['home_tiles']
+        self.assertEqual((a['w'], a['h'], a['order'], a['hidden']), (2, 2, 3.0, True))
+        self.assertEqual(b['w'], 2)
+        self.assertNotIn('h', b)
 
 
 if __name__ == '__main__':

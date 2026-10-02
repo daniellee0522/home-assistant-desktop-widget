@@ -81,7 +81,8 @@ DEFAULT_CONFIG = {
     # (name, icon) and room_overrides maps an entity to a room name that
     # replaces its Home Assistant area.
     "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {},
-              "hidden_rooms": [], "custom_rooms": [], "bg_image": "", "bg_blur": 28},
+              "hidden_rooms": [], "custom_rooms": [], "room_order": [],
+              "bg_image": "", "bg_blur": 28},
 }
 
 # Widget sizes, named rows x columns: "2x4" is two rows of four tiles. Every
@@ -114,6 +115,21 @@ def domain_of(entity_id):
     return entity_id.split(".", 1)[0] if entity_id and "." in entity_id else ""
 
 
+def tile_layout(t):
+    """What the Home panel keeps about a device's place: its shape in tile
+    cells, whether it was removed, and its order in its room."""
+    out = {}
+    if "w" in t:
+        out["w"] = 2 if t.get("w") == 2 else 1
+    if "h" in t:
+        out["h"] = 2 if t.get("h") == 2 else 1
+    if t.get("hidden"):
+        out["hidden"] = True
+    if isinstance(t.get("order"), (int, float)) and not isinstance(t.get("order"), bool):
+        out["order"] = float(t["order"])
+    return out
+
+
 def _migrate_tile(t):
     """Upgrade tiles saved by the old Tkinter version of this app."""
     entity = t.get("entity", "")
@@ -127,6 +143,7 @@ def _migrate_tile(t):
         "icon": t.get("icon", ""),
         "on_mode": t.get("on_mode", "cool"),
         "temp_step": t.get("temp_step", 1),
+        **tile_layout(t),
     }
 
 
@@ -226,6 +243,7 @@ def clean_panel(panel, clean_tiles):
     overrides = panel.get("room_overrides")
     hidden = panel.get("hidden_rooms")
     custom = panel.get("custom_rooms")
+    order = panel.get("room_order")
     return {
         "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
         "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
@@ -241,6 +259,9 @@ def clean_panel(panel, clean_tiles):
         "custom_rooms": (list(dict.fromkeys(
             str(r).strip()[:40] for r in custom if isinstance(r, str) and str(r).strip()))[:40]
             if isinstance(custom, list) else []),
+        # The order the user put the rooms in; rooms not listed follow.
+        "room_order": (list(dict.fromkeys(str(r) for r in order if isinstance(r, str)))
+                       if isinstance(order, list) else []),
         # A picture behind the panel (a version tag; the file is in the
         # settings folder), blurred by this many pixels.
         "bg_image": str(panel.get("bg_image") or ""),
