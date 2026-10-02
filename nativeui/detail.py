@@ -237,6 +237,10 @@ class DetailCard(OverlayScene):
 
     def _load_states(self):
         try:
+            for _ in range(200):                    # the facade is still being made
+                if getattr(self.facade, "_native", None) is not None:
+                    break
+                time.sleep(0.01)
             states = self.api.fetch_initial_states()
             if states:
                 self.facade.run_on_ui_thread(lambda: self.push_states(list(states.items())))

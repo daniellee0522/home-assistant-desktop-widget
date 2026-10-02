@@ -766,6 +766,7 @@ class Scene(GlassMixin, QWidget):
         self.css_w = self.css_h = 1.0
         self.t = ui_tokens("light")
         self.fade_alpha = 1.0            # the whole window's opacity (entrances and exits)
+        self.anim_alpha, self.anim_zoom, self.anim_origin = 1.0, 1.0, (1.0, 1.0)   # the glass and card as one
         self.init_glass()
         self._hwnd = 0
         self._paint_pending = False
@@ -842,8 +843,13 @@ class Scene(GlassMixin, QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
-        if self.fade_alpha < 1:
-            p.setOpacity(self.fade_alpha)
+        if self.fade_alpha * self.anim_alpha < 1:
+            p.setOpacity(self.fade_alpha * self.anim_alpha)
+        if self.anim_zoom != 1.0:
+            ox, oy = self.anim_origin[0] * self.width(), self.anim_origin[1] * self.height()
+            p.translate(ox, oy)
+            p.scale(self.anim_zoom, self.anim_zoom)
+            p.translate(-ox, -oy)
         if self.glass is not None and not self.system_glass:
             p.drawImage(0, 0, self.glass)
         p.scale(self.scale / self.dpi, self.scale / self.dpi)

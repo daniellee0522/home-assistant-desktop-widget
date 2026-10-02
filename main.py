@@ -66,6 +66,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
 
 import qtshell as webview  # noqa: E402
 from nativeui import detail as native_detail  # noqa: E402
+from nativeui import panel as native_panel  # noqa: E402
 from nativeui import widget as native_widget  # noqa: E402
 
 import config as cfgmod  # noqa: E402
@@ -275,9 +276,13 @@ class Api:
                 self._flyout_last_resize_seq = -1
                 init = self._flyout_size or _widget_initial_size(
                     first.get("size", "2x4"), self._cfg.get("zoom", 100))
-                window = _create_overlay_window(
-                    self, "HA Widgets Panel", "flyout", init[0], init[1], rehide=False,
-                    x=200, y=200)
+                if os.environ.get("HA_WIDGET_WEB"):
+                    window = _create_overlay_window(
+                        self, "HA Widgets Panel", "flyout", init[0], init[1], rehide=False,
+                        x=200, y=200)
+                else:
+                    window = native_panel.create_panel(self)
+                    ready.set()
                 window.events.shown += self._apply_capture_exclusion
                 window.events.deactivated += lambda: threading.Thread(
                     target=self.dismiss_flyout, daemon=True).start()
