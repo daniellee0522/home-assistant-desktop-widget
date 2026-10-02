@@ -140,7 +140,7 @@ class Lens:
         """The card's shape (fourth-power superellipse), anti-aliased."""
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QColor, QImage, QPainter
-        import render
+        from nativeui import render
         img = QImage(self.w, self.h, QImage.Format_Grayscale8)
         img.fill(0)
         q = QPainter(img)
@@ -158,7 +158,7 @@ class Lens:
         if m is None:
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QColor, QImage, QPainter
-            import render
+            from nativeui import render
             img = QImage(w, h, QImage.Format_Grayscale8)
             img.fill(0)
             q = QPainter(img)

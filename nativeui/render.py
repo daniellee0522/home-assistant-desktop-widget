@@ -10,6 +10,7 @@ import json
 import math
 import mmap
 import os
+import sys
 
 from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
@@ -17,7 +18,8 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient
 from PySide6.QtSvg import QSvgRenderer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WEB = os.path.join(os.path.dirname(HERE), "web")
+# Frozen, the web files live under PyInstaller's _MEIPASS.
+WEB = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(HERE)), "web")
 
 CELL_W, CELL_H, PAD, GAP = 152, 146, 14, 14
 RADIUS_TILE = 70
@@ -58,7 +60,13 @@ LIQUID_RIMS = {"edge": (255, 255, 255, 0.2), "edge_top": (255, 255, 255, 0.48),
 LIQUID_DARK_DIM = {"panel": (26, 29, 34, 0.52), "tile_on": (53, 63, 76, 0.52),
                    "on_text1": (255, 255, 255, 0.9), "on_text2": (226, 235, 242, 0.72),
                    "tile_off": (18, 26, 37, 0.4)}
-RADII = {"classic": 70, "liquid": 62}
+# data-glass-style="windows": a frosted pane in the Windows manner; tiles 32 px round, a
+# thin light rim and no top highlight.
+WINDOWS = {"light": {"panel": (231, 237, 244, 0.72), "tile_off": (58, 68, 81, 0.66)},
+           "dark": {"panel": (33, 38, 46, 0.76), "tile_off": (58, 68, 81, 0.66)}}
+WINDOWS_RIMS = {"edge": (255, 255, 255, 0.2), "edge_top": None, "edge_on": (255, 255, 255, 0.2),
+                "edge_on_top": None, "card_edge": (255, 255, 255, 0.42), "card_edge_top": None}
+RADII = {"classic": 70, "liquid": 62, "windows": 32}
 
 
 def tokens(theme, dim=False, style="classic"):
@@ -70,9 +78,16 @@ def tokens(theme, dim=False, style="classic"):
     if style == "liquid":
         t.update(LIQUID[theme])
         t.update(LIQUID_RIMS)
+    elif style == "windows":
+        t.update(WINDOWS[theme])
+        t.update(WINDOWS_RIMS)
     if dim:
-        # The rims of the liquid tiles are literals: the dimmed tokens do not reach them.
-        t.update({k: v for k, v in DIM.items() if not (style == "liquid" and k.startswith("edge"))})
+        # The rims of the liquid and Windows tiles are literals: the dimmed tokens do not
+        # reach them (the Windows card's rim is a token).
+        keep = ("edge", "edge_on") if style != "classic" else ()
+        t.update({k: v for k, v in DIM.items() if k not in keep})
+        if style != "liquid":
+            t["card_edge"] = DIM["edge"]
         if style == "liquid" and theme == "dark":
             t.update(LIQUID_DARK_DIM)
     return t
@@ -153,7 +168,8 @@ _svg_cache = {}
 def _icon_table():
     global _icons
     if _icons is None:
-        with open(os.path.join(HERE, "icon_paths.json"), encoding="utf-8") as f:
+        base = os.path.join(sys._MEIPASS, "nativeui") if hasattr(sys, "_MEIPASS") else HERE
+        with open(os.path.join(base, "icon_paths.json"), encoding="utf-8") as f:
             _icons = json.load(f)
     return _icons
 
@@ -215,6 +231,16 @@ def is_on(domain, st):
 
 MOMENTARY = ("scene", "script", "automation")
 READONLY = ("sensor", "binary_sensor")
+
+
+def is_readonly(domain):
+    """Sensors and every kind of device the widget has no control for."""
+    return domain in READONLY or domain not in DEFAULT_ICON
+
+
+def has_detail_on_hold(domain):
+    """Tapped it acts; held it opens the detail card (a lock and the momentary kinds do not)."""
+    return domain in ("light", "switch", "input_boolean", "climate", "fan", "cover", "media_player", "vacuum")
 DEFAULT_ICON = {"light": "light", "switch": "switch", "input_boolean": "switch",
                 "climate": "mdi:air-conditioner", "fan": "fan", "cover": "mdi:blinds",
                 "media_player": "media", "lock": "lock", "vacuum": "mdi:robot-vacuum",
@@ -446,14 +472,27 @@ def tile_layout(size, count):
     per_row = cols // sc
     w, h = sc * CELL_W + (sc - 1) * GAP, sr * CELL_H + (sr - 1) * GAP
     rects = []
-    for i in range(min(count, per_row * (rows // sr))):
+    for i in range(count):
         rects.append((PAD + (i % per_row) * sc * (CELL_W + GAP),
                       PAD + (i // per_row) * sr * (CELL_H + GAP), w, h))
     return form, rects
 
 
+def scroll_range(size, count):
+    """How far a widget with more tiles than fit can scroll (CSS px)."""
+    form, rects = tile_layout(size, count)
+    if not rects:
+        return 0
+    _, H = widget_size(size)
+    bottom = max(y + h for _, y, _, h in rects)
+    return max(0, bottom - (H - PAD))
+
+
 def mini_buttons(form, cw, ch):
     """The climate tile's round - and + in the tile's own units: [(rect, delta sign)]."""
+    if form == "small":
+        # In the corner, shown while the pointer is over the tile.
+        return [(QRectF(cw - 10 - 30 - 6 - 30, 10, 30, 30), -1), (QRectF(cw - 10 - 30, 10, 30, 30), 1)]
     if form == "bar":
         x, top = cw - 16 - 40, (ch - 90) / 2
         return [(QRectF(x, top, 40, 40), -1), (QRectF(x, top + 50, 40, 40), 1)]
@@ -485,7 +524,7 @@ def draw_centred(p, text, f, color, rect):
                          rect.top() + (rect.height() - fm.height() / 10) / 2 + fm.ascent() / 10))
 
 
-def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
+def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     """What is on a tile, in the tile's own units (a big tile is these units
     zoomed by 1.4), from its top-left corner."""
     domain = tile["domain"]
@@ -495,7 +534,7 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
     shown = climate_badge(st, on) if domain == "climate" and ok and not tile.get("icon") else None
     reading = shown if roomy else None
     badge = None if roomy else shown
-    readonly = domain in READONLY
+    readonly = is_readonly(domain)
     value = value_text(domain, st) if ok and not badge and not reading else ""
     readout = readonly and bool(value)
     c1 = tcol["on_text1"] if on else tcol["off_text1"]
@@ -594,9 +633,14 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
                 draw_text_fade(p, value, font(25.5, QFont.Bold), c1,
                                QRectF(pad, 78 if big else 56, textw, 28), False)
 
-    # -- the climate buttons, always there on a long or big tile ----------
-    if domain == "climate" and on:
-        f = font(26 if form == "bar" else 28, QFont.Bold)
+    if not ok:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(ACCENT["red"]))
+        p.drawEllipse(QRectF(cw - 12 - 7, ch - 12 - 7, 7, 7))
+
+    # -- the climate buttons: always on a long or big tile, on hover on a small one ----
+    if domain == "climate" and on and (roomy or hover):
+        f = font({"bar": 26, "big": 28}.get(form, 20), QFont.Bold)
         for rect, sign in mini_buttons(form, cw, ch):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 20))
@@ -604,7 +648,8 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim):
             draw_centred(p, "+" if sign > 0 else "\u2212", f, "#1d1d1f", rect)
 
 
-def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False):
+def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False,
+              hover=False, pressed=False, flash=0.0):
     domain = tile["domain"]
     on = st is not None and domain not in MOMENTARY and is_on(domain, st)
     shape = squircle(x, y, w, h, tcol["radius_tile"])
@@ -617,12 +662,18 @@ def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False):
             inner_shadow(p, shape, rgba(tcol["edge_on_top"]), dy=1, spread=0)
     else:
         inner_shadow(p, shape, rgba(tcol["edge"]))
-        inner_shadow(p, shape, rgba(tcol["edge_top"]), dy=1, spread=0)
+        if tcol["edge_top"]:
+            inner_shadow(p, shape, rgba(tcol["edge_top"]), dy=1, spread=0)
+    if flash > 0:
+        # tile-flash: an inner glow that swells and fades over 0.6 s (flash is 1 -> 0 of it).
+        t = 1 - flash
+        glow = t / 0.3 if t < 0.3 else (1 - t) / 0.7
+        inner_shadow(p, shape, QColor(255, 255, 255, round(255 * 0.35 * max(0.0, glow))), spread=6)
     zoom = BIG_ZOOM if form == "big" else 1.0
     p.save()
     p.translate(x, y)
     p.scale(zoom, zoom)
-    draw_content(p, tile, st, w / zoom, h / zoom, form, theme, tcol, dim)
+    draw_content(p, tile, st, w / zoom, h / zoom, form, theme, tcol, dim, hover)
     p.restore()
 
 
@@ -658,9 +709,48 @@ def draw_liquid_rim(p, W, H, radius, dark):
     p.restore()
 
 
-def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic"):
+def draw_empty(p, W, H, small, theme, raw_theme, dim):
+    """An empty widget's message, and the rectangle of its button (None when there is none)."""
+    tcol = tokens(theme, dim)
+    light_title = raw_theme == "light"
+    title_c = tokens("light")["on_text1"] if light_title else tcol["off_text1"]
+    sub_c = tcol["on_text2"] if raw_theme == "light" else tcol["off_text2"]
+    if dim:
+        title_c, sub_c = tcol["off_text1"], tcol["off_text2"]
+    items = [("\u2302", font(60 if small else 80, QFont.Normal), ACCENT["blue"], 60 if small else 80),
+             ("尚未設定任何配件", font(26 if small else 40, QFont.Bold), title_c, (26 if small else 40) * 1.2)]
+    if not small:
+        items += [("按這裡開始設定 Home Assistant", font(26, QFont.Normal), sub_c, 26 * 1.25)]
+    btn_h = 26 * 1.33 + 28
+    total = sum(h for *_, h in items) + 8 * (len(items) - 1) + (0 if small else 8 + 8 + btn_h)
+    y = (H - total) / 2
+    for text, f, color, h in items:
+        draw_centred(p, text, f, color, QRectF(20, y, W - 40, h))
+        y += h + 8
+    if small:
+        return None
+    f = font(26, QFont.DemiBold)
+    tw = QFontMetricsF(f).horizontalAdvance("開啟設定") / 10 * HSCALE
+    rect = QRectF((W - tw - 72) / 2, y + 8, tw + 72, btn_h)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(ACCENT["blue"]))
+    p.drawPath(squircle_pill(rect))
+    draw_centred(p, "開啟設定", f, "#ffffff", rect)
+    return rect
+
+
+def squircle_pill(rect):
+    path = QPainterPath()
+    path.addRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+    return path
+
+
+def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic",
+                ui=None, raw_theme=None):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
-    the desktop behind it (a QImage), stretched over the card."""
+    the desktop behind it (a QImage), stretched over the card. `ui`: what the pointer is
+    doing - {"hover": i, "pressed": i, "flash": {i: 1..0}, "scroll": px}."""
+    ui = ui or {}
     tcol = tokens(theme, dim, style)
     W, H = widget_size(size)
     form, rects = tile_layout(size, len(tiles))
@@ -677,9 +767,28 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
     p.setBrush(rgba(tcol["panel"]))
     p.drawPath(card)
     inner_shadow(p, card, rgba(tcol["card_edge"]))
-    inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
+    if tcol["card_edge_top"]:
+        inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)
     if style == "liquid":
         draw_liquid_rim(p, W, H, tcol["radius_panel"], theme == "dark")
-    for tile, (x, y, w, h) in zip(tiles, rects):
-        draw_tile(p, tile, states.get(tile["entity"]), x, y, w, h, theme, tcol, form, dim)
+    if not tiles:
+        draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim)
+    else:
+        p.save()
+        p.setClipRect(QRectF(PAD, PAD, W - 2 * PAD, H - 2 * PAD))
+        p.translate(0, -ui.get("scroll", 0))
+        for i, (tile, (x, y, w, h)) in enumerate(zip(tiles, rects)):
+            if y + h - ui.get("scroll", 0) < 0 or y - ui.get("scroll", 0) > H:
+                continue
+            pressed = ui.get("pressed") == i
+            p.save()
+            if pressed:
+                k = 0.95 if (has_detail_on_hold(tile["domain"]) or is_readonly(tile["domain"])) else 0.96
+                p.translate(x + w / 2, y + h / 2)
+                p.scale(k, k)
+                p.translate(-(x + w / 2), -(y + h / 2))
+            draw_tile(p, tile, states.get(tile["entity"]), x, y, w, h, theme, tcol, form, dim,
+                      hover=ui.get("hover") == i, flash=(ui.get("flash") or {}).get(i, 0.0))
+            p.restore()
+        p.restore()
     p.restore()

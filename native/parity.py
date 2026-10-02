@@ -1,4 +1,4 @@
-"""Renders the same demo widget with the web page and with native/render.py
+"""Renders the same demo widget with the web page and with nativeui/render.py
 and compares them: python native/parity.py [outdir]
 
 Both draw on the same picture (a generated gradient with some texture), so
@@ -14,15 +14,14 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "native"))
+
 
 from PySide6.QtCore import QTimer, Qt, QUrl                      # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter                # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView             # noqa: E402
 from PySide6.QtWidgets import QApplication                        # noqa: E402
 
-import liquid                                                     # noqa: E402
-import render                                                     # noqa: E402
+from nativeui import liquid, render                               # noqa: E402
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "native", "out")
 os.makedirs(OUT, exist_ok=True)
@@ -73,10 +72,10 @@ bg_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 bg_qimage = QImage.fromData(buf.getvalue())
 # (name, widget size, how many of the demo tiles, theme, dimmed)
 SCENES = []
-for style in ("classic", "liquid"):
+for style in ("classic", "windows", "liquid"):
     for theme in ("light", "dark"):
         for dim in (False, True):
-            tag = ("liquid-" if style == "liquid" else "") + theme + ("-dim" if dim else "")
+            tag = ("" if style == "classic" else style + "-") + theme + ("-dim" if dim else "")
             SCENES += [("small-" + tag, "2x4", 8, theme, dim, style), ("bar-" + tag, "2x4", 4, theme, dim, style),
                        ("big-" + tag, "2x4", 2, theme, dim, style), ("4x4-" + tag, "4x4", 16, theme, dim, style)]
 ONLY = sys.argv[2].split(",") if len(sys.argv) > 2 else None
