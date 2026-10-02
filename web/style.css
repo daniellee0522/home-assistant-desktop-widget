@@ -1194,6 +1194,18 @@ html.is-popover-window[data-theme="dark"][data-glass-style="liquid"] .detail-pop
    card, so anything larger would be clipped. The animation is on
    #view-grid, not #stage, which the window is measured from. The card and
    its frosted fill move as one. */
+/* The panel shows two rows of tiles; more scroll, a row at a time. */
+.is-flyout-window .tiles-grid {
+  max-height: calc(2 * var(--tile-h) + var(--gap));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  scroll-snap-type: y mandatory;
+  pointer-events: auto;
+}
+.is-flyout-window .tiles-grid::-webkit-scrollbar { display: none; }
+.is-flyout-window .tiles-grid .tile { scroll-snap-align: start; }
+
 .is-flyout-window #view-grid,
 .is-flyout-window #backdrop-glass {
   transform-origin: 100% 100%;

@@ -150,8 +150,31 @@ function uniqueByEntity(tiles) {
 
 let settingsWidgetId = '';
 
+// The editor edits a widget, or the tray panel, whose tile list is edited
+// like a widget's. It is shown in a 2x4 frame of ordinary tiles and scrolls
+// past eight.
+const PANEL_ID = '__panel';
+
+function panelTarget(cfg) {
+  const panel = (cfg || CONFIG).panel || {};
+  return { id: PANEL_ID, size: '2x4', panel: true, tiles: Array.isArray(panel.tiles) ? panel.tiles : [] };
+}
+
+// The panel shows every widget's devices until it has a list of its own.
+function ownPanelTiles() {
+  if (CONFIG.panel && Array.isArray(CONFIG.panel.tiles)) return;
+  const copies = uniqueByEntity(allTiles()).map((t) => Object.assign({}, t, { id: newTileId() }));
+  CONFIG.panel = Object.assign({}, CONFIG.panel, { tiles: copies });
+}
+
+function newTileId() {
+  return (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : ('tile-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+}
+
 // The widget the settings window is editing.
 function settingsWidget(cfg) {
+  if (settingsWidgetId === PANEL_ID) return panelTarget(cfg);
   const widgets = (cfg || CONFIG).widgets || [];
   return widgets.find((w) => w.id === settingsWidgetId) || widgets[0] || null;
 }
@@ -325,11 +348,11 @@ function tileFormFor(cols, rows, count) {
 
 // Everything a widget's layout needs, as CSS variables, for a size and a
 // number of tiles.
-function widgetGeometry(size, count) {
+function widgetGeometry(size, count, form) {
   const [cols, rows] = WIDGET_SIZES[size] || WIDGET_SIZES['2x4'];
   const width = cols * CELL_W + (cols - 1) * WIDGET_GAP + 2 * WIDGET_PAD;
   const height = rows * CELL_H + (rows - 1) * WIDGET_GAP + 2 * WIDGET_PAD;
-  const form = tileFormFor(cols, rows, count);
+  form = form || tileFormFor(cols, rows, count);
   const span = form === 'big' ? [2, 2] : form === 'bar' ? [2, 1] : [1, 1];
   return {
     cols, rows, width, height, form, small: cols * rows === 1,
@@ -2323,8 +2346,17 @@ function renderEditorChips() {
     b.addEventListener('click', () => selectEditorWidget(w.id));
     chips.appendChild(b);
   });
+  const onPanel = !!(current && current.panel);
+  const panelChip = document.createElement('button');
+  panelChip.className = 'widget-chip' + (onPanel ? ' is-active' : '');
+  panelChip.textContent = '系統匣面板';
+  panelChip.addEventListener('click', () => selectEditorWidget(PANEL_ID));
+  chips.appendChild(panelChip);
   const sizes = document.getElementById('widget-size-chips');
   sizes.innerHTML = '';
+  sizes.hidden = onPanel;
+  document.getElementById('panel-follow-btn').hidden =
+    !(onPanel || (CONFIG.panel && Array.isArray(CONFIG.panel.tiles)));
   for (const size of Object.keys(WIDGET_SIZES)) {
     const b = document.createElement('button');
     b.className = 'widget-chip' + (current && current.size === size ? ' is-active' : '');
@@ -2332,15 +2364,30 @@ function renderEditorChips() {
     b.addEventListener('click', () => setWidgetSize(size));
     sizes.appendChild(b);
   }
-  document.getElementById('remove-widget-btn').disabled = widgets.length <= 1;
+  const removeBtn = document.getElementById('remove-widget-btn');
+  removeBtn.hidden = onPanel;
+  removeBtn.disabled = widgets.length <= 1;
   const hint = document.getElementById('widget-hint');
   hint.hidden = widgets.length <= WIDGET_SOFT_LIMIT;
   hint.textContent = '已超過 ' + WIDGET_SOFT_LIMIT
     + ' 個 Widget，每多一個都會多用一份記憶體 (約 60 MB)。';
 }
 
-function selectEditorWidget(id) {
+async function selectEditorWidget(id) {
   settingsWidgetId = id;
+  if (id === PANEL_ID) {
+    ownPanelTiles();
+    await persistTiles();
+  }
+  resolveWindowTiles();
+  renderEditor();
+}
+
+// Back to showing every widget's devices in the panel.
+async function panelFollowWidgets() {
+  CONFIG.panel = Object.assign({}, CONFIG.panel, { tiles: null });
+  try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (e) { /* ignore */ }
+  settingsWidgetId = '';
   resolveWindowTiles();
   renderEditor();
 }
@@ -2394,7 +2441,7 @@ function renderEditorPreview() {
   host.innerHTML = '';
   const widget = settingsWidget();
   if (!widget) return;
-  const geometry = widgetGeometry(widget.size, widget.tiles.length);
+  const geometry = widgetGeometry(widget.size, widget.tiles.length, widget.panel ? 'small' : '');
   const scope = document.createElement('div');
   applyWidgetGeometry(scope, geometry);
   const frame = document.createElement('div');
@@ -2561,7 +2608,7 @@ function attachMapDrag(el, widget, scale) {
 
 async function setWidgetSize(size) {
   const w = settingsWidget();
-  if (!w || w.size === size) return;
+  if (!w || w.panel || w.size === size) return;
   try { await window.pywebview.api.set_widget_size(w.id, size); } catch (e) { /* ignore */ }
   const mine = (CONFIG.widgets || []).find((x) => x.id === w.id);
   if (mine) mine.size = size;
@@ -2571,7 +2618,7 @@ async function setWidgetSize(size) {
 
 async function removeWidget() {
   const w = settingsWidget();
-  if (!w || (CONFIG.widgets || []).length <= 1) return;
+  if (!w || w.panel || (CONFIG.widgets || []).length <= 1) return;
   settingsWidgetId = '';
   try { await window.pywebview.api.remove_widget(w.id); } catch (e) { /* ignore */ }
   resolveWindowTiles();
@@ -2580,11 +2627,13 @@ async function removeWidget() {
 }
 
 async function persistTiles() {
+  // Taken before the first call: its answer pushes the saved preferences
+  // back, which replaces CONFIG, panel list included.
+  const widgets = CONFIG.widgets;
+  const panel = CONFIG.panel;
   try {
-    await window.pywebview.api.save_widgets(CONFIG.widgets);
-    if (CONFIG.panel && Array.isArray(CONFIG.panel.tiles)) {
-      await window.pywebview.api.save_panel(CONFIG.panel);
-    }
+    await window.pywebview.api.save_widgets(widgets);
+    if (panel && Array.isArray(panel.tiles)) await window.pywebview.api.save_panel(panel);
   } catch (e) { /* ignore */ }
   renderGrid();
 }
@@ -2730,7 +2779,7 @@ function renderPickerList(query) {
 
 async function addTileFromEntity(e) {
   const tile = {
-    id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('tile-' + Date.now() + '-' + Math.random().toString(36).slice(2)),
+    id: newTileId(),
     entity: e.entity_id, domain: e.domain,
     room: e.name || e.entity_id, label: '', icon: '', on_mode: 'cool', temp_step: 1,
   };
@@ -2839,6 +2888,7 @@ function init() {
     await savePref({ glass_sampling: e.target.value });
     restartSampling();
   });
+  document.getElementById('panel-follow-btn').addEventListener('click', panelFollowWidgets);
   document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
     await savePref({ panel_theme: e.target.value });
   });

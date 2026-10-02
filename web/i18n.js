@@ -16,6 +16,7 @@ const EN_TEXT = {
   'Windows 玻璃':'Windows glass', '每列數量':'Columns', '工作列面板':'Tray panel', '同上':'Same as widget',
   '毛玻璃更新':'Glass updates', '動態 (桌布變動時即時更新)':'Live (follows every wallpaper change)', '靜態 (只在移動 widget 時更新，最省資源)':'Still (updates only when the widget moves, lightest)',
   '使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。':'With an animated wallpaper (such as Wallpaper Engine), live re-samples on every frame. Neither costs anything while the wallpaper is paused or still; choose still to save resources while it plays.',
+  '系統匣面板':'Tray panel', '改為顯示所有 Widget 的配件':"Show every widget's devices instead",
   '開啟 Widget 編輯器':'Open widget editor', 'Widget 編輯器':'Widget editor',
   '用拖曳新增、擺放 Widget，並編排每個 Widget 顯示的配件。也可以在桌面上對 Widget 按右鍵。':'Drag to add and place widgets, and arrange the devices each one shows. You can also right-click a widget on the desktop.',
   '拖曳新增、擺放，並編排配件':'Drag to add, place and arrange devices', '拖曳到桌面新增':'Drag onto the desktop to add',
