@@ -88,7 +88,7 @@ function iconNameFor(tile, state) {
   const haIcon = state && state.attributes && state.attributes.icon;
   if (typeof haIcon === 'string' && haIcon.startsWith('mdi:') &&
       window.MDI_PATHS && window.MDI_PATHS[haIcon.slice(4)]) return haIcon;
-  if (tile.domain === 'lock' && state && state.state !== 'locked') return 'lock-open';
+  if (tile.domain === 'lock' && isUnlocked(state)) return 'lock-open';
   // A sensor's generic dot says nothing; Home Assistant already tells us
   // what it measures, so use it rather than making people pick by hand.
   if (tile.domain === 'sensor') {
@@ -1401,12 +1401,28 @@ function installWindowDrag() {
 /* ============================================================
  * Grid rendering
  * ============================================================ */
+// A lock is "on" the way a light is when it is not locked: unlocked, open,
+// unlocking, jammed. One that does not answer, or is on its way to locked, is
+// not.
+function isUnlocked(state) {
+  const s = state && state.state;
+  return !!s && !['locked', 'locking', 'unavailable', 'unknown'].includes(s);
+}
+
+// What a lock says about itself.
+function lockLabel(state) {
+  const s = state ? state.state : '';
+  const words = { locked: '已上鎖', locking: '上鎖中', unlocked: '未上鎖', unlocking: '解鎖中',
+    open: '已開啟', opening: '開啟中', jammed: '卡住了', unavailable: '無法連線', unknown: '狀態不明' };
+  return words[s] || '未上鎖';
+}
+
 function isOnState(domain, state) {
   if (!state) return false;
   switch (domain) {
     case 'climate': return state.state && state.state !== 'off';
     case 'cover': return state.state === 'open';
-    case 'lock': return state.state === 'unlocked';
+    case 'lock': return isUnlocked(state);
     case 'media_player': return state.state === 'playing';
     case 'vacuum': return state.state === 'cleaning' || state.state === 'returning';
     default: return state.state === 'on';
@@ -1430,25 +1446,47 @@ function iconKind(icon) {
   return '';
 }
 
+function darkTheme() {
+  const theme = document.documentElement.getAttribute('data-theme');
+  return theme === 'dark' || (theme !== 'light' && !!window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+// What a bulb is coloured while it is on. In the dark theme a white light is
+// the same yellow as anything given a bulb icon, and only a colour light
+// shows its colour; in the light theme a light shows the colour it reports.
+function lightColor(attrs) {
+  const colour = Array.isArray(attrs.rgb_color)
+    && (!darkTheme() || ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(attrs.color_mode));
+  return colour ? 'rgb(' + attrs.rgb_color.join(',') + ')' : 'var(--accent-yellow)';
+}
+
+// An icon chosen by hand for a device of another kind: coloured as that kind
+// is when it is on, and plain when it is off, as the device itself decides.
+function iconColorAs(kind, attrs, on) {
+  if (!on) return 'var(--text-off-1)';
+  switch (kind) {
+    case 'light': return lightColor(attrs);
+    case 'climate': return 'var(--accent-cyan)';
+    case 'media_player': return 'var(--accent-green)';
+    case 'lock': return 'var(--accent-green-soft)';
+    default: return 'var(--accent-blue)';
+  }
+}
+
 function iconColorFor(domain, state, on) {
   const attrs = (state && state.attributes) || {};
   switch (domain) {
     case 'light':
       if (!on) return 'var(--text-off-1)';
-      // A colour light shows its colour; a white one (and anything given a
-      // bulb icon) the same yellow, whichever kind of device it is.
-      if (Array.isArray(attrs.rgb_color) &&
-          ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(attrs.color_mode)) {
-        return 'rgb(' + attrs.rgb_color.join(',') + ')';
-      }
-      return 'var(--accent-yellow)';
+      return lightColor(attrs);
     case 'switch': case 'input_boolean': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'climate': return on ? 'var(--accent-cyan)' : 'var(--text-off-1)';
     case 'fan': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'cover': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'media_player': return on ? 'var(--accent-green)' : 'var(--text-off-1)';
     // Unlocked is normal, not an alert: soft green.
-    case 'lock': return state && state.state === 'locked' ? 'var(--text-off-1)' : 'var(--accent-green-soft)';
+    case 'lock': return isUnlocked(state) ? 'var(--accent-green-soft)' : 'var(--text-off-1)';
     case 'vacuum': return on ? 'var(--accent-blue)' : 'var(--text-off-1)';
     case 'scene': case 'script': case 'automation': return 'var(--accent-blue)';
     case 'binary_sensor': return state && state.state === 'on' ? 'var(--accent-green)' : 'var(--text-off-1)';
@@ -1504,7 +1542,7 @@ function defaultLabel(domain, state) {
   const map = {
     light: '燈光', switch: '插座', input_boolean: '虛擬開關', climate: s, fan: '風扇',
     cover: s === 'open' ? '開啟' : s === 'closed' ? '關閉' : s,
-    media_player: mediaLabel(state), lock: s === 'locked' ? '已上鎖' : '未上鎖',
+    media_player: mediaLabel(state), lock: lockLabel(state),
     vacuum: s, scene: '場景', script: '腳本', automation: '自動化',
     binary_sensor: s === 'on' ? '偵測到' : '正常',
   };
@@ -1535,9 +1573,10 @@ function tileEl(tile, form, preview) {
   } else {
     iconWrap.innerHTML = svgIcon(iconNameFor(tile, state));
     // The icon chosen by hand decides the colour, the device's kind otherwise.
-    iconWrap.style.color = ok
-      ? iconColorFor(tile.icon ? (iconKind(tile.icon) || domain) : domain, state, on)
-      : 'var(--text-off-1)';
+    const kind = tile.icon ? iconKind(tile.icon) : '';
+    iconWrap.style.color = !ok ? 'var(--text-off-1)'
+      : kind && kind !== domain ? iconColorAs(kind, (state && state.attributes) || {}, on)
+      : iconColorFor(domain, state, on);
   }
   div.appendChild(iconWrap);
 
@@ -1858,7 +1897,8 @@ const OTHER_ROOM = '\u0000other';       // the room of devices that have none
 const HOME_GAP = 14, HOME_TILE_W = 152, HOME_TILE_H = 146, HOME_BIG_ZOOM = 1.4;
 let homeData = { entities: [], sensors: [], rooms: [] };
 let homeRoom = '';                      // the room being looked at; '' = all
-let homeEditing = false;
+let homeEditing = false;                // the rooms are being edited
+let homeCatEditing = false;             // the open capsule is being edited
 let homeSheet = false;                  // the add sheet is open
 let homeCategory = null;                // the capsule that is open
 let homeAddingRoom = false;             // the new-room field is showing
@@ -1875,7 +1915,10 @@ function homeMode() { return !!(CONFIG.panel && CONFIG.panel.mode === 'home'); }
 function isHomeId(id) { return typeof id === 'string' && id.startsWith(HOME_PREFIX); }
 function homePanel() { return CONFIG.panel || (CONFIG.panel = { mode: 'home', tiles: null }); }
 function roomKey(area) { return area || OTHER_ROOM; }
+// Three separate choices: which rooms the main screen shows, which room
+// buttons there are, and which devices a capsule counts.
 function hiddenRooms() { return new Set(homePanel().hidden_rooms || []); }
+function hiddenChips() { return new Set(homePanel().hidden_chips || []); }
 function homeEntityById(entityId) {
   return homeData.entities.find((e) => e.entity_id === entityId)
     || homeData.sensors.find((e) => e.entity_id === entityId);
@@ -1941,6 +1984,7 @@ async function loadHome() {
 function homeReset() {
   homeCategory = null;
   homeEditing = false;
+  homeCatEditing = false;
   homeSheet = false;
   homeAddingRoom = false;
   homeRoom = '';
@@ -1949,7 +1993,8 @@ function homeReset() {
 // What is shown: not deleted, and in a room that is not switched off.
 function homeVisible(e) {
   const rec = homeRecord(e.entity_id);
-  return !(rec && rec.hidden) && !hiddenRooms().has(roomKey(e.area));
+  const key = roomKey(e.area);
+  return !(rec && rec.hidden) && (homeRoom === key || !hiddenRooms().has(key));
 }
 
 // A room's devices in the order the user left them, the rest in the default
@@ -1981,13 +2026,20 @@ function homeGroups() {
     groups.get(key).push(e);
   }
   if (homeEditing) {
+    // While editing, a room with nothing in it is somewhere to drop a device,
+    // and one that is off the main screen is there to be put back.
     const hidden = hiddenRooms();
     for (const key of homeRoomNames()) {
-      if (key === OTHER_ROOM || hidden.has(key) || (homeRoom && homeRoom !== key)) continue;
+      if (key === OTHER_ROOM || (homeRoom && homeRoom !== key)) continue;
       if (!groups.has(key)) groups.set(key, []);
+      if (hidden.has(key) && !homeRoom) groups.get(key).stub = true;
     }
   }
-  return [...groups.entries()].sort(roomSort).map(([key, list]) => [key, homeOrdered(list)]);
+  return [...groups.entries()].sort(roomSort).map(([key, list]) => {
+    const ordered = homeOrdered(list);
+    ordered.stub = list.stub;
+    return [key, ordered];
+  });
 }
 
 // Every room that can be chosen: Home Assistant's, and the ones made here.
@@ -2024,7 +2076,7 @@ function rangeText(values, digits, unit) {
 
 function sensorVisible(s) {
   const rec = homeRecord(s.entity_id);
-  return !(rec && rec.hidden) && !hiddenRooms().has(roomKey(s.area));
+  return !(rec && rec.hidden);
 }
 
 function homeSensorsIn(key) {
@@ -2041,10 +2093,8 @@ function readingsText(sensors) {
 /* ---- the capsules (the Home app's header) ---- */
 // Every device of a capsule's kind, whatever its room.
 function categoryAll(cat) {
-  const gone = (e) => { const r = homeRecord(e.entity_id); return !!(r && r.hidden); };
-  const list = cat.id === 'env' ? homeData.sensors
+  return cat.id === 'env' ? homeData.sensors
     : homeData.entities.filter((e) => cat.domains.includes(e.domain));
-  return list.filter((e) => !gone(e));
 }
 
 function categoryChosen(e) { const r = homeRecord(e.entity_id); return !(r && r.cat_hidden); }
@@ -2064,8 +2114,7 @@ function categoryPill(cat, members) {
   }
   if (cat.id === 'security') {
     const locks = members.filter((e) => e.domain === 'lock');
-    const open = locks.filter((e) => STATES[e.entity_id]
-      && STATES[e.entity_id].state !== 'locked' && STATES[e.entity_id].state !== 'unavailable').length;
+    const open = locks.filter((e) => isUnlocked(STATES[e.entity_id])).length;
     if (open) return { sub: open + ' 個未鎖上', tint: 'red', icon: 'lock-open' };
     return { sub: locks.length ? '全部已鎖上' : members.length + ' 台攝影機', tint: cat.tint };
   }
@@ -2082,7 +2131,7 @@ function renderHomeStatus() {
   for (const cat of HOME_CATEGORIES) {
     // While a capsule is being edited it stays, even with nothing chosen.
     const members = categoryMembers(cat);
-    if (!members.length && !(homeCategory === cat.id && homeEditing)) continue;
+    if (!members.length && !(homeCategory === cat.id && homeCatEditing)) continue;
     wanted.push([cat, members, categoryPill(cat, members)]);
   }
   for (const pill of [...host.children]) {
@@ -2119,10 +2168,12 @@ function scheduleHomeSummary() {
 /* ---- a capsule opens: the rooms recede, the devices come forward ---- */
 function toggleHomeCategory(id) {
   const stage = document.getElementById('home-stage');
+  // Leaving a capsule, or going to another, ends its editing.
+  homeCatEditing = false;
   if (homeCategory === id) {
     homeCategory = null;
     stage.classList.remove('is-category');
-    renderHomeStatus();
+    renderHome();
     return;
   }
   homeCategory = id;
@@ -2135,8 +2186,8 @@ function toggleHomeCategory(id) {
 // A device in a capsule's screen; when editing, with a round button on its
 // edge to leave it out of the capsule or put it back.
 function homeCategoryNode(e) {
-  const node = homeTileNode(e, false, homeEditing);
-  if (!homeEditing) return node;
+  const node = homeTileNode(e, false, homeCatEditing);
+  if (!homeCatEditing) return node;
   const chosen = categoryChosen(e);
   node.classList.add('is-editing');
   node.classList.toggle('is-excluded', !chosen);
@@ -2167,11 +2218,11 @@ function renderHomeCategory() {
   title.textContent = cat.title + (homeRoom ? '　' + homeRoomLabel(homeRoom) : '');
   const hint = document.createElement('span');
   hint.className = 'home-category-hint';
-  hint.textContent = homeEditing ? '按 − 不顯示該配件，按 ＋ 加回' : '';
+  hint.textContent = homeCatEditing ? '按 − 不顯示該配件，按 ＋ 加回' : '';
   head.appendChild(title);
   head.appendChild(hint);
   overlay.appendChild(head);
-  const everyone = homeEditing
+  const everyone = homeCatEditing
     ? categoryAll(cat).filter((e) => !homeRoom || roomKey(e.area) === homeRoom)
     : categoryMembers(cat);
   const groups = new Map();
@@ -2217,7 +2268,7 @@ function renderHome() {
   document.getElementById('empty-hint').hidden = true;
   view.hidden = false;
   view.classList.toggle('is-editing', homeEditing);
-  const hidden = hiddenRooms();
+  const hidden = hiddenChips();
   const names = homeRoomNames();
   if (homeRoom && (hidden.has(homeRoom) || !names.includes(homeRoom))) homeRoom = '';
 
@@ -2225,8 +2276,12 @@ function renderHome() {
   const tools = document.getElementById('home-tools');
   tools.innerHTML = '';
   tools.appendChild(homeCapsule('＋', '新增配件', () => { homeSheet = true; renderHome(); }));
-  tools.appendChild(homeCapsule(homeEditing ? '完成' : '編輯',
-    '調整配件的大小、位置與顯示的房間', () => { homeEditing = !homeEditing; renderHome(); }, homeEditing));
+  const editing = homeCategory ? homeCatEditing : homeEditing;
+  tools.appendChild(homeCapsule(editing ? '完成' : '編輯',
+    homeCategory ? '選擇這個膠囊顯示哪些配件' : '調整配件的大小、位置與顯示的房間', () => {
+      if (homeCategory) homeCatEditing = !homeCatEditing; else homeEditing = !homeEditing;
+      renderHome();
+    }, editing));
 
   // Rooms: capsules to look at one; while editing, to switch one off or on.
   const chips = document.getElementById('home-rooms');
@@ -2240,9 +2295,9 @@ function renderHome() {
     b.textContent = (homeEditing && key !== '' ? (off ? '◌ ' : '● ') : '') + label;
     b.addEventListener('click', () => {
       if (homeEditing && key !== '') {
-        const set = hiddenRooms();
+        const set = hiddenChips();
         if (set.has(key)) set.delete(key); else set.add(key);
-        homePanel().hidden_rooms = [...set];
+        homePanel().hidden_chips = [...set];
         persistHome();
       } else {
         homeRoom = key;
@@ -2299,13 +2354,13 @@ function renderHome() {
     if (homeEditing && !homeRoom) {
       const hide = document.createElement('button');
       hide.className = 'home-hide-room';
-      hide.textContent = '隱藏房間';
-      hide.title = '不在主畫面顯示這個房間，可在上方房間列重新開啟';
+      const off = hiddenRooms().has(key);
+      hide.textContent = off ? '顯示房間' : '隱藏房間';
+      hide.title = off ? '讓主畫面顯示這個房間' : '主畫面不顯示這個房間 (它的按鈕與膠囊不受影響)';
       hide.addEventListener('click', () => {
         const set = hiddenRooms();
-        set.add(key);
+        if (off) set.delete(key); else set.add(key);
         homePanel().hidden_rooms = [...set];
-        if (homeRoom === key) homeRoom = '';
         persistHome();
         renderHome();
       });
@@ -2313,6 +2368,12 @@ function renderHome() {
     }
     section.appendChild(title);
     if (homeEditing && key !== OTHER_ROOM) attachRoomReorder(section, body, 'y', title);
+    if (entities.stub) {
+      // Off the main screen: only the heading, to put it back.
+      section.classList.add('is-off');
+      body.appendChild(section);
+      continue;
+    }
     const grid = document.createElement('div');
     grid.className = 'home-grid' + (entities.length ? '' : ' is-empty');
     grid.dataset.room = key;
@@ -2685,7 +2746,7 @@ function renderHomeSheet() {
   if (hiddenNow.length) {
     const label = document.createElement('div');
     label.className = 'home-sheet-title';
-    label.textContent = '已隱藏的房間';
+    label.textContent = '主畫面隱藏的房間';
     list.appendChild(label);
     for (const room of hiddenNow) {
       const row = document.createElement('button');
@@ -3165,7 +3226,7 @@ const DETAIL_BUILDERS = {
   input_boolean: toggleDetail('input_boolean'),
   lock(body, tile, state) {
     // Up and white means unlocked, matching "on" everywhere else.
-    const open = !!state && state.state !== 'locked';
+    const open = isUnlocked(state);
     body.appendChild(toggleSlabTile(iconNameFor(tile, state), open, () => {
       optimisticSet(tile.entity, { state: open ? 'locked' : 'unlocked' });
       callService('lock', open ? 'lock' : 'unlock', tile.entity);
@@ -3874,7 +3935,8 @@ function wireHomePanel() {
     el.addEventListener('scroll', () => updateFade(el));
   }
   document.getElementById('home-category').addEventListener('click', (e) => {
-    if (!e.target.closest('.tile')) toggleHomeCategory(homeCategory);
+    if (e.target.closest('.tile')) return;
+    if (homeCatEditing) { homeCatEditing = false; renderHome(); } else toggleHomeCategory(homeCategory);
   });
 }
 
@@ -4086,7 +4148,7 @@ window.__applyPrefs = function (cfg) {
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
   const homeKey = (c) => JSON.stringify([(c.panel || {}).mode, (c.panel || {}).home_tiles,
-    (c.panel || {}).room_overrides, (c.panel || {}).hidden_rooms]);
+    (c.panel || {}).room_overrides, (c.panel || {}).hidden_rooms, (c.panel || {}).hidden_chips]);
   const roomsKey = (c) => JSON.stringify([(c.panel || {}).mode, (c.panel || {}).room_overrides]);
   const homeChanged = IS_FLYOUT_WINDOW && homeKey(cfg) !== homeKey(CONFIG);
   const homeRoomsChanged = IS_FLYOUT_WINDOW && roomsKey(cfg) !== roomsKey(CONFIG);

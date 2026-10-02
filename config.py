@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     # (name, icon) and room_overrides maps an entity to a room name that
     # replaces its Home Assistant area.
     "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {},
-              "hidden_rooms": [], "custom_rooms": [], "room_order": [],
+              "hidden_rooms": [], "hidden_chips": [], "custom_rooms": [], "room_order": [],
               "bg_image": "", "bg_blur": 28},
 }
 
@@ -247,6 +247,7 @@ def clean_panel(panel, clean_tiles):
     hidden = panel.get("hidden_rooms")
     custom = panel.get("custom_rooms")
     order = panel.get("room_order")
+    chips = panel.get("hidden_chips")
     return {
         "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
         "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
@@ -257,6 +258,11 @@ def clean_panel(panel, clean_tiles):
         # Rooms left off the Home view's main screen.
         "hidden_rooms": ([str(r) for r in hidden if isinstance(r, str)]
                          if isinstance(hidden, list) else []),
+        # Rooms whose button is left off the row of room buttons. What the
+        # main screen shows, what a capsule counts and which buttons there are
+        # are three separate choices.
+        "hidden_chips": ([str(r) for r in chips if isinstance(r, str)]
+                         if isinstance(chips, list) else []),
         # Rooms the user made up; they show where devices have been moved
         # into them.
         "custom_rooms": (list(dict.fromkeys(

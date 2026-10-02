@@ -1619,10 +1619,15 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   font-size: 16px;
 }
 
-.home-stage { position: relative; height: 440px; overflow: hidden; border-radius: 28px; }
+/* A little wider than the tiles, so the round buttons on their corners are not
+   cut off at the edge. */
+.home-stage { position: relative; height: 440px; margin: 0 -12px; overflow: hidden; border-radius: 28px; }
 .home-main, .home-category {
   position: absolute;
   inset: 0;
+  box-sizing: border-box;
+  padding-left: 12px;
+  padding-right: 12px;
   transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.28s ease, filter 0.32s ease;
 }
 .home-main { display: flex; flex-direction: column; }
@@ -1735,8 +1740,8 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-grid .tile.is-editing { overflow: visible; }
 .home-remove {
   position: absolute;
-  top: -15px;
-  right: 18px;
+  top: -6px;
+  right: -6px;
   z-index: 3;
   width: 34px;
   height: 34px;
@@ -1752,7 +1757,7 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   cursor: pointer;
 }
-.is-big .home-remove { top: -11px; right: 12px; }
+.is-big .home-remove { top: -4px; right: -4px; }
 .home-hide-room {
   margin-left: auto;
   height: 38px;
@@ -1861,3 +1866,7 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-remove.is-minus { background: rgba(255, 91, 74, 0.96); }
 .home-remove.is-plus { background: rgba(52, 199, 89, 0.96); }
 .home-sheet-title { padding: 6px 4px 10px; font-size: 20px; font-weight: 700; color: var(--text-on-2); }
+
+/* A room that is off the main screen, while editing: only its heading. */
+.home-section.is-off .home-section-title { opacity: 0.5; }
+.home-section.is-off { padding-bottom: 4px; }

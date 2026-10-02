@@ -89,7 +89,7 @@ class PanelConfig(unittest.TestCase):
                                     'home_tiles': [{'entity': 'a'}],
                                     'room_overrides': {'light.a': ' Study ', 'b': '', 3: 'x'}}, keep)
         self.assertEqual(panel, {'mode': 'grid', 'tiles': None, 'home_tiles': [{'entity': 'a'}],
-                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'custom_rooms': [], 'room_order': [],
+                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'hidden_chips': [], 'custom_rooms': [], 'room_order': [],
                                  'bg_image': '', 'bg_blur': 28})
         self.assertEqual(config.clean_panel({'custom_rooms': [' Den ', 'Den', '', 4]}, keep)['custom_rooms'], ['Den'])
         loud = config.clean_panel({'hidden_rooms': ['Garage', 3], 'bg_image': 'x.jpg', 'bg_blur': 999}, keep)
