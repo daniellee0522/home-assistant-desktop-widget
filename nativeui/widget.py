@@ -352,8 +352,9 @@ class _Surface(QWidget):
                     continue
                 self.sample_now.clear()
                 # Paced before the look, not after it: the picture is as fresh as can be.
-                # 60 looks a second for the crisp classic glass; the lens costs more per picture, so 30.
-                wait = (1 / 30 if self.style == "liquid" else 1 / 60) - (time.monotonic() - last)
+                # At most 30 looks a second, as the page's glass was: an animated wallpaper behind the
+                # widget otherwise keeps the program busy for pictures nobody can tell apart.
+                wait = 1 / 30 - (time.monotonic() - last)
                 if wait > 0:
                     time.sleep(wait)
                 last = time.monotonic()
