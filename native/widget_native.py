@@ -222,6 +222,11 @@ def main():
     win.show()
     hwnd = int(win.winId())
     user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+    # Windows 11 rounds the corners, outlines and shadows the window itself: none of it.
+    dwm = ctypes.WinDLL("dwmapi")
+    for attr, val in ((33, 1), (34, 0xFFFFFFFE), (2, 2)):    # no rounding, no border, no NC rendering
+        v = ctypes.c_uint(val)
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(v), 4)
     stop = threading.Event()
 
     client = HAClient(on_event=lambda eid, st: bridge.states.emit({eid: st}))

@@ -302,7 +302,7 @@ def font(px, weight):
     return f
 
 
-HSCALE = float(os.environ.get("NATIVE_HSCALE", "0.985"))
+HSCALE = float(os.environ.get("NATIVE_HSCALE", "1.0"))
 
 
 def text_path(origin, f, text, x, y):
@@ -346,16 +346,14 @@ def draw_text_fade(p, text, f, color, rect, shadow):
         p.drawPath(halo)
         p.restore()
     col = QColor(color)
-    if width > rect.width():
-        g = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        g.setColorAt(0, col)
-        g.setColorAt(max(0.0, (rect.width() - 16) / rect.width()), col)
-        clear = QColor(col)
-        clear.setAlpha(0)
-        g.setColorAt(1, clear)
-        brush = QBrush(g)
-    else:
-        brush = QBrush(col)
+    # The page's mask always fades the last 16 px of the box, whatever the text.
+    g = QLinearGradient(rect.left(), 0, rect.right(), 0)
+    g.setColorAt(0, col)
+    g.setColorAt(max(0.0, (rect.width() - 16) / rect.width()), col)
+    clear = QColor(col)
+    clear.setAlpha(0)
+    g.setColorAt(1, clear)
+    brush = QBrush(g)
     # As outlines, which are anti-aliased in greys (the page's text is); Qt's
     # own glyph drawing would colour the edges (ClearType).
     path = text_path(base, f, text, rect.left(), base_y)
@@ -403,7 +401,7 @@ def draw_tile(p, tile, st, x, y, w, h, theme, tcol):
         svg_renderer(icon_name(tile, st), color).render(p, QRectF(ix, iy, 40, 40))
 
     # text, from the bottom up
-    shadow = not on
+    shadow = False      # no text shadow
     c1 = tcol["on_text1"] if on else tcol["off_text1"]
     c2 = tcol["on_text2"] if on else tcol["off_text2"]
     value = value_text(domain, st) if ok and not badge else ""
