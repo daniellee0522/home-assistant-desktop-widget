@@ -544,9 +544,10 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   opacity: 1;
 }
 .tile .mini-btn {
-  width: 24px;
+  min-width: 38px;
   height: 24px;
-  border-radius: 50%;
+  padding: 0 8px;
+  border-radius: 999px;
   /* Only shown on an "on" climate tile, which is white in every theme. */
   background: rgba(0, 0, 0, 0.08);
   color: #1d1d1f;
@@ -559,6 +560,10 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   pointer-events: auto;
 }
 .tile .mini-btn:hover { background: rgba(0, 0, 0, 0.14); }
+.tile .mini-btn svg { width: 16px; height: 16px; fill: currentColor; }
+/* On a dark (off) tile, a light capsule. */
+.tile:not(.is-on) .mini-btn { background: rgba(255, 255, 255, 0.24); color: #fff; }
+.tile:not(.is-on) .mini-btn:hover { background: rgba(255, 255, 255, 0.34); }
 .tile .conn-warn {
   position: absolute;
   bottom: 12px;
@@ -1484,45 +1489,69 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .editor-tiles .tile-list { max-height: 190px; overflow-y: auto; }
 
 /* ================= Home-style panel =================
-   The tray panel's alternative to the tile grid: status pills, the rooms as
-   chips, and the accessories under each room, in shapes of the widget's own
-   (square, bar, large square). Sizes are in the panel's pre-zoom pixels, so
-   they read at half size like the tiles do. */
+   The tray panel's alternative to the tile grid: capsules for the kinds of
+   device, the rooms as capsules, and the accessories under each room, in
+   shapes of the widget's own (square, bar, large square). Sizes are in the
+   panel's own pre-zoom pixels, so they read at half size like the tiles do.
+   The panel is always the same size. */
 .home-view {
   position: relative;
   width: calc(4 * var(--tile-w) + 3 * var(--gap));
   color: var(--text-on-1);
 }
-.home-head { display: flex; align-items: flex-start; gap: 14px; }
+.home-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 0 4px 14px;
+}
+.home-title { font-size: 38px; font-weight: 800; letter-spacing: -0.5px; }
 .home-summary {
-  flex: 1;
-  min-width: 0;
   display: flex;
   gap: 12px;
-  min-height: 74px;
+  min-height: 78px;
+  /* Room for the capsules' rims, which a scrolling box would clip. */
+  padding: 4px;
+  margin: -4px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .home-summary::-webkit-scrollbar { display: none; }
+.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent);
+          mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent); }
+.fade-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent);
+          mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent); }
+.fade-l.fade-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent);
+                 mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent); }
+
 .home-pill {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 22px 10px 12px;
+  gap: 14px;
+  height: 70px;
+  padding: 0 30px 0 9px;
+  border: 0;
   border-radius: 999px;
   background: var(--tile-off);
   color: var(--text-off-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   box-shadow: inset 0 0 0 1px var(--glass-edge), inset 0 1px 0 var(--glass-edge-top);
+  transition: background 0.22s ease, color 0.22s ease, transform 0.12s ease;
 }
+.home-pill:active { transform: scale(0.96); }
 .home-pill-icon {
   display: inline-flex;
   width: 52px;
   height: 52px;
-  padding: 11px;
+  padding: 12px;
   box-sizing: border-box;
   border-radius: 50%;
   background: rgba(14, 18, 24, 0.28);
+  transition: background 0.22s ease;
 }
 .home-pill-icon svg { width: 100%; height: 100%; fill: currentColor; }
 .home-pill.is-cyan .home-pill-icon { color: var(--accent-cyan); }
@@ -1533,60 +1562,110 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .home-pill-text { display: flex; flex-direction: column; white-space: nowrap; }
 .home-pill-title { font-size: 23px; font-weight: 700; line-height: 1.15; }
 .home-pill-sub { font-size: 19px; font-weight: 500; line-height: 1.2; opacity: 0.8; }
-.home-tools { flex: none; display: flex; gap: 10px; padding-top: 6px; }
-.home-tool {
-  min-width: 52px;
-  height: 52px;
-  padding: 0 20px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--btn-fill);
-  color: var(--text-on-1);
-  font: inherit;
-  font-size: 24px;
-  font-weight: 700;
-  cursor: pointer;
+/* The open capsule lights up, as an "on" tile does. */
+.home-pill.is-active {
+  background: var(--tile-on);
+  color: var(--tile-on-text-1);
+  box-shadow: inset 0 0 0 1px var(--glass-edge-on);
 }
-.home-tool:hover { background: var(--btn-fill-strong); }
-.home-tool.is-active { background: var(--accent-blue); color: #fff; }
+.home-pill.is-active .home-pill-icon { background: rgba(14, 18, 24, 0.08); }
 
-.home-rooms {
-  display: flex;
-  gap: 10px;
-  padding: 12px 2px 14px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.home-rooms::-webkit-scrollbar { display: none; }
-.home-chip {
+.home-tools { flex: none; display: flex; gap: 10px; }
+.home-tool, .home-chip {
   flex: none;
-  padding: 8px 22px;
+  height: 52px;
+  padding: 0 24px;
   border: 0;
   border-radius: 999px;
   background: var(--btn-fill);
   color: var(--text-on-1);
   font: inherit;
   font-size: 23px;
-  font-weight: 600;
+  font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, opacity 0.18s ease;
 }
-.home-chip:hover { background: var(--btn-fill-strong); }
+.home-tool:hover, .home-chip:hover { background: var(--btn-fill-strong); }
+.home-tool.is-active { background: var(--accent-blue); color: #fff; }
+
+.home-rooms {
+  flex: none;
+  display: flex;
+  gap: 10px;
+  padding: 14px 4px 14px;
+  margin: 0 -4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.home-rooms::-webkit-scrollbar { display: none; }
+.home-chip { height: 46px; padding: 0 22px; font-size: 22px; font-weight: 600; }
 .home-chip.is-active { background: var(--text-on-1); color: var(--panel-solid); }
 .home-chip.is-off { opacity: 0.5; }
+.home-chip.is-add { background: transparent; box-shadow: inset 0 0 0 2px var(--glass-edge); }
+.home-chip-input {
+  width: 190px;
+  background: var(--input-bg);
+  box-shadow: inset 0 0 0 2px var(--accent-blue);
+  cursor: text;
+  outline: none;
+}
+.home-chip-x {
+  margin-left: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255, 91, 74, 0.9);
+  color: #fff;
+  font-size: 16px;
+}
 
+.home-stage { position: relative; height: 440px; overflow: hidden; border-radius: 28px; }
+.home-main, .home-category {
+  position: absolute;
+  inset: 0;
+  transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.28s ease, filter 0.32s ease;
+}
+.home-main { display: flex; flex-direction: column; }
 .home-body {
-  max-height: calc(3 * var(--tile-h) + 2 * var(--gap) + 90px);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
 }
 .home-body::-webkit-scrollbar { display: none; }
+/* A capsule opens: the rooms sink back and blur out, the devices come up. */
+.home-stage.is-category .home-main {
+  transform: scale(0.94);
+  opacity: 0;
+  filter: blur(10px);
+  pointer-events: none;
+}
+.home-category {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  opacity: 0;
+  transform: scale(1.06);
+  filter: blur(10px);
+  pointer-events: none;
+}
+.home-category::-webkit-scrollbar { display: none; }
+.home-stage.is-category .home-category {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  pointer-events: auto;
+}
+.home-category .tile.is-popping { animation: home-pop 0.36s cubic-bezier(0.2, 1.2, 0.3, 1) both; animation-delay: calc(var(--i, 0) * 28ms + 60ms); }
+@keyframes home-pop { from { opacity: 0; transform: scale(0.82); } to { opacity: 1; transform: none; } }
+
 .home-section + .home-section { margin-top: 18px; }
 .home-section-title {
   display: flex;
   align-items: baseline;
   gap: 14px;
-  padding: 0 6px 10px;
+  padding: 0 8px 10px;
   font-size: 27px;
   font-weight: 700;
 }
@@ -1612,110 +1691,119 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   height: calc((2 * var(--tile-h) + var(--gap)) / 1.4);
   border-radius: calc(var(--radius-tile) / 1.4);
 }
-.home-empty { padding: 40px 6px; font-size: 25px; color: var(--text-on-2); }
+.home-grid.is-empty {
+  grid-template-rows: var(--tile-h);
+  align-items: center;
+  justify-content: center;
+  grid-template-columns: 1fr;
+  border-radius: calc(var(--radius-tile) * 0.6);
+  box-shadow: inset 0 0 0 2px var(--glass-edge);
+  color: var(--text-on-2);
+  font-size: 22px;
+  text-align: center;
+  height: calc(var(--tile-h) * 0.7);
+  grid-auto-rows: auto;
+}
+.home-empty { padding: 40px 8px; font-size: 24px; color: var(--text-on-2); }
 
 /* Editing */
 .home-grid .tile.is-editing { cursor: grab; touch-action: none; }
 .home-grid .tile.is-lifted {
-  z-index: 5;
+  position: absolute;
+  z-index: 6;
   cursor: grabbing;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35), inset 0 0 0 1px var(--glass-edge);
+  transform: scale(1.03);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32), inset 0 0 0 1px var(--glass-edge);
   transition: none;
 }
-.home-grid .tile.drop-before { box-shadow: -10px 0 0 0 var(--accent-blue), inset 0 0 0 1px var(--glass-edge); }
-.home-grid .tile.drop-after { box-shadow: 10px 0 0 0 var(--accent-blue), inset 0 0 0 1px var(--glass-edge); }
-.home-grid.drop-end { outline: 3px dashed var(--accent-blue); outline-offset: 6px; }
+/* Where a tile will land, and the shape it is being given: translucent
+   light grey, solid. */
+.home-ghost {
+  box-sizing: border-box;
+  grid-column: span var(--sc, 1);
+  grid-row: span var(--sr, 1);
+  width: calc(var(--sc, 1) * var(--tile-w) + (var(--sc, 1) - 1) * var(--gap));
+  height: calc(var(--sr, 1) * var(--tile-h) + (var(--sr, 1) - 1) * var(--gap));
+  border-radius: var(--radius-tile);
+  border: 2px solid rgba(232, 234, 238, 0.65);
+  background: rgba(232, 234, 238, 0.22);
+  pointer-events: none;
+}
+.home-ghost.is-preview { position: absolute; z-index: 7; }
 .home-remove {
   position: absolute;
-  top: 8px;
-  left: 8px;
+  top: 10px;
+  right: 10px;
   z-index: 3;
-  width: 40px;
-  height: 40px;
+  width: 58px;
+  height: 36px;
   border: 0;
-  border-radius: 50%;
-  background: var(--accent-red);
+  border-radius: 999px;
+  background: rgba(255, 91, 74, 0.92);
   color: #fff;
-  font-size: 22px;
+  font-size: 19px;
+  font-weight: 700;
   line-height: 1;
   cursor: pointer;
 }
-.is-big .home-remove { top: 6px; left: 6px; }
 .home-resize {
   position: absolute;
-  right: 0;
-  bottom: 0;
+  right: 10px;
+  bottom: 10px;
   z-index: 3;
-  width: 54px;
-  height: 54px;
+  width: 58px;
+  height: 34px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.82);
+  background-image: linear-gradient(135deg, transparent 38%, #4a4a52 38%, #4a4a52 52%, transparent 52%);
+  background-size: 22px 22px;
+  background-position: center;
+  background-repeat: no-repeat;
   cursor: nwse-resize;
   touch-action: none;
-  background:
-    linear-gradient(135deg, transparent 52%, rgba(255, 255, 255, 0.85) 52%, rgba(255, 255, 255, 0.85) 60%,
-      transparent 60%, transparent 70%, rgba(255, 255, 255, 0.85) 70%, rgba(255, 255, 255, 0.85) 78%, transparent 78%);
-}
-.home-resize-preview {
-  position: absolute;
-  z-index: 4;
-  box-sizing: border-box;
-  border: 3px dashed var(--accent-blue);
-  border-radius: var(--radius-tile);
-  background: rgba(64, 156, 255, 0.14);
-  pointer-events: none;
 }
 
-/* The add sheet covers the room list. */
+/* The add sheet is the card's own size, with the card's corners. */
 .home-sheet {
   position: absolute;
   inset: 0;
-  z-index: 10;
-  overflow-y: auto;
-  scrollbar-width: none;
-  padding: 6px 6px 20px;
-  border-radius: 32px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 26px 26px;
+  border-radius: var(--radius-panel);
   background: var(--panel-solid);
+  color: var(--text-on-1);
+  animation: home-pop 0.28s ease both;
 }
-.home-sheet::-webkit-scrollbar { display: none; }
 .home-sheet-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 10px;
+  padding-bottom: 14px;
   font-size: 30px;
   font-weight: 700;
 }
-.home-sheet-title { padding: 14px 0 8px; font-size: 22px; font-weight: 700; color: var(--text-on-2); }
+.home-sheet-list { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; }
+.home-sheet-list::-webkit-scrollbar { display: none; }
 .home-sheet-row {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   width: 100%;
-  padding: 14px 18px;
-  margin-bottom: 8px;
+  height: 56px;
+  padding: 0 26px;
+  margin-bottom: 10px;
   border: 0;
-  border-radius: 20px;
+  border-radius: 999px;
   background: var(--btn-fill);
   color: var(--text-on-1);
   font: inherit;
   font-size: 23px;
+  font-weight: 600;
   text-align: left;
   cursor: pointer;
 }
 .home-sheet-row:hover { background: var(--btn-fill-strong); }
-.home-sheet-sensor {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 6px 4px;
-  font-size: 21px;
-}
-.home-sheet-sensor > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home-sheet-sensor input {
-  flex: none;
-  width: 200px;
-  padding: 8px 12px;
-  border: 1px solid var(--input-border);
-  border-radius: 14px;
-  background: var(--input-bg);
-  color: var(--text-on-1);
-  font: inherit;
-  font-size: 21px;
-}
+.home-sheet-room { font-size: 19px; font-weight: 500; color: var(--text-on-2); white-space: nowrap; }

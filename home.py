@@ -6,6 +6,7 @@ the temperature and humidity readings, which are shown as status, not tiles."""
 # helpers, scenes, scripts, automations) is not an accessory.
 ACCESSORY_DOMAINS = (
     "light", "switch", "climate", "cover", "fan", "lock", "media_player", "vacuum",
+    "camera",
 )
 
 

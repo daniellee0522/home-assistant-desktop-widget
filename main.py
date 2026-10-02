@@ -1056,6 +1056,13 @@ class Api:
         if not self._popover_window:
             return
         self._popover_owner = owner_kind
+        # The card takes the theme of the window it opens from (the panel has
+        # its own).
+        try:
+            self._popover_window.evaluate_js(
+                "window.__popoverOwner && window.__popoverOwner(%s)" % json.dumps(owner_kind))
+        except Exception:
+            pass
         if tile_id.startswith("home:"):
             state = self._home_states.get(tile_id[5:])
             if state:

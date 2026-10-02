@@ -34,7 +34,7 @@ CONFIG_FILE = _config_path()
 # still works as a read-only tile (falls back to the generic renderer).
 SUPPORTED_DOMAINS = [
     "light", "switch", "climate", "fan", "cover", "media_player",
-    "lock", "vacuum", "scene", "script", "automation",
+    "lock", "vacuum", "camera", "scene", "script", "automation",
     "sensor", "binary_sensor", "input_boolean",
 ]
 
@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     # (name, icon) and room_overrides maps an entity to a room name that
     # replaces its Home Assistant area.
     "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {},
-              "hidden_rooms": [], "bg_image": "", "bg_blur": 28},
+              "hidden_rooms": [], "custom_rooms": [], "bg_image": "", "bg_blur": 28},
 }
 
 # Widget sizes, named rows x columns: "2x4" is two rows of four tiles. Every
@@ -225,6 +225,7 @@ def clean_panel(panel, clean_tiles):
     home_tiles = panel.get("home_tiles")
     overrides = panel.get("room_overrides")
     hidden = panel.get("hidden_rooms")
+    custom = panel.get("custom_rooms")
     return {
         "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
         "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
@@ -235,6 +236,11 @@ def clean_panel(panel, clean_tiles):
         # Rooms left off the Home view's main screen.
         "hidden_rooms": ([str(r) for r in hidden if isinstance(r, str)]
                          if isinstance(hidden, list) else []),
+        # Rooms the user made up; they show where devices have been moved
+        # into them.
+        "custom_rooms": (list(dict.fromkeys(
+            str(r).strip()[:40] for r in custom if isinstance(r, str) and str(r).strip()))[:40]
+            if isinstance(custom, list) else []),
         # A picture behind the panel (a version tag; the file is in the
         # settings folder), blurred by this many pixels.
         "bg_image": str(panel.get("bg_image") or ""),

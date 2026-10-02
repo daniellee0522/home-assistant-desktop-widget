@@ -70,6 +70,10 @@ class BuildHome(unittest.TestCase):
                           'sensor.homepod_mini_humidity': 'humidity'})
         self.assertEqual(rooms, ['Living room'])
 
+    def test_cameras_are_accessories(self):
+        entities, _, _ = home.build_home([state('camera.door')], [], [], [], {})
+        self.assertEqual([e['entity_id'] for e in entities], ['camera.door'])
+
     def test_unavailable_accessory_without_a_room_is_left_out(self):
         gone = state('switch.cam_setting'); gone['state'] = 'unavailable'
         placed = state('switch.cam_power'); placed['state'] = 'unavailable'
@@ -85,8 +89,9 @@ class PanelConfig(unittest.TestCase):
                                     'home_tiles': [{'entity': 'a'}],
                                     'room_overrides': {'light.a': ' Study ', 'b': '', 3: 'x'}}, keep)
         self.assertEqual(panel, {'mode': 'grid', 'tiles': None, 'home_tiles': [{'entity': 'a'}],
-                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [],
+                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'custom_rooms': [],
                                  'bg_image': '', 'bg_blur': 28})
+        self.assertEqual(config.clean_panel({'custom_rooms': [' Den ', 'Den', '', 4]}, keep)['custom_rooms'], ['Den'])
         loud = config.clean_panel({'hidden_rooms': ['Garage', 3], 'bg_image': 'x.jpg', 'bg_blur': 999}, keep)
         self.assertEqual((loud['hidden_rooms'], loud['bg_image'], loud['bg_blur']),
                          (['Garage'], 'x.jpg', 80))
