@@ -1,0 +1,76 @@
+# Home Assistant 桌面小工具（Windows）— HA Widgets
+
+[English](README.md) | 繁體中文
+
+把 Home Assistant 的控制項放到 Windows 10/11 桌面上。輕量的桌面 widget，
+具有毛玻璃或液態玻璃背景與透明圓角，並提供系統匣面板方便快速操作。使用 Qt 開發。
+
+**[下載最新安裝檔](https://github.com/daniellee0522/home-assistant-desktop-widget/releases/latest)**
+（`HA-Widgets-Setup-<版本>.exe`；升級時會保留你的設定）。
+
+## 外觀
+
+下列截圖使用示範裝置，呈現實際的 Qt 介面。玻璃效果會隨桌布而不同。
+
+| 外觀 | 淺色 | 深色 |
+| --- | --- | --- |
+| 經典毛玻璃 | ![經典淺色](docs/theme-classic-light.png) | ![經典深色](docs/theme-classic-dark.png) |
+| 液態玻璃 | ![液態淺色](docs/theme-liquid-light.png) | ![液態深色](docs/theme-liquid-dark.png) |
+| Windows 玻璃 | ![Windows 淺色](docs/theme-windows-light.png) | ![Windows 深色](docs/theme-windows-dark.png) |
+
+| 系統匣面板 | 裝置控制 | 感測器歷史 |
+| --- | --- | --- |
+| ![系統匣面板](docs/tray-panel.png) | ![裝置控制](docs/detail-switch.png) | ![感測器歷史](docs/detail-history.png) |
+
+## 功能
+
+- **桌面控制：** 把裝置放在桌面上，可拖曳重新擺放，也能鎖定位置。
+- **即時更新：** 透過 Home Assistant 的 WebSocket API 即時更新裝置狀態。
+- **快速存取：** 點擊系統匣圖示，在工作列旁開啟面板。
+- **裝置詳情：** 右鍵或長按磁貼，開啟更多控制項與感測器歷史。
+- **個人化：** 淺色／深色主題；經典、液態、Windows 三種玻璃；可調欄數、縮放與固定大小。
+- **自動變暗：** 桌面被其他視窗蓋住時 widget 會變暗，回到桌面或點擊時恢復。
+  點擊工作列、開始功能表或 widget 自己的面板，不會取消變暗。
+- **語言：** 繁體中文與英文。
+
+在裝置的詳情畫面中開啟編輯面板，可以選擇圖示，或輸入 Material Design Icons
+名稱，例如 `mdi:air-conditioner`。未選擇時會使用 Home Assistant 提供的 `mdi:`
+圖示。圖示已內建，可離線使用。
+
+## 毛玻璃來源
+
+設定 → **毛玻璃來源**：
+
+- **畫面擷取**（預設）：速度快，但 widget 不會出現在螢幕截圖與錄影中。
+- **相容模式**：widget 可出現在錄影中，但桌布渲染較慢。系統匣面板後方某些
+  由 GPU 繪製的程式，可能不會出現在面板的玻璃中。
+
+螢幕擷取使用 DXGI Desktop Duplication：Windows 會回報螢幕哪些區域有變化，
+只有視窗後方的畫面改變時才會更新玻璃。畫面靜止時完全不會擷取。
+
+## 安裝與執行
+
+安裝版：執行 `HA-Widgets-Setup-<版本>.exe`。要升級時直接執行新版安裝檔，設定會保留。
+
+從原始碼執行（Windows 10/11、Python 3.12）：
+
+```powershell
+pip install -r requirements.txt
+python main.py
+```
+
+開啟設定，輸入你的 Home Assistant 網址與
+[長期存取權杖](https://www.home-assistant.io/docs/authentication/#your-account-profile)，
+再選擇要顯示的裝置。設定檔在原始碼執行時存於 `main.py` 旁的
+`ha_widgets_config.json`，安裝版則存於 `%APPDATA%\HA Widgets`。
+
+## 開發
+
+- 測試：見 [tests/README.md](tests/README.md)。
+- 安裝檔：見 [packaging/README.md](packaging/README.md)。
+
+## 授權
+
+[MIT](LICENSE)
+
+內建的 Material Design Icons 路徑資料：[Apache 2.0](web/mdi-LICENSE)。

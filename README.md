@@ -1,7 +1,13 @@
-# HA Widgets
+# Home Assistant Desktop Widget for Windows (HA Widgets)
 
-Home Assistant controls on your Windows desktop. Built with Qt, with a
-frosted-glass background and transparent rounded corners.
+English | [繁體中文](README.zh-TW.md)
+
+Home Assistant controls on your Windows 10/11 desktop. A lightweight desktop
+widget with a frosted-glass or liquid-glass background and transparent rounded
+corners, plus a system tray panel for quick access. Built with Qt.
+
+**[Download the latest installer](https://github.com/daniellee0522/home-assistant-desktop-widget/releases/latest)**
+(`HA-Widgets-Setup-<version>.exe`; settings are kept when you upgrade).
 
 ## Themes
 
@@ -26,7 +32,7 @@ appearance. The glass effect varies with your wallpaper.
 - **Live updates:** device states update through Home Assistant's WebSocket API.
 - **Quick access:** click the tray icon to open a panel beside the taskbar.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
-- **Personalization:** light and dark themes; classic, liquid, and Windows glass; columns, zoom, and fixed size. Glass follows the display's own refresh rate; there is no rate to set.
+- **Personalization:** light and dark themes; classic, liquid, and Windows glass; columns, zoom, and fixed size. The glass follows changes on screen; there is no refresh rate to set.
 - **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it.
 - **Languages:** Traditional Chinese and English.
 
@@ -40,8 +46,8 @@ displacement from [KMPLiquidGlass's Skia Lens.kt](https://github.com/Kashif-E/KM
 to a WebGL shader (with a Canvas fallback) over a capture of the desktop.
 Screen capture uses DXGI Desktop Duplication: Windows reports which parts of
 the screen changed, and the glass is refreshed only when the area behind a
-window did, at up to the display's refresh rate. A still desktop costs no
-captures at all.
+window did: up to the display's refresh rate for liquid glass, and about 30
+times a second for the other styles. A still desktop costs no captures at all.
 
 ## Glass source
 
