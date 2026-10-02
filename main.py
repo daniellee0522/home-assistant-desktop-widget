@@ -1306,21 +1306,32 @@ class Api:
                 self._widget_frames[window_kind] = (x, y, w, h, raw)
             liquid = (self._cfg.get("glass_style") == "liquid"
                       and not is_popover)
-            # Only a blur is drawn, so a box reduce of the raw pixels is
-            # plenty, and skips converting the full frame. The liquid lens
-            # refracts this picture too, so it
-            # keeps more detail (1/4 scale, a light blur); the rest is 1/8.
+            # Only a blur is drawn, so a reduce of the raw pixels is plenty,
+            # and skips converting the full frame. The liquid lens refracts
+            # this picture too, so it keeps more detail (1/4 scale, a light
+            # blur); the rest is 1/8. A fine pattern on the wallpaper (mesh,
+            # hatching) beats against the 1/4 sampling grid into slow diagonal
+            # stripes, so the lens's picture is blurred at half size, before
+            # it is sampled, to remove what the grid cannot represent.
             scale = 4 if liquid else 8
             small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
-            if w % scale or h % scale:
+            if liquid:
+                small = (small.reduce(2) if not (w % 2 or h % 2) else
+                         small.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX))
+                small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
+                small = small.filter(ImageFilter.GaussianBlur(radius=1.5))
+                small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
+                                     Image.HAMMING)
+            elif w % scale or h % scale:
                 # Not a whole number of cells: stretch the picture over
                 # the window exactly rather than past its edge.
                 small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
                                      Image.BOX)
             else:
                 small = small.reduce(scale)
-            small = Image.frombytes("RGB", small.size, small.tobytes(),
-                                    "raw", "BGRX")
+            if not liquid:
+                small = Image.frombytes("RGB", small.size, small.tobytes(),
+                                        "raw", "BGRX")
             # A frame that differs from the one on screen by less than the
             # eye can tell, once blurred, is not worth sending and painting.
             sent = self._backdrop_sent.get(window_kind)
@@ -1335,7 +1346,7 @@ class Api:
             self._backdrop_sent[window_kind] = (digest, small)
             # Blurring the source avoids the dark wedges a canvas blur leaves
             # in rounded corners by sampling past its edges.
-            blur_radius = 0.5 if liquid else 2
+            blur_radius = 0.4 if liquid else 2
             small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
             # Raw pixels, not an image file: a JPEG this small, stretched back
             # up to the window, shows its 8x8 blocks as mottling, and a file
