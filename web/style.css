@@ -1698,18 +1698,31 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   height: calc((2 * var(--tile-h) + var(--gap)) / 1.4);
   border-radius: calc(var(--radius-tile) / 1.4);
 }
+/* A room: tiles placed on a grid four cells wide (homeLayout), sliding to
+   where the others make way for them. */
+.home-grid.is-laid {
+  display: block;
+  width: calc(4 * var(--tile-w) + 3 * var(--gap));
+  min-height: var(--tile-h);
+}
+.home-grid.is-laid .tile {
+  position: absolute;
+  transition: left 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), top 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 0.2s ease, transform 0.12s ease;
+}
+.home-grid.is-laid.is-placing .tile { transition: none; }
+.home-grid.is-laid { transition: height 0.22s ease; }
+.home-grid.is-laid.is-placing { transition: none; }
 .home-grid.is-empty {
-  grid-template-rows: var(--tile-h);
+  display: flex;
   align-items: center;
   justify-content: center;
-  grid-template-columns: 1fr;
+  min-height: calc(var(--tile-h) * 0.7);
   border-radius: calc(var(--radius-tile) * 0.6);
   box-shadow: inset 0 0 0 2px var(--glass-edge);
   color: var(--text-on-2);
   font-size: 22px;
   text-align: center;
-  height: calc(var(--tile-h) * 0.7);
-  grid-auto-rows: auto;
 }
 .home-empty { padding: 40px 8px; font-size: 24px; color: var(--text-on-2); }
 
@@ -1871,3 +1884,21 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 /* A room that is off the main screen, while editing: only its heading. */
 .home-section.is-off .home-section-title { opacity: 0.5; }
 .home-section.is-off { padding-bottom: 4px; }
+
+.home-grid.is-laid .tile.is-lifted { transition: none; }
+.home-ghost.is-slot { position: absolute; transition: left 0.12s ease, top 0.12s ease; }
+/* A climate tile that has room: just the temperature and its unit. */
+.tile .tile-icon.is-reading {
+  width: auto;
+  height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.tile.is-bar .tile-icon.is-reading { width: 100px; height: auto; flex: none; font-size: 31px; justify-content: flex-start; background: none; padding: 0; }
+.tile.is-big .tile-icon.is-reading { width: auto; height: auto; font-size: 40px; }

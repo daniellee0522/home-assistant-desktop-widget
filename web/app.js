@@ -1571,8 +1571,16 @@ function tileEl(tile, form, preview) {
 
   const iconWrap = document.createElement('div');
   iconWrap.className = 'tile-icon';
-  const badge = domain === 'climate' && ok && !tile.icon ? climateBadge(state, on) : null;
-  if (badge) {
+  const roomy = div.classList.contains('is-bar') || div.classList.contains('is-big');
+  const reading = domain === 'climate' && ok && !tile.icon && roomy ? climateBadge(state, on) : null;
+  const badge = domain === 'climate' && ok && !tile.icon && !roomy ? climateBadge(state, on) : null;
+  if (reading) {
+    // Room enough to say it plainly: the temperature and its unit, in the
+    // colour of the mode, with no circle behind it.
+    iconWrap.classList.add('is-reading');
+    iconWrap.textContent = reading.text.replace('°', '') + ' °C';
+    iconWrap.style.color = on ? (HVAC_COLORS[state.state] || 'var(--accent-cyan)') : 'var(--text-off-1)';
+  } else if (badge) {
     iconWrap.classList.add('is-badge');
     iconWrap.textContent = badge.text;
     iconWrap.style.background = badge.background;
@@ -1593,12 +1601,12 @@ function tileEl(tile, form, preview) {
   if (isBar) { body.className = 'tile-text'; div.appendChild(body); }
 
   // On a long tile the disc takes the icon's colour and the icon is white.
-  if (isBar && on && !badge) {
+  if (isBar && on && !badge && !reading) {
     iconWrap.style.background = iconWrap.style.color;
     iconWrap.style.color = '#fff';
   }
 
-  const valueText = ok && !badge ? valueTextFor(domain, state) : '';
+  const valueText = ok && !badge && !reading ? valueTextFor(domain, state) : '';
   if (valueText) {
     const v = document.createElement('div');
     v.className = 'tile-value';
@@ -2335,6 +2343,8 @@ function renderHome() {
   chips.appendChild(homeAddRoomControl());
 
   const body = document.getElementById('home-body');
+  const keepScroll = body.scrollTop;
+  const keepCategoryScroll = document.getElementById('home-category').scrollTop;
   body.innerHTML = '';
   entityToTileIds = {};
   const groups = homeGroups();
@@ -2382,15 +2392,24 @@ function renderHome() {
       continue;
     }
     const grid = document.createElement('div');
-    grid.className = 'home-grid' + (entities.length ? '' : ' is-empty');
+    grid.className = 'home-grid is-laid' + (entities.length ? '' : ' is-empty');
     grid.dataset.room = key;
     for (const e of entities) grid.appendChild(homeTileNode(e, homeEditing));
     if (!entities.length) grid.textContent = '把配件拖曳到這裡';
     section.appendChild(grid);
     body.appendChild(section);
+    if (entities.length) {
+      // Placed before it is shown, so nothing slides into place on open.
+      grid.classList.add('is-placing');
+      homeApplyLayout(grid, homeLayout(homeItems(entities)));
+      requestAnimationFrame(() => grid.classList.remove('is-placing'));
+    }
   }
   renderHomeStatus();
   renderHomeCategory();
+  // Where the list was: an edit does not send it back to the top.
+  body.scrollTop = keepScroll;
+  document.getElementById('home-category').scrollTop = keepCategoryScroll;
   requestAnimationFrame(() => {
     updateFade(document.getElementById('home-summary'));
     updateFade(document.getElementById('home-rooms'));
@@ -2488,6 +2507,87 @@ function decorateHomeTile(node, e) {
   node.appendChild(remove);
 }
 
+/* ---- where tiles are: a room is a grid four cells wide ---- */
+const HOME_COLS = 4;
+
+// Places a room's tiles on its grid. Tiles that have a place keep it, and any
+// that would overlap are pushed down; a tile with nothing above it moves up;
+// tiles with no place yet take the first free one, in their order. `pin` is a
+// tile held at a place (the one being moved or resized), which the others
+// make way for. Returns Map(id -> {x, y, w, h}).
+function homeLayout(items, pin) {
+  const rects = [];
+  const free = (x, y, w, h) => x >= 0 && y >= 0 && x + w <= HOME_COLS && rects.every(
+    (r) => x + w <= r.x || r.x + r.w <= x || y + h <= r.y || r.y + r.h <= y);
+  const rest = pin ? items.filter((i) => i.id !== pin.id) : items.slice();
+  if (pin) {
+    const x = Math.max(0, Math.min(pin.x, HOME_COLS - pin.w));
+    rects.push({ id: pin.id, x, y: Math.max(0, pin.y), w: pin.w, h: pin.h });
+  }
+  const placed = (i) => Number.isInteger(i.x) && Number.isInteger(i.y);
+  const keepers = rest.filter(placed).sort((a, b) => a.y - b.y || a.x - b.x);
+  for (const it of keepers) {
+    const x = Math.max(0, Math.min(it.x, HOME_COLS - it.w));
+    let y = Math.max(0, it.y);
+    while (y > 0 && free(x, y - 1, it.w, it.h)) y--;
+    while (!free(x, y, it.w, it.h)) y++;
+    rects.push({ id: it.id, x, y, w: it.w, h: it.h });
+  }
+  for (const it of rest.filter((i) => !placed(i)).sort((a, b) => a.order - b.order)) {
+    let done = false;
+    for (let y = 0; !done; y++) {
+      for (let x = 0; x <= HOME_COLS - it.w; x++) {
+        if (free(x, y, it.w, it.h)) { rects.push({ id: it.id, x, y, w: it.w, h: it.h }); done = true; break; }
+      }
+    }
+  }
+  return new Map(rects.map((r) => [r.id, r]));
+}
+
+// A room's devices as layout items.
+function homeItems(entities) {
+  const ordered = homeOrdered(entities);
+  return ordered.map((e, index) => {
+    const rec = homeRecord(e.entity_id);
+    const span = homeSpan(rec);
+    return {
+      id: e.entity_id, w: span[0], h: span[1], order: index,
+      x: rec && Number.isInteger(rec.x) ? rec.x : undefined,
+      y: rec && Number.isInteger(rec.y) ? rec.y : undefined,
+    };
+  });
+}
+
+// Puts the tiles of `grid` where `layout` says, and makes the grid as tall as
+// they are. They slide there when they were somewhere else.
+function homeApplyLayout(grid, layout, extraRows) {
+  let rows = 0;
+  for (const node of grid.querySelectorAll(':scope > .tile[data-id]')) {
+    const r = layout.get(node.dataset.id.slice(HOME_PREFIX.length));
+    if (!r) continue;
+    const zoom = node.classList.contains('is-big') ? HOME_BIG_ZOOM : 1;
+    if (!node.classList.contains('is-lifted')) {
+      node.style.left = r.x * (HOME_TILE_W + HOME_GAP) / zoom + 'px';
+      node.style.top = r.y * (HOME_TILE_H + HOME_GAP) / zoom + 'px';
+    }
+    rows = Math.max(rows, r.y + r.h);
+  }
+  for (const r of layout.values()) rows = Math.max(rows, r.y + r.h);
+  rows = Math.max(rows, extraRows || 0);
+  grid.style.height = rows ? rows * (HOME_TILE_H + HOME_GAP) - HOME_GAP + 'px' : '';
+}
+
+// Remembers where every tile of a room is now.
+function homeSaveLayout(layout) {
+  for (const r of layout.values()) {
+    const rec = ensureHomeRecord(r.id);
+    rec.x = r.x;
+    rec.y = r.y;
+    rec.w = r.w;
+    rec.h = r.h;
+  }
+}
+
 // Viewport pixels per CSS pixel of an element's own layout: what the page
 // zoom makes of them, which is what pointer movement is divided by.
 function homeScale(el) { return el.getBoundingClientRect().width / el.offsetWidth || 1; }
@@ -2533,9 +2633,11 @@ function attachHomeResize(handle, node, e) {
       handle.removeEventListener('pointerup', up);
       handle.removeEventListener('pointercancel', up);
       preview.remove();
-      const rec = ensureHomeRecord(e.entity_id);
-      rec.w = span[0];
-      rec.h = span[1];
+      const room = grid.dataset.room;
+      const items = homeItems(homeData.entities.filter(
+        (x) => homeVisible(x) && roomKey(x.area) === room));
+      const now = homeLayout(items).get(e.entity_id);
+      homeSaveLayout(homeLayout(items, { id: e.entity_id, x: now.x, y: now.y, w: span[0], h: span[1] }));
       persistHome();
       renderHome();
     };
@@ -2545,8 +2647,9 @@ function attachHomeResize(handle, node, e) {
   });
 }
 
-// Pull a tile and it follows the pointer; a grey outline shows the cell it
-// would drop into, in this room or another.
+// Pull a tile and it follows the pointer; the others make way (they are
+// pushed along), and a grey outline shows the cell it would drop into, in
+// this room or another.
 function attachHomeDrag(node, e) {
   node.addEventListener('pointerdown', (ev) => {
     if (ev.button !== 0 || ev.target.closest('.home-resize, .home-remove')) return;
@@ -2556,25 +2659,55 @@ function attachHomeDrag(node, e) {
     const gs = homeScale(grid0);
     const zoom = node.classList.contains('is-big') ? HOME_BIG_ZOOM : 1;
     const span = homeSpan(homeRecord(e.entity_id));
-    let lifted = false, slot = null, scroll0 = 0, left0 = 0, top0 = 0, last = null;
+    const room0 = grid0.dataset.room;
+    let lifted = false, slot = null, last = null, target = null, finalLayout = null;
+    let grabX = 0, grabY = 0;
+    // What each room has, apart from this tile.
+    const others = (grid) => homeItems(homeData.entities.filter((x) => homeVisible(x)
+      && roomKey(x.area) === grid.dataset.room && x.entity_id !== e.entity_id));
 
     const lift = () => {
       lifted = true;
       node.setPointerCapture(ev.pointerId);
       const r = node.getBoundingClientRect();
-      const g = grid0.getBoundingClientRect();
-      left0 = (r.left - g.left) / gs;
-      top0 = (r.top - g.top) / gs;
-      scroll0 = body.scrollTop;
-      slot = homeGhost(span, 'home-ghost is-slot');
-      grid0.insertBefore(slot, node.nextSibling);
+      grabX = (startX - r.left) / gs;
+      grabY = (startY - r.top) / gs;
       node.classList.add('is-lifted');
-      node.style.left = left0 / zoom + 'px';
-      node.style.top = top0 / zoom + 'px';
+      slot = homeGhost(span, 'home-ghost is-slot');
+      grid0.appendChild(slot);
+      target = grid0;
+    };
+    const relayout = (m) => {
+      const under = document.elementsFromPoint(m.clientX, m.clientY)
+        .filter((el) => el !== node && el !== slot);
+      const over = under.find((el) => el.matches && el.matches('.home-grid.is-laid'));
+      const next = over || target;
+      if (next !== target) {
+        // Back to how the room it left is on its own.
+        const was = target;
+        target = next;
+        if (was !== grid0) homeApplyLayout(was, homeLayout(others(was)));
+        else homeApplyLayout(grid0, homeLayout(others(grid0)));
+        target.appendChild(slot);
+      }
+      const rect = target.getBoundingClientRect();
+      const left = (m.clientX - rect.left) / gs - grabX;
+      const top = (m.clientY - rect.top) / gs - grabY;
+      const x = Math.round(left / (HOME_TILE_W + HOME_GAP));
+      const y = Math.max(0, Math.round(top / (HOME_TILE_H + HOME_GAP)));
+      finalLayout = homeLayout(others(target), { id: e.entity_id, x, y, w: span[0], h: span[1] });
+      const mine = finalLayout.get(e.entity_id);
+      const hide = new Map(finalLayout);
+      hide.delete(e.entity_id);
+      homeApplyLayout(target, hide, mine.y + mine.h);
+      slot.style.left = mine.x * (HOME_TILE_W + HOME_GAP) + 'px';
+      slot.style.top = mine.y * (HOME_TILE_H + HOME_GAP) + 'px';
     };
     const place = (m) => {
-      node.style.left = (left0 + (m.clientX - startX) / gs + (body.scrollTop - scroll0)) / zoom + 'px';
-      node.style.top = (top0 + (m.clientY - startY) / gs + (body.scrollTop - scroll0)) / zoom + 'px';
+      // The tile itself, wherever the pointer is, in its own room's pixels.
+      const rect = grid0.getBoundingClientRect();
+      node.style.left = ((m.clientX - rect.left) / gs - grabX) / zoom + 'px';
+      node.style.top = ((m.clientY - rect.top) / gs - grabY) / zoom + 'px';
     };
     const move = (m) => {
       if (!lifted) {
@@ -2587,22 +2720,7 @@ function attachHomeDrag(node, e) {
       if (m.clientY < br.top + 36) body.scrollTop -= 14;
       else if (m.clientY > br.bottom - 36) body.scrollTop += 14;
       place(m);
-      const under = document.elementsFromPoint(m.clientX, m.clientY)
-        .filter((el) => el !== node && el !== slot);
-      const target = under.find((el) => el.matches && el.matches('.home-grid .tile[data-id]'));
-      const grid = (target && target.parentNode) || under.find((el) => el.matches && el.matches('.home-grid'));
-      if (!grid) return;
-      if (target) {
-        const r = target.getBoundingClientRect();
-        const before = m.clientY < r.top + r.height / 3
-          || (m.clientY < r.bottom - r.height / 3 && m.clientX < r.left + r.width / 2);
-        const ref = before ? target : target.nextSibling;
-        if (slot.parentNode !== grid || slot.nextSibling !== ref) grid.insertBefore(slot, ref);
-      } else if (slot.parentNode !== grid || slot.nextSibling) {
-        grid.classList.remove('is-empty');
-        if (grid.firstChild && grid.firstChild.nodeType === 3) grid.textContent = '';
-        grid.appendChild(slot);
-      }
+      relayout(m);
     };
     const end = (commit) => {
       node.removeEventListener('pointermove', move);
@@ -2611,21 +2729,19 @@ function attachHomeDrag(node, e) {
       document.removeEventListener('pointermove', move);
       document.removeEventListener('pointerup', up);
       if (!lifted) return;
-      const grid = slot.parentNode;
-      // The new order: the grid as it stands, the slot standing for the tile.
-      const ids = [];
-      for (const child of grid.children) {
-        if (child === slot) ids.push(e.entity_id);
-        else if (child !== node && child.dataset && child.dataset.id) {
-          ids.push(child.dataset.id.slice(HOME_PREFIX.length));
-        }
-      }
-      const room = grid.dataset.room;
+      const room = target.dataset.room;
       slot.remove();
       node.classList.remove('is-lifted');
-      node.style.left = node.style.top = '';
-      if (commit && last) moveHomeTile(e, room, ids);
-      else renderHome();
+      if (commit && last && finalLayout) {
+        if (room !== room0 && room !== OTHER_ROOM) {
+          const panel = homePanel();
+          panel.room_overrides = Object.assign({}, panel.room_overrides, { [e.entity_id]: room });
+          e.area = room;
+        }
+        homeSaveLayout(finalLayout);
+        persistHome();
+      }
+      renderHome();
     };
     const up = () => end(true);
     const cancel = () => end(false);
@@ -2636,19 +2752,6 @@ function attachHomeDrag(node, e) {
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
   });
-}
-
-// Renumber a room's devices as dropped, and move the device to the room if
-// it came from another.
-function moveHomeTile(e, room, ids) {
-  ids.forEach((id, i) => { ensureHomeRecord(id).order = i; });
-  if (room && room !== roomKey(e.area) && room !== OTHER_ROOM) {
-    const panel = homePanel();
-    panel.room_overrides = Object.assign({}, panel.room_overrides, { [e.entity_id]: room });
-    e.area = room;
-  }
-  persistHome();
-  renderHome();
 }
 
 /* ---- the order of the rooms: pull a capsule or a room's heading ---- */

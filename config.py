@@ -123,6 +123,10 @@ def tile_layout(t):
         out["w"] = 2 if t.get("w") == 2 else 1
     if "h" in t:
         out["h"] = 2 if t.get("h") == 2 else 1
+    for axis in ("x", "y"):
+        value = t.get(axis)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 200:
+            out[axis] = value
     if t.get("hidden"):
         out["hidden"] = True
     # Left out of its capsule (the lights, the locks...), not out of its room.
