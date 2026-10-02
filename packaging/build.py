@@ -74,10 +74,16 @@ def main():
         '--version-file', str(version_file),
         '--workpath', str(work / 'pyinstaller'), '--specpath', str(work),
         '--distpath', str(
-            output), '--add-data', f'{ROOT / "web"}{os.pathsep}web',
+            output),
+        # Every window is drawn natively: of web/ only the icon paths and the English texts are read.
+        '--add-data', f'{ROOT / "web" / "mdi-paths.js"}{os.pathsep}web',
+        '--add-data', f'{ROOT / "web" / "i18n.js"}{os.pathsep}web',
         '--add-data', f'{ROOT / "nativeui" / "icon_paths.json"}{os.pathsep}nativeui',
         # numpy is optional for Qt and Pillow; loading it costs memory.
         '--exclude-module', 'numpy', '--exclude-module', 'tkinter',
+        # ...and with no page to show, the browser engine (some 200 MB) stays out of the bundle.
+        '--exclude-module', f'{qt_package}.QtWebEngineCore', '--exclude-module', f'{qt_package}.QtWebEngineWidgets',
+        '--exclude-module', f'{qt_package}.QtWebChannel', '--exclude-module', f'{qt_package}.QtWebEngineQuick',
         '--hidden-import', 'PIL._imagingft',
         '--hidden-import', f'{qt_package}.QtCore',
         '--hidden-import', f'{qt_package}.QtWidgets',
