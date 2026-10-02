@@ -1075,6 +1075,11 @@ class Api:
     _STREAM_LEASE_S = 15.0
     _STREAM_MIN_GAP_S = 0.016
     _STREAM_DUTY = 0.45
+    # While the panel or a detail card is open the user is looking at its
+    # glass, and anything moving under it (a scrolling window) shows any lag
+    # as a seam at its edge: it may use more of the hub, for a short time.
+    _OVERLAY_STREAM_GAP_S = 0.004
+    _OVERLAY_STREAM_DUTY = 0.8
 
     def backdrop_stream(self, window_kind, token, want_w=0, want_h=0, last_hash=None,
                         channel=False):
@@ -1180,7 +1185,11 @@ class Api:
                 # 45% of the time, however many widgets there are, and they
                 # share that, instead of each adding its own full rate.
                 cost = time.monotonic() - started
-                pause = max(self._STREAM_MIN_GAP_S, cost / self._STREAM_DUTY) - cost
+                if "flyout" in self._streams or "popover" in self._streams:
+                    gap, duty = self._OVERLAY_STREAM_GAP_S, self._OVERLAY_STREAM_DUTY
+                else:
+                    gap, duty = self._STREAM_MIN_GAP_S, self._STREAM_DUTY
+                pause = max(gap, cost / duty) - cost
                 if pause > 0:
                     time.sleep(pause)
             else:
