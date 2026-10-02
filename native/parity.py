@@ -105,7 +105,7 @@ def native_render(scene):
         W, H = render.widget_size(size)
         tcol = render.tokens(theme, dim, style)
         form, rects = render.tile_layout(size, count)
-        crop = bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)).reduce(8).filter(ImageFilter.GaussianBlur(2))
+        crop = liquid.picture(bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)))
         lens = liquid.Lens(W, H, tcol["radius_panel"], 4)
         frame = lens.frame(crop, lens.card_mask(), [(x, y, w, h, tcol["radius_tile"]) for x, y, w, h in rects], 12)
         qf = QImage(frame.tobytes(), W, H, W * 4, QImage.Format_RGBA8888)
@@ -115,10 +115,11 @@ def native_render(scene):
     return img
 
 
-def small_url(size):
+def small_url(size, style):
     """The picture the lens refracts: the card's part of the backdrop, as the capture makes it."""
     W, H = render.widget_size(size)
-    small = bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)).reduce(8).filter(ImageFilter.GaussianBlur(2))
+    crop = bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H))
+    small = liquid.picture(crop) if style == "liquid" else crop.reduce(8).filter(ImageFilter.GaussianBlur(2))
     b = io.BytesIO()
     small.save(b, "PNG")
     return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
@@ -162,7 +163,7 @@ def next_theme():
       }
     """ % (json.dumps(size), json.dumps(tiles_for(count)), json.dumps(style), json.dumps(theme), json.dumps(STATES),
            "true" if dim else "false", bg_url, ORIGIN, ORIGIN,
-           "true" if style == "liquid" else "false", W, H, ORIGIN, SIZE[0], SIZE[1], small_url(size))
+           "true" if style == "liquid" else "false", W, H, ORIGIN, SIZE[0], SIZE[1], small_url(size, style))
     view.page().runJavaScript(script)
 
     def grab():

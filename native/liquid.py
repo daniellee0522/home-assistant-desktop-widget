@@ -27,6 +27,18 @@ def _smoothstep(a, b, x):
     return t * t * (3 - 2 * t)
 
 
+def picture(rgb):
+    """The lens's picture from the sharp capture (RGB, window size), as main.py makes it for
+    the liquid glass: much more detail than the 1/8 one of the classic glass, or the
+    refraction is blurred away. A light blur at half size removes what the quarter-size grid
+    cannot represent (fine patterns beat against it into stripes)."""
+    w, h = rgb.size
+    half = rgb.reduce(2) if not (w % 2 or h % 2) else rgb.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX)
+    half = half.filter(ImageFilter.GaussianBlur(1.5))
+    quarter = half.resize((max(1, round(w / 4)), max(1, round(h / 4))), Image.HAMMING)
+    return quarter.filter(ImageFilter.GaussianBlur(0.4))
+
+
 class Lens:
     def __init__(self, w, h, radius, cell=2):
         self.w, self.h = w, h

@@ -337,19 +337,25 @@ def backdrop_loop(win, bridge, stop):
         if wait > 0:
             time.sleep(wait)
         last = time.monotonic()
-        small = Image.frombuffer("RGBA", (w, h), got[1], "raw", "RGBA", 0, 1)
-        small = small.reduce(8) if not (w % 8 or h % 8) else small.resize((max(1, round(w / 8)), max(1, round(h / 8))), Image.BOX)
-        small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
-        if sent is not None and sent.size == small.size and max(
-                hi for _, hi in ImageChops.difference(sent, small).getextrema()) <= 3:
-            continue
-        sent = small
-        small = small.filter(ImageFilter.GaussianBlur(2))
+        full = Image.frombuffer("RGBA", (w, h), got[1], "raw", "RGBA", 0, 1)
         if lens:
-            out = lens.frame(small, card, tiles, 12 * win.scale)
+            # The liquid glass keeps 1/4 of the detail (main.py, the same steps).
+            small = Image.frombytes("RGB", full.size, full.tobytes(), "raw", "BGRX")
+            probe = small.reduce(8) if not (w % 8 or h % 8) else small.resize((max(1, round(w / 8)), max(1, round(h / 8))), Image.BOX)
+        else:
+            small = full.reduce(8) if not (w % 8 or h % 8) else full.resize((max(1, round(w / 8)), max(1, round(h / 8))), Image.BOX)
+            small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
+            probe = small
+        if sent is not None and sent.size == probe.size and max(
+                hi for _, hi in ImageChops.difference(sent, probe).getextrema()) <= 3:
+            continue
+        sent = probe
+        if lens:
+            out = lens.frame(liquid.picture(small), card, tiles, 12 * win.scale)
             bridge.frame.emit(QImage(out.tobytes(), out.width, out.height, out.width * 4,
                                      QImage.Format_RGBA8888).copy())
             continue
+        small = small.filter(ImageFilter.GaussianBlur(2))
         img = QImage(small.tobytes(), small.width, small.height, small.width * 3, QImage.Format_RGB888).copy()
         bridge.backdrop.emit(img)
 
