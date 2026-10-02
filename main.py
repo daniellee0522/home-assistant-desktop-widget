@@ -162,6 +162,11 @@ class Api:
         self._popover_size = None
         self._popover_last_resize_seq = -1
 
+        # The tray panel and the detail card are made when first wanted and
+        # released after a while unused: each is a browser page, tens of MB.
+        self._overlay_lock = threading.Lock()
+        self._ready = {}
+        self._release_timers = {}
         self._registry_cache = None
         self._home_states = {}
         self._home_rooms = []
@@ -218,6 +223,85 @@ class Api:
         setattr(self, "_wseq_" + widget_id, -1)
         if self._window is None:
             self._window = window
+
+    # How long the panel or the card may stay unused before its page is
+    # released; the next use makes it again (a few tenths of a second).
+    _OVERLAY_RELEASE_S = 300
+
+    def _ensure_overlay(self, kind):
+        """The popover or flyout window, made if it is not there (and waited
+        for until its page has drawn itself)."""
+        with self._overlay_lock:
+            self._cancel_release(kind)
+            window = self._popover_window if kind == "popover" else self._flyout_window
+            if window:
+                return window
+            ready = self._ready[kind] = threading.Event()
+            first = (self._cfg.get("widgets") or [{}])[0]
+            if kind == "popover":
+                # Its page numbers its resizes from 1 again.
+                self._popover_last_resize_seq = -1
+                window = _create_overlay_window(
+                    self, "HA Widget Detail", "popover", 260, 336, rehide=False,
+                    x=first.get("x", 200), y=first.get("y", 200))
+                window.events.shown += lambda: (
+                    self._apply_capture_exclusion(), _set_noactivate(window, True),
+                    self._apply_system_glass())
+                window.events.deactivated += lambda: threading.Thread(
+                    target=self._close_detail_page, args=(window,), daemon=True).start()
+                self._bind_popover_window(window)
+            else:
+                self._flyout_last_resize_seq = -1
+                init = self._flyout_size or _widget_initial_size(
+                    first.get("size", "2x4"), self._cfg.get("zoom", 100))
+                window = _create_overlay_window(
+                    self, "HA Widgets Panel", "flyout", init[0], init[1], rehide=False,
+                    x=200, y=200)
+                window.events.shown += self._apply_capture_exclusion
+                window.events.deactivated += lambda: threading.Thread(
+                    target=self.dismiss_flyout, daemon=True).start()
+                self._bind_flyout_window(window)
+        ready.wait(4.0)
+        return window
+
+    @staticmethod
+    def _close_detail_page(window):
+        # Clicking anywhere else closes the card. Deactivate fires on the GUI
+        # thread, so the page is called from another one.
+        try:
+            window.evaluate_js("window.closeDetail && window.closeDetail()")
+        except Exception:
+            pass
+
+    def _cancel_release(self, kind):
+        timer = self._release_timers.pop(kind, None)
+        if timer:
+            timer.cancel()
+
+    def _schedule_release(self, kind):
+        self._cancel_release(kind)
+        timer = threading.Timer(self._OVERLAY_RELEASE_S, self._release_overlay, (kind,))
+        timer.daemon = True
+        self._release_timers[kind] = timer
+        timer.start()
+
+    def _release_overlay(self, kind):
+        if (self._flyout_open if kind == "flyout" else "popover" in self._overlays_open):
+            return
+        with self._overlay_lock:
+            window = self._popover_window if kind == "popover" else self._flyout_window
+            if kind == "popover":
+                self._popover_window = None
+            else:
+                self._flyout_window = None
+            self._ready.pop(kind, None)
+        self._streams.pop(kind, None)
+        if window:
+            try:
+                window.dispose()
+            except Exception:
+                pass
+            self._apply_capture_exclusion()
 
     def _bind_popover_window(self, window):
         self._popover_window = window
@@ -296,7 +380,10 @@ class Api:
             pass
         return states
 
-    def ui_ready(self):
+    def ui_ready(self, kind=None):
+        ready = self._ready.get(kind)
+        if ready:
+            ready.set()
         self._ui_ready = True
         with self._pending_lock:
             pending, self._pending = self._pending, []
@@ -880,7 +967,7 @@ class Api:
         if not self._all_tiles() and not self._home_mode():
             self.open_settings_window()
             return
-        window = self._flyout_window
+        window = self._ensure_overlay("flyout")
         if window:
             window.prepare_for_show()
         hwnd = _get_hwnd(window) if window else None
@@ -971,6 +1058,7 @@ class Api:
                 window.hide()
             except Exception:
                 pass
+            self._schedule_release("flyout")
 
         threading.Thread(target=fade_then_hide, daemon=True).start()
 
@@ -1050,7 +1138,7 @@ class Api:
                      owner_kind=None):
         """Show the detail card over a tile. Coordinates are physical.
         `owner_kind` is the window the tile is in."""
-        if not self._popover_window:
+        if not self._ensure_overlay("popover"):
             return
         self._popover_owner = owner_kind
         # The card takes the theme of the window it opens from (the panel has
@@ -1176,6 +1264,7 @@ class Api:
                 self._popover_window.hide()
             except Exception:
                 pass
+            self._schedule_release("popover")
         # Forget the tile: the page shrinks the hidden window on the way out,
         # and that resize must not move it.
         self._popover_anchor = None
@@ -1811,6 +1900,8 @@ class Api:
             payload = json.dumps([[entity_id, new_state]], ensure_ascii=False,
                                  separators=(",", ":"))
             for window in (self._flyout_window, self._popover_window):
+                if not window:
+                    continue
                 try:
                     window.evaluate_js(
                         'if (typeof window.__haPushBatch === "function") window.__haPushBatch(%s)' % payload)
@@ -3035,47 +3126,11 @@ def main():
     for widget in api._cfg["widgets"]:
         _create_widget_window(api, widget)
     window = api._window                      # the first widget
-    # The tray panel starts the size of that widget, until its page measures.
-    init_w, init_h = _widget_initial_size(
-        api._cfg["widgets"][0]["size"], api._cfg.get("zoom", 100))
-
-    popover_window = _create_overlay_window(
-        api, "HA Widget Detail", "popover", 260, 336,
-        x=api._cfg["widgets"][0]["x"], y=api._cfg["widgets"][0]["y"])
-    api._bind_popover_window(popover_window)
-
-    def on_popover_deactivate():
-        # Clicking anywhere else closes the card. Deactivate fires on the GUI
-        # thread, so the page is called from another one.
-        def _close():
-            try:
-                popover_window.evaluate_js(
-                    "window.closeDetail && window.closeDetail()")
-            except Exception:
-                pass
-
-        threading.Thread(target=_close, daemon=True).start()
-
-    def on_popover_shown():
-        api._apply_capture_exclusion()
-        _set_noactivate(popover_window, True)
-        api._apply_system_glass()
-
-    popover_window.events.shown += on_popover_shown
-    popover_window.events.deactivated += on_popover_deactivate
-
-    # The tray panel is focusable so that losing focus can dismiss it.
-    flyout_window = _create_overlay_window(
-        api, "HA Widgets Panel", "flyout", init_w, init_h, x=200, y=200)
-    api._bind_flyout_window(flyout_window)
-    flyout_window.events.shown += api._apply_capture_exclusion
-    flyout_window.events.deactivated += lambda: threading.Thread(
-        target=api.dismiss_flyout, daemon=True).start()
-
     def hide_desktop():
         for widget_window in list(api._widgets.values()):
             widget_window.hide()
-        popover_window.hide()
+        if api._popover_window:
+            api._popover_window.hide()
         if api._settings_window:
             api._settings_window.hide()
         api._desktop_visible = False

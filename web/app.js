@@ -274,7 +274,7 @@ async function boot() {
   }
   updateConnDot();
   markLayoutReady();
-  try { await window.pywebview.api.ui_ready(); } catch (e) { /* ignore */ }
+  try { await window.pywebview.api.ui_ready(WINDOW_KIND); } catch (e) { /* ignore */ }
   startBackdropTicker();
 
   // After the first render, so an unreachable Home Assistant never delays
