@@ -219,6 +219,7 @@ function friendlyName(state) { return state && state.attributes && state.attribu
 window.__haPushBatch = function (items) {
   for (const [entityId, newState] of items) STATES[entityId] = newState;
   for (const [entityId] of items) updateTileByEntity(entityId);
+  if (IS_FLYOUT_WINDOW && homeMode()) scheduleHomeSummary();
 };
 // Short websocket drops usually recover within the client's backoff, so
 // "disconnected" is only shown once it has lasted a few seconds.
@@ -1032,7 +1033,64 @@ function applyShot(shot, generation, startedAt) {
   }
 }
 
+// The tray panel can have a picture of the user's choosing instead of the
+// desktop behind it. Nothing is sampled then: it is painted when the window
+// (or the picture) changes.
+let bgImage = null;
+let bgLoading = null;
+
+function customBgActive() {
+  return IS_FLYOUT_WINDOW && !!(CONFIG.panel && CONFIG.panel.bg_image) && !systemGlass();
+}
+
+function loadBgImage() {
+  const tag = CONFIG.panel.bg_image;
+  if (bgImage && bgImage.tag === tag) return Promise.resolve(bgImage.img);
+  if (bgLoading && bgLoading.tag === tag) return bgLoading.promise;
+  const promise = new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => { bgImage = { tag, img }; resolve(img); };
+    img.onerror = () => { bgLoading = null; resolve(null); };
+    img.src = '/panel-bg?v=' + encodeURIComponent(tag);
+  });
+  bgLoading = { tag, promise };
+  return promise;
+}
+
+function paintCustomBackdrop() {
+  return loadBgImage().then((img) => {
+    const glass = document.getElementById('backdrop-glass');
+    if (!img || !glass) return;
+    if (!glassCtx) glassCtx = glass.getContext('2d');
+    const box = viewportBox();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(box.width * dpr), h = Math.round(box.height * dpr);
+    if (glass.width !== w || glass.height !== h) { glass.width = w; glass.height = h; }
+    const card = cardGeometry();
+    if (!card) return;
+    applyGlassClip(glass, card, dpr);
+    // Blurred past the card's edge too, so the blur never fades to nothing
+    // at the border: the picture is drawn larger than the card by the blur.
+    const blur = (CONFIG.panel.bg_blur == null ? 28 : CONFIG.panel.bg_blur) * dpr * FLYOUT_ZOOM;
+    const over = Math.ceil(blur * 2);
+    const scale = Math.max((w + 2 * over) / img.width, (h + 2 * over) / img.height);
+    const dw = img.width * scale, dh = img.height * scale;
+    glassCtx.clearRect(0, 0, w, h);
+    glassCtx.filter = blur > 0 ? 'blur(' + blur + 'px)' : 'none';
+    glassCtx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    glassCtx.filter = 'none';
+    // A veil, so the tiles stay readable on any picture.
+    const theme = document.documentElement.getAttribute('data-theme');
+    const dark = theme === 'dark' || (theme === 'auto' &&
+      window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    glassCtx.fillStyle = dark ? 'rgba(12, 14, 18, 0.26)' : 'rgba(255, 255, 255, 0.2)';
+    glassCtx.fillRect(0, 0, w, h);
+    backdropHash = 'custom';
+  });
+}
+
 function refreshBackdrop() {
+  if (customBgActive()) return paintCustomBackdrop();
   if (backdropPending || !(window.pywebview && window.pywebview.api)) return Promise.resolve();
   backdropPending = true;
   const generation = backdropGeneration;
@@ -1099,6 +1157,7 @@ function stillSampling() {
 
 function canStream() {
   return !streamUnavailable && backdropPaced && !backdropSkipMs && !backdropAt
+    && !customBgActive()
     && !flyoutAnimating && !document.hidden && !stillSampling()
     && !!(window.pywebview && window.pywebview.api);
 }
@@ -1248,8 +1307,9 @@ function startBackdropTicker() {
     // backs off over still wallpaper; the open panel never does, since the
     // window behind it may start scrolling at any time.
     // A still widget waits to be told (see __widgetMoved), unless it is
-    // hidden or covered: then it keeps looking for the moment it is not.
-    if (stillSampling() && !backdropSkipMs && !flyoutAnimating) {
+    // hidden or covered: then it keeps looking for the moment it is not. The
+    // panel with a picture of its own has nothing to look at.
+    if ((customBgActive() || stillSampling()) && !backdropSkipMs && !flyoutAnimating) {
       backdropTimer = null;
       return;
     }
@@ -1393,12 +1453,25 @@ function valueTextFor(domain, state) {
   return '';
 }
 
+// What a media player is doing, in a few words: the track when it is playing.
+function mediaLabel(state) {
+  const s = state ? state.state : '';
+  const attrs = (state && state.attributes) || {};
+  const track = [attrs.media_title, attrs.media_artist].filter(Boolean).join(' · ');
+  if (s === 'playing') return track || attrs.app_name || '播放中';
+  if (s === 'paused') return '已暫停' + (track ? ' · ' + track : '');
+  if (s === 'off') return '關閉';
+  if (s === 'idle' || s === 'standby') return '待機';
+  if (s === 'unavailable') return '無法連線';
+  return s;
+}
+
 function defaultLabel(domain, state) {
   const s = state ? state.state : '';
   const map = {
     light: '燈光', switch: '插座', input_boolean: '虛擬開關', climate: s, fan: '風扇',
     cover: s === 'open' ? '開啟' : s === 'closed' ? '關閉' : s,
-    media_player: s, lock: s === 'locked' ? '已上鎖' : '未上鎖',
+    media_player: mediaLabel(state), lock: s === 'locked' ? '已上鎖' : '未上鎖',
     vacuum: s, scene: '場景', script: '腳本', automation: '自動化',
     binary_sensor: s === 'on' ? '偵測到' : '正常',
   };
@@ -1471,9 +1544,28 @@ function tileEl(tile, form, preview) {
   }
 
   if (domain === 'climate' && on) addClimateMiniButtons(div, tile);
+  if (domain === 'media_player' && ok && !preview &&
+      (state.state === 'playing' || state.state === 'paused')) addMediaMiniButton(div, tile, state);
 
   if (!preview) attachTileInteraction(div, tile);
   return div;
+}
+
+// Play or pause without opening the card.
+function addMediaMiniButton(div, tile, state) {
+  const wrap = document.createElement('div');
+  wrap.className = 'mini-btns';
+  const b = document.createElement('button');
+  b.className = 'mini-btn';
+  b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + (state.state === 'playing' ? ICON_PAUSE : ICON_PLAY) + '</svg>';
+  b.title = state.state === 'playing' ? '暫停' : '播放';
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    callService('media_player', 'media_play_pause', tile.entity);
+  });
+  wrap.appendChild(b);
+  div.appendChild(wrap);
 }
 
 function addClimateMiniButtons(div, tile) {
@@ -1725,7 +1817,8 @@ function updateTileByEntity(entityId) {
     const tile = findTile(id);
     if (!tile) continue;
     const old = document.querySelector('.tile[data-id="' + id + '"]');
-    if (old) old.replaceWith(tileEl(tile));
+    const home = isHomeId(id) && homeData.entities.find((e) => e.entity_id === tile.entity);
+    if (old) old.replaceWith(home ? homeTileNode(home) : tileEl(tile));
   }
   if (currentDetailTileId && ids.includes(currentDetailTileId)) renderDetailBody();
   if (IS_FLYOUT_WINDOW && homeMode()) scheduleHomeSummary();
@@ -1734,17 +1827,25 @@ function updateTileByEntity(entityId) {
 /* ============================================================
  * The Home-style panel
  * ============================================================ */
-// Every device, by room (a Home Assistant area, or where the user moved it),
-// in the tray panel. Tiles are the ordinary ones, so click, hold and
-// right-click behave as everywhere else.
+// The accessories that can be controlled, by room (a Home Assistant area, or
+// where the user moved them), in the tray panel. Temperature and humidity are
+// shown as status, not as tiles. Tiles are the ordinary ones, so click, hold
+// and right-click behave as everywhere else; in edit mode they are moved,
+// resized and removed instead.
 const HOME_PREFIX = 'home:';
-const OTHER_ROOM = '\u0000other';       // the chip for devices without a room
-let homeData = { entities: [], rooms: [] };
-let homeRoom = '';                      // '' = every room
+const OTHER_ROOM = '\u0000other';       // the room of devices that have none
+const HOME_GAP = 14, HOME_TILE_W = 152, HOME_TILE_H = 146;
+let homeData = { entities: [], sensors: [], rooms: [] };
+let homeRoom = '';                      // the room being looked at; '' = all
+let homeEditing = false;
+let homeSheet = false;                  // the add sheet is open
 let homeSummaryRaf = 0;
 
 function homeMode() { return !!(CONFIG.panel && CONFIG.panel.mode === 'home'); }
 function isHomeId(id) { return typeof id === 'string' && id.startsWith(HOME_PREFIX); }
+function homePanel() { return CONFIG.panel || (CONFIG.panel = { mode: 'home', tiles: null }); }
+function roomKey(area) { return area || OTHER_ROOM; }
+function hiddenRooms() { return new Set(homePanel().hidden_rooms || []); }
 
 function homeTileFromId(id) {
   const entity = id.slice(HOME_PREFIX.length);
@@ -1757,10 +1858,38 @@ function homeTileFromId(id) {
   };
 }
 
+function homeRecord(entityId) {
+  const id = HOME_PREFIX + entityId;
+  return (homePanel().home_tiles || []).find((t) => t.id === id);
+}
+
+// The record that keeps a device's layout (and name, icon), made on demand.
+function ensureHomeRecord(entityId) {
+  const panel = homePanel();
+  if (!Array.isArray(panel.home_tiles)) panel.home_tiles = [];
+  let rec = homeRecord(entityId);
+  if (!rec) {
+    rec = homeTileFromId(HOME_PREFIX + entityId);
+    panel.home_tiles.push(rec);
+  }
+  return rec;
+}
+
 function homeTileFor(entity) {
-  const id = HOME_PREFIX + entity.entity_id;
-  return ((CONFIG.panel && CONFIG.panel.home_tiles) || []).find((t) => t.id === id)
-    || homeTileFromId(id);
+  return homeRecord(entity.entity_id) || homeTileFromId(HOME_PREFIX + entity.entity_id);
+}
+
+// Tile shapes are the widget's: a square, a bar two cells long, a square of
+// four cells.
+function homeSpan(rec) {
+  const w = rec && rec.w === 2 ? 2 : 1;
+  const h = rec && rec.h === 2 && w === 2 ? 2 : 1;
+  return [w, h];
+}
+function homeForm(span) { return span[1] === 2 ? 'big' : span[0] === 2 ? 'bar' : 'small'; }
+
+async function persistHome() {
+  try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (e) { /* ignore */ }
 }
 
 async function loadHome() {
@@ -1768,21 +1897,144 @@ async function loadHome() {
   let data = null;
   try { data = await window.pywebview.api.get_home(); } catch (e) { /* offline */ }
   if (!data || data.error) { if (!homeData.entities.length) renderHome(); return; }
-  for (const e of data.entities) STATES[e.entity_id] = e.state;
-  homeData = { entities: data.entities, rooms: data.rooms };
+  for (const e of [...data.entities, ...data.sensors]) STATES[e.entity_id] = e.state;
+  homeData = { entities: data.entities, sensors: data.sensors, rooms: data.rooms };
   renderHome();
 }
 
-// Rooms with their devices, the unplaced ones last.
+// What is shown: not deleted, and in a room that is not switched off.
+function homeVisible(e) {
+  const rec = homeRecord(e.entity_id);
+  return !(rec && rec.hidden) && !hiddenRooms().has(roomKey(e.area));
+}
+
+// A room's devices in the order the user left them, the rest in the default
+// order after those.
+function homeOrdered(list) {
+  const index = new Map(list.map((e, i) => [e.entity_id, i]));
+  const key = (e) => {
+    const rec = homeRecord(e.entity_id);
+    return rec && typeof rec.order === 'number' ? rec.order : 1000 + index.get(e.entity_id);
+  };
+  return [...list].sort((a, b) => key(a) - key(b));
+}
+
 function homeGroups() {
   const groups = new Map();
   for (const e of homeData.entities) {
-    if (homeRoom === OTHER_ROOM ? !!e.area : (homeRoom && e.area !== homeRoom)) continue;
-    if (!groups.has(e.area)) groups.set(e.area, []);
-    groups.get(e.area).push(e);
+    if (!homeVisible(e)) continue;
+    const key = roomKey(e.area);
+    if (homeRoom && homeRoom !== key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
   }
-  return [...groups.entries()].sort(([a], [b]) =>
-    a === b ? 0 : !a ? 1 : !b ? -1 : a.localeCompare(b));
+  return [...groups.entries()]
+    .sort(([a], [b]) => a === b ? 0 : a === OTHER_ROOM ? 1 : b === OTHER_ROOM ? -1 : a.localeCompare(b))
+    .map(([key, list]) => [key, homeOrdered(list)]);
+}
+
+function homeRoomLabel(key) { return key === OTHER_ROOM ? '其他' : key; }
+
+/* ---- readings: temperature and humidity are status ---- */
+function homeReadings(sensors) {
+  const out = { temperature: [], humidity: [] };
+  for (const s of sensors) {
+    const st = STATES[s.entity_id];
+    const v = st ? parseFloat(st.state) : NaN;
+    if (!Number.isNaN(v)) out[s.kind].push(v);
+  }
+  return out;
+}
+
+function rangeText(values, digits, unit) {
+  if (!values.length) return '';
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const f = (n) => n.toFixed(digits);
+  return (f(lo) === f(hi) ? f(lo) : f(lo) + '–' + f(hi)) + unit;
+}
+
+function homeSensorsIn(key) {
+  return homeData.sensors.filter((s) => {
+    if (hiddenRooms().has(roomKey(s.area))) return false;
+    return key === undefined ? true : roomKey(s.area) === key;
+  });
+}
+
+function readingsText(sensors) {
+  const r = homeReadings(sensors);
+  return [rangeText(r.temperature, 1, '°'), rangeText(r.humidity, 0, '%')]
+    .filter(Boolean).join(' · ');
+}
+
+/* ---- status pills (the Home app's header) ---- */
+function homeSummaryItems() {
+  const visible = homeData.entities.filter(homeVisible);
+  const count = (domain, test) => visible.filter(
+    (e) => e.domain === domain && STATES[e.entity_id] && test(STATES[e.entity_id])).length;
+  const items = [];
+  const env = readingsText(homeSensorsIn());
+  if (env) items.push({ icon: 'thermometer', title: '環境', sub: env, tint: 'cyan' });
+  if (visible.some((e) => e.domain === 'light')) {
+    const n = count('light', (s) => s.state === 'on');
+    items.push({ icon: 'light', title: '電燈', sub: n ? n + ' 個開著' : '全部關閉', tint: 'yellow' });
+  }
+  const locks = visible.filter((e) => e.domain === 'lock').length;
+  if (locks) {
+    const open = count('lock', (s) => s.state !== 'locked' && s.state !== 'unavailable');
+    items.push(open
+      ? { icon: 'lock-open', title: '門鎖', sub: open + ' 個未鎖上', tint: 'red' }
+      : { icon: 'lock', title: '門鎖', sub: '全部已鎖上', tint: 'green' });
+  }
+  if (visible.some((e) => e.domain === 'cover')) {
+    const n = count('cover', (s) => s.state === 'open');
+    items.push({ icon: 'mdi:blinds', title: '窗簾', sub: n ? n + ' 個開啟' : '全部關閉', tint: 'blue' });
+  }
+  const playing = count('media_player', (s) => s.state === 'playing');
+  if (playing) items.push({ icon: 'media', title: '媒體', sub: playing + ' 個播放中', tint: 'green' });
+  return items;
+}
+
+function renderHomeStatus() {
+  const host = document.getElementById('home-summary');
+  host.innerHTML = '';
+  for (const item of homeSummaryItems()) {
+    const pill = document.createElement('div');
+    pill.className = 'home-pill is-' + item.tint;
+    const icon = document.createElement('span');
+    icon.className = 'home-pill-icon';
+    icon.innerHTML = svgIcon(item.icon);
+    const text = document.createElement('span');
+    text.className = 'home-pill-text';
+    const title = document.createElement('span');
+    title.className = 'home-pill-title';
+    title.textContent = item.title;
+    const sub = document.createElement('span');
+    sub.className = 'home-pill-sub';
+    sub.textContent = item.sub;
+    text.appendChild(title);
+    text.appendChild(sub);
+    pill.appendChild(icon);
+    pill.appendChild(text);
+    host.appendChild(pill);
+  }
+  for (const el of document.querySelectorAll('.home-room-status')) {
+    el.textContent = readingsText(homeSensorsIn(el.dataset.room));
+  }
+}
+
+function scheduleHomeSummary() {
+  if (homeSummaryRaf) return;
+  homeSummaryRaf = requestAnimationFrame(() => { homeSummaryRaf = 0; renderHomeStatus(); });
+}
+
+/* ---- rendering ---- */
+function homeToolButton(label, title, onClick, active) {
+  const b = document.createElement('button');
+  b.className = 'home-tool' + (active ? ' is-active' : '');
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
 }
 
 function renderHome() {
@@ -1790,19 +2042,44 @@ function renderHome() {
   document.getElementById('tiles').hidden = true;
   document.getElementById('empty-hint').hidden = true;
   view.hidden = false;
-  if (homeRoom && homeRoom !== OTHER_ROOM && !homeData.rooms.includes(homeRoom)) homeRoom = '';
-  renderHomeSummary();
+  view.classList.toggle('is-editing', homeEditing);
+  const hidden = hiddenRooms();
+  const allRooms = [...homeData.rooms];
+  if (homeData.entities.some((e) => !e.area)) allRooms.push(OTHER_ROOM);
+  if (homeRoom && (hidden.has(homeRoom) || !allRooms.includes(homeRoom))) homeRoom = '';
 
+  // Tools: add a device, edit the layout.
+  const tools = document.getElementById('home-tools');
+  tools.innerHTML = '';
+  tools.appendChild(homeToolButton('＋', '新增配件', () => { homeSheet = true; renderHome(); }));
+  tools.appendChild(homeToolButton(homeEditing ? '完成' : '編輯',
+    '調整配件的大小、位置與顯示的房間', () => { homeEditing = !homeEditing; renderHome(); }, homeEditing));
+
+  // Rooms: chips to look at one; while editing, to switch one off or on.
   const chips = document.getElementById('home-rooms');
   chips.innerHTML = '';
-  const names = ['', ...homeData.rooms];
-  if (homeData.rooms.length && homeData.entities.some((e) => !e.area)) names.push(OTHER_ROOM);
-  for (const name of names) {
+  const addChip = (key, label, off) => {
     const b = document.createElement('button');
-    b.className = 'home-chip' + (homeRoom === name ? ' is-active' : '');
-    b.textContent = name === '' ? '全部' : name === OTHER_ROOM ? '其他' : name;
-    b.addEventListener('click', () => { homeRoom = name; renderHome(); });
+    b.className = 'home-chip' + (!homeEditing && homeRoom === key ? ' is-active' : '')
+      + (off ? ' is-off' : '');
+    b.textContent = (homeEditing && key !== '' ? (off ? '◌ ' : '● ') : '') + label;
+    b.addEventListener('click', () => {
+      if (homeEditing && key !== '') {
+        const set = hiddenRooms();
+        if (set.has(key)) set.delete(key); else set.add(key);
+        homePanel().hidden_rooms = [...set];
+        persistHome();
+      } else {
+        homeRoom = key;
+      }
+      renderHome();
+    });
     chips.appendChild(b);
+  };
+  addChip('', '全部', false);
+  for (const key of allRooms) {
+    if (!homeEditing && hidden.has(key)) continue;
+    addChip(key, homeRoomLabel(key), hidden.has(key));
   }
 
   const body = document.getElementById('home-body');
@@ -1812,71 +2089,293 @@ function renderHome() {
   if (!groups.length) {
     const empty = document.createElement('div');
     empty.className = 'home-empty';
-    empty.textContent = homeData.entities.length ? '這個房間沒有配件' : '正在載入配件…';
+    empty.textContent = homeData.entities.length ? '沒有可顯示的配件' : '正在載入配件…';
     body.appendChild(empty);
   }
-  for (const [room, entities] of groups) {
+  for (const [key, entities] of groups) {
     const section = document.createElement('section');
     section.className = 'home-section';
     const title = document.createElement('div');
     title.className = 'home-section-title';
-    title.textContent = room || '其他';
+    const name = document.createElement('span');
+    name.textContent = homeRoomLabel(key);
+    const status = document.createElement('span');
+    status.className = 'home-room-status';
+    status.dataset.room = key;
+    title.appendChild(name);
+    title.appendChild(status);
     section.appendChild(title);
     const grid = document.createElement('div');
     grid.className = 'home-grid';
-    for (const e of entities) {
-      const tile = homeTileFor(e);
-      (entityToTileIds[e.entity_id] || (entityToTileIds[e.entity_id] = [])).push(tile.id);
-      grid.appendChild(tileEl(tile));
-    }
+    grid.dataset.room = key;
+    for (const e of entities) grid.appendChild(homeTileNode(e));
     section.appendChild(grid);
     body.appendChild(section);
   }
+  renderHomeStatus();
+  if (homeSheet) renderHomeSheet();
   syncWindowSize();
 }
 
-// What needs attention, at a glance, as the Home app's header does.
-function homeSummaryItems() {
-  const count = (domain, test) => homeData.entities.filter(
-    (e) => e.domain === domain && STATES[e.entity_id] && test(STATES[e.entity_id])).length;
-  const lights = count('light', (s) => s.state === 'on');
-  const unlocked = count('lock', (s) => s.state !== 'locked' && s.state !== 'unavailable');
-  const locks = homeData.entities.filter((e) => e.domain === 'lock').length;
-  const covers = count('cover', (s) => s.state === 'open');
-  const items = [];
-  if (lights) items.push({ icon: 'light', text: lights + ' 盞燈亮著' });
-  if (unlocked) items.push({ icon: 'lock-open', text: unlocked + ' 個門鎖未上鎖', warn: true });
-  else if (locks) items.push({ icon: 'lock', text: '門鎖皆已上鎖' });
-  if (covers) items.push({ icon: 'mdi:blinds', text: covers + ' 個窗簾或百葉窗開啟' });
-  return items;
+// One device's tile in its shape; in edit mode without its own behaviour but
+// with the means to move, resize and remove it.
+function homeTileNode(e) {
+  const tile = homeTileFor(e);
+  const rec = homeRecord(e.entity_id);
+  const span = homeSpan(rec);
+  const node = tileEl(tile, homeForm(span), homeEditing);
+  node.style.setProperty('--sc', span[0]);
+  node.style.setProperty('--sr', span[1]);
+  const ids = entityToTileIds[e.entity_id] || (entityToTileIds[e.entity_id] = []);
+  if (!ids.includes(tile.id)) ids.push(tile.id);
+  if (homeEditing) decorateHomeTile(node, e);
+  return node;
 }
 
-function renderHomeSummary() {
-  const host = document.getElementById('home-summary');
-  host.innerHTML = '';
-  const items = homeSummaryItems();
-  if (!items.length) {
+/* ---- editing: remove, resize, move ---- */
+function decorateHomeTile(node, e) {
+  node.classList.add('is-editing');
+  const remove = document.createElement('button');
+  remove.className = 'home-remove';
+  remove.textContent = '✕';
+  remove.title = '移除';
+  remove.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+  remove.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    ensureHomeRecord(e.entity_id).hidden = true;
+    persistHome();
+    renderHome();
+  });
+  node.appendChild(remove);
+  const handle = document.createElement('div');
+  handle.className = 'home-resize';
+  node.appendChild(handle);
+  attachHomeResize(handle, node, e);
+  attachHomeDrag(node, e);
+}
+
+// Pixels the page's zoom makes of one of the tile's own: what pointer
+// movement must be divided by to move something inside it.
+function homeScale(node) { return node.getBoundingClientRect().width / node.offsetWidth || 1; }
+
+function attachHomeResize(handle, node, e) {
+  handle.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    handle.setPointerCapture(ev.pointerId);
+    const rect = node.getBoundingClientRect();
+    const s = homeScale(node);
+    const preview = document.createElement('div');
+    preview.className = 'home-resize-preview';
+    node.parentNode.appendChild(preview);
+    let span = homeSpan(homeRecord(e.entity_id));
+    const place = () => {
+      const w = span[0] * HOME_TILE_W + (span[0] - 1) * HOME_GAP;
+      const h = span[1] * HOME_TILE_H + (span[1] - 1) * HOME_GAP;
+      const origin = node.getBoundingClientRect();
+      const parent = node.parentNode.getBoundingClientRect();
+      preview.style.left = (origin.left - parent.left) / s + 'px';
+      preview.style.top = (origin.top - parent.top) / s + 'px';
+      preview.style.width = w + 'px';
+      preview.style.height = h + 'px';
+    };
+    place();
+    const move = (m) => {
+      const cols = Math.max(1, Math.min(2, Math.round(
+        ((m.clientX - rect.left) / s + HOME_GAP) / (HOME_TILE_W + HOME_GAP))));
+      const rows = Math.max(1, Math.min(2, Math.round(
+        ((m.clientY - rect.top) / s + HOME_GAP) / (HOME_TILE_H + HOME_GAP))));
+      // The three shapes: a square, a bar, a large square.
+      span = rows === 2 && cols === 2 ? [2, 2] : cols === 2 ? [2, 1] : [1, 1];
+      place();
+    };
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      preview.remove();
+      const rec = ensureHomeRecord(e.entity_id);
+      rec.w = span[0];
+      rec.h = span[1];
+      persistHome();
+      renderHome();
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+}
+
+// Press and hold, then move: the tile follows the pointer and drops into the
+// cell it is nearest, in this room or another.
+function attachHomeDrag(node, e) {
+  node.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0 || ev.target.closest('.home-resize, .home-remove')) return;
+    const startX = ev.clientX, startY = ev.clientY;
+    let lifted = false, drop = null;
+    const s = homeScale(node);
+    const clear = () => {
+      for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-end')) {
+        el.classList.remove('drop-before', 'drop-after', 'drop-end');
+      }
+    };
+    const lift = () => {
+      lifted = true;
+      node.setPointerCapture(ev.pointerId);
+      node.classList.add('is-lifted');
+    };
+    const timer = setTimeout(lift, 250);
+    const move = (m) => {
+      if (!lifted) {
+        if (Math.hypot(m.clientX - startX, m.clientY - startY) > 8) end(false);
+        return;
+      }
+      node.style.transform = 'translate(' + (m.clientX - startX) / s + 'px,' + (m.clientY - startY) / s
+        + 'px) scale(1.04)';
+      clear();
+      drop = null;
+      const under = document.elementsFromPoint(m.clientX, m.clientY).filter((el) => el !== node);
+      const target = under.find((el) => el.matches && el.matches('.home-grid .tile[data-id]'));
+      const grid = under.find((el) => el.matches && el.matches('.home-grid'))
+        || (target && target.parentNode);
+      if (target && grid) {
+        const r = target.getBoundingClientRect();
+        const before = m.clientY < r.top + r.height / 3
+          || (m.clientY < r.bottom - r.height / 3 && m.clientX < r.left + r.width / 2);
+        target.classList.add(before ? 'drop-before' : 'drop-after');
+        drop = { room: grid.dataset.room, ref: target.dataset.id.slice(HOME_PREFIX.length), before };
+      } else if (grid) {
+        grid.classList.add('drop-end');
+        drop = { room: grid.dataset.room, ref: null, before: false };
+      }
+    };
+    const end = (commit) => {
+      clearTimeout(timer);
+      node.removeEventListener('pointermove', move);
+      node.removeEventListener('pointerup', up);
+      node.removeEventListener('pointercancel', cancel);
+      document.removeEventListener('pointermove', move);
+      clear();
+      node.classList.remove('is-lifted');
+      node.style.transform = '';
+      if (commit && lifted && drop) moveHomeTile(e, drop);
+    };
+    const up = () => end(true);
+    const cancel = () => end(false);
+    node.addEventListener('pointermove', move);
+    node.addEventListener('pointerup', up);
+    node.addEventListener('pointercancel', cancel);
+    document.addEventListener('pointermove', move);
+  });
+}
+
+// Put a device before or after another in a room (or last), renumbering that
+// room, and move it to the room if it came from another.
+function moveHomeTile(e, drop) {
+  const ordered = homeOrdered(homeData.entities.filter(
+    (x) => homeVisible(x) && x.entity_id !== e.entity_id && roomKey(x.area) === drop.room));
+  let at = ordered.length;
+  if (drop.ref) {
+    const i = ordered.findIndex((x) => x.entity_id === drop.ref);
+    if (i >= 0) at = drop.before ? i : i + 1;
+  }
+  ordered.splice(at, 0, e);
+  ordered.forEach((x, i) => { ensureHomeRecord(x.entity_id).order = i; });
+  if (drop.room !== roomKey(e.area) && drop.room !== OTHER_ROOM) {
+    const panel = homePanel();
+    panel.room_overrides = Object.assign({}, panel.room_overrides, { [e.entity_id]: drop.room });
+    e.area = drop.room;
+  }
+  persistHome();
+  renderHome();
+}
+
+/* ---- the add sheet: deleted devices, and rooms for the sensors ---- */
+function renderHomeSheet() {
+  const view = document.getElementById('home-view');
+  let sheet = document.getElementById('home-sheet');
+  if (!sheet) {
+    sheet = document.createElement('div');
+    sheet.id = 'home-sheet';
+    sheet.className = 'home-sheet';
+    view.appendChild(sheet);
+  }
+  sheet.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'home-sheet-head';
+  const title = document.createElement('span');
+  title.textContent = '新增配件';
+  const close = homeToolButton('完成', '關閉', () => { homeSheet = false; sheet.remove(); renderHome(); });
+  head.appendChild(title);
+  head.appendChild(close);
+  sheet.appendChild(head);
+
+  const gone = homeData.entities.filter((e) => { const r = homeRecord(e.entity_id); return r && r.hidden; });
+  const part = document.createElement('div');
+  part.className = 'home-sheet-title';
+  part.textContent = '已移除的配件';
+  sheet.appendChild(part);
+  if (!gone.length) {
     const none = document.createElement('div');
-    none.className = 'home-summary-item';
-    none.textContent = homeData.entities.length ? '一切正常' : '';
-    host.appendChild(none);
-    return;
+    none.className = 'home-empty';
+    none.textContent = '沒有已移除的配件';
+    sheet.appendChild(none);
   }
-  for (const item of items) {
-    const el = document.createElement('div');
-    el.className = 'home-summary-item' + (item.warn ? ' is-warn' : '');
-    const icon = document.createElement('span');
-    icon.className = 'home-summary-icon';
-    icon.innerHTML = svgIcon(item.icon);
-    el.appendChild(icon);
-    el.appendChild(document.createTextNode(item.text));
-    host.appendChild(el);
+  for (const e of gone) {
+    const row = document.createElement('button');
+    row.className = 'home-sheet-row';
+    row.textContent = '＋ ' + e.name + (e.area ? '　' + e.area : '');
+    row.addEventListener('click', () => {
+      const rec = ensureHomeRecord(e.entity_id);
+      delete rec.hidden;
+      rec.order = 1e6;
+      persistHome();
+      renderHome();
+    });
+    sheet.appendChild(row);
   }
-}
 
-function scheduleHomeSummary() {
-  if (homeSummaryRaf) return;
-  homeSummaryRaf = requestAnimationFrame(() => { homeSummaryRaf = 0; renderHomeSummary(); });
+  const sensors = document.createElement('div');
+  sensors.className = 'home-sheet-title';
+  sensors.textContent = '溫度與濕度感測器 (房間)';
+  sheet.appendChild(sensors);
+  const overrides = homePanel().room_overrides || {};
+  for (const s of homeData.sensors) {
+    const row = document.createElement('label');
+    row.className = 'home-sheet-sensor';
+    const name = document.createElement('span');
+    name.textContent = s.name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = overrides[s.entity_id] || '';
+    input.placeholder = s.area || '未指定';
+    input.setAttribute('list', 'home-room-options');
+    input.addEventListener('change', () => {
+      const next = Object.assign({}, homePanel().room_overrides);
+      const value = input.value.trim();
+      if (value) next[s.entity_id] = value; else delete next[s.entity_id];
+      homePanel().room_overrides = next;
+      s.area = value || s.area;
+      persistHome();
+      loadHome();
+    });
+    row.appendChild(name);
+    row.appendChild(input);
+    sheet.appendChild(row);
+  }
+  let list = document.getElementById('home-room-options');
+  if (!list) {
+    list = document.createElement('datalist');
+    list.id = 'home-room-options';
+    sheet.appendChild(list);
+  }
+  list.innerHTML = '';
+  for (const r of homeData.rooms) {
+    const o = document.createElement('option');
+    o.value = r;
+    list.appendChild(o);
+  }
 }
 
 
@@ -2028,6 +2527,15 @@ const ICON_LABELS = {
   'mdi:palette': '場景', 'mdi:robot': '自動化',
 };
 
+function syncPanelBgControls() {
+  const panel = CONFIG.panel || {};
+  const has = !!panel.bg_image;
+  document.getElementById('panel-bg-clear').hidden = !has;
+  document.getElementById('panel-bg-blur-block').hidden = !has;
+  document.getElementById('panel-bg-btn').textContent = has ? '更換圖片' : '選擇圖片';
+  document.getElementById('panel-bg-blur').value = panel.bg_blur == null ? 28 : panel.bg_blur;
+}
+
 function showEditMode(show) {
   document.getElementById('detail-body').hidden = show;
   document.getElementById('detail-edit-body').hidden = !show;
@@ -2035,11 +2543,7 @@ function showEditMode(show) {
 }
 
 // A Home panel device only has a record once it is customised.
-function ownHomeTile(id) {
-  const panel = CONFIG.panel || (CONFIG.panel = { mode: 'home', tiles: null });
-  if (!Array.isArray(panel.home_tiles)) panel.home_tiles = [];
-  if (!panel.home_tiles.some((t) => t.id === id)) panel.home_tiles.push(homeTileFromId(id));
-}
+function ownHomeTile(id) { ensureHomeRecord(id.slice(HOME_PREFIX.length)); }
 
 function populateEditForm() {
   if (isHomeId(currentDetailTileId)) ownHomeTile(currentDetailTileId);
@@ -2419,6 +2923,7 @@ function openSettingsView() {
   if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
   document.getElementById('panel-theme-select').value = CONFIG.panel_theme || 'follow';
   document.getElementById('panel-mode-select').value = (CONFIG.panel && CONFIG.panel.mode) || 'grid';
+  syncPanelBgControls();
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
   document.getElementById('test-conn-result').textContent = '';
   renderTileList();
@@ -3080,6 +3585,18 @@ function init() {
     restartSampling();
   });
   document.getElementById('panel-follow-btn').addEventListener('click', panelFollowWidgets);
+  document.getElementById('panel-bg-btn').addEventListener('click', async () => {
+    try { await window.pywebview.api.choose_panel_background(); } catch (e) { /* cancelled */ }
+    syncPanelBgControls();
+  });
+  document.getElementById('panel-bg-clear').addEventListener('click', async () => {
+    try { await window.pywebview.api.clear_panel_background(); } catch (e) { /* ignore */ }
+    syncPanelBgControls();
+  });
+  document.getElementById('panel-bg-blur').addEventListener('change', async (e) => {
+    CONFIG.panel = Object.assign({}, CONFIG.panel, { bg_blur: Number(e.target.value) });
+    try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (err) { /* ignore */ }
+  });
   document.getElementById('panel-mode-select').addEventListener('change', async (e) => {
     CONFIG.panel = Object.assign({}, CONFIG.panel, { mode: e.target.value });
     try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (err) { /* ignore */ }
@@ -3185,8 +3702,12 @@ window.__applyPrefs = function (cfg) {
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
   const homeKey = (c) => JSON.stringify([(c.panel || {}).mode, (c.panel || {}).home_tiles,
-    (c.panel || {}).room_overrides]);
+    (c.panel || {}).room_overrides, (c.panel || {}).hidden_rooms]);
+  const roomsKey = (c) => JSON.stringify([(c.panel || {}).mode, (c.panel || {}).room_overrides]);
   const homeChanged = IS_FLYOUT_WINDOW && homeKey(cfg) !== homeKey(CONFIG);
+  const homeRoomsChanged = IS_FLYOUT_WINDOW && roomsKey(cfg) !== roomsKey(CONFIG);
+  const bgKey = (c) => ((c.panel || {}).bg_image || '') + ':' + ((c.panel || {}).bg_blur || 0);
+  const bgChanged = IS_FLYOUT_WINDOW && bgKey(cfg) !== bgKey(CONFIG);
   const samplingChanged = cfg.glass_sampling !== CONFIG.glass_sampling;
   const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
   const layoutChanged = cfg.zoom !== CONFIG.zoom || sizeChanged;
@@ -3199,7 +3720,12 @@ window.__applyPrefs = function (cfg) {
     refreshBackdropSoon(0);
   }
   if (samplingChanged) restartSampling();
-  if (homeChanged) { if (homeMode()) loadHome(); else renderGrid(); }
+  if (homeChanged) {
+    if (!homeMode()) renderGrid();
+    else if (homeRoomsChanged) loadHome();
+    else renderHome();
+  }
+  if (bgChanged) refreshBackdropSoon(0);
   if (panelThemeChanged || themeChanged) applyTheme();
   if (editing && (widgetsChanged || tilesChanged)) renderEditor();
   if (!tilesChanged && !themeChanged && !layoutChanged) return;

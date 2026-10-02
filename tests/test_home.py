@@ -22,7 +22,7 @@ class BuildHome(unittest.TestCase):
             {'entity_id': 'light.d', 'device_id': 'd2'},                       # nowhere
         ]
         states = [state('light.a'), state('light.b'), state('light.c'), state('light.d')]
-        entities, rooms = home.build_home(states, self.areas, self.devices, registry,
+        entities, _, rooms = home.build_home(states, self.areas, self.devices, registry,
                                           {'light.c': 'Garden'})
         area = {e['entity_id']: e['area'] for e in entities}
         self.assertEqual(area, {'light.a': 'Living room', 'light.b': 'Bedroom',
@@ -37,20 +37,45 @@ class BuildHome(unittest.TestCase):
         ]
         states = [state('light.hidden'), state('light.off'), state('sensor.rssi'),
                   state('automation.x'), state('script.y'), state('scene.z'),
-                  state('lock.front')]
-        entities, _ = home.build_home(states, [], [], registry, {})
+                  state('input_boolean.h'), state('binary_sensor.b'), state('lock.front')]
+        entities, _, _ = home.build_home(states, [], [], registry, {})
         self.assertEqual([e['entity_id'] for e in entities], ['lock.front'])
 
     def test_entities_without_a_registry_entry_are_kept(self):
-        entities, rooms = home.build_home([state('switch.legacy')], [], [], [], {})
+        entities, _, rooms = home.build_home([state('switch.legacy')], [], [], [], {})
         self.assertEqual(entities[0]['area'], '')
         self.assertEqual(rooms, [])
 
     def test_order_is_by_kind_then_name(self):
-        states = [state('sensor.b', 'B'), state('light.z', 'Z'), state('light.a', 'A')]
-        entities, _ = home.build_home(states, [], [], [], {})
+        states = [state('switch.b', 'B'), state('light.z', 'Z'), state('light.a', 'A')]
+        entities, _, _ = home.build_home(states, [], [], [], {})
         self.assertEqual([e['entity_id'] for e in entities],
-                         ['light.a', 'light.z', 'sensor.b'])
+                         ['light.a', 'light.z', 'switch.b'])
+
+    def test_temperature_and_humidity_are_status_not_tiles(self):
+        def sensor(entity_id, **attrs):
+            return {'entity_id': entity_id, 'state': '21', 'attributes': attrs}
+        states = [sensor('sensor.t', device_class='temperature'),
+                  sensor('sensor.h', device_class='humidity', unit_of_measurement='%'),
+                  sensor('sensor.homepod_mini_temperature', unit_of_measurement='°C'),
+                  sensor('sensor.homepod_mini_humidity', unit_of_measurement='%'),
+                  sensor('sensor.battery', device_class='battery', unit_of_measurement='%'),
+                  sensor('sensor.cpu', unit_of_measurement='%')]
+        registry = [{'entity_id': 'sensor.t', 'area_id': 'lr'}]
+        entities, sensors, rooms = home.build_home(states, self.areas, [], registry, {})
+        self.assertEqual(entities, [])
+        self.assertEqual({s['entity_id']: s['kind'] for s in sensors},
+                         {'sensor.t': 'temperature', 'sensor.h': 'humidity',
+                          'sensor.homepod_mini_temperature': 'temperature',
+                          'sensor.homepod_mini_humidity': 'humidity'})
+        self.assertEqual(rooms, ['Living room'])
+
+    def test_unavailable_accessory_without_a_room_is_left_out(self):
+        gone = state('switch.cam_setting'); gone['state'] = 'unavailable'
+        placed = state('switch.cam_power'); placed['state'] = 'unavailable'
+        entities, _, _ = home.build_home([gone, placed], self.areas, [],
+                                         [{'entity_id': 'switch.cam_power', 'area_id': 'bd'}], {})
+        self.assertEqual([e['entity_id'] for e in entities], ['switch.cam_power'])
 
 
 class PanelConfig(unittest.TestCase):
@@ -60,7 +85,11 @@ class PanelConfig(unittest.TestCase):
                                     'home_tiles': [{'entity': 'a'}],
                                     'room_overrides': {'light.a': ' Study ', 'b': '', 3: 'x'}}, keep)
         self.assertEqual(panel, {'mode': 'grid', 'tiles': None, 'home_tiles': [{'entity': 'a'}],
-                                 'room_overrides': {'light.a': 'Study'}})
+                                 'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [],
+                                 'bg_image': '', 'bg_blur': 28})
+        loud = config.clean_panel({'hidden_rooms': ['Garage', 3], 'bg_image': 'x.jpg', 'bg_blur': 999}, keep)
+        self.assertEqual((loud['hidden_rooms'], loud['bg_image'], loud['bg_blur']),
+                         (['Garage'], 'x.jpg', 80))
         self.assertEqual(config.clean_panel({'mode': 'home', 'tiles': []}, keep)['mode'], 'home')
 
 

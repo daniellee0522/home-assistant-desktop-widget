@@ -19,7 +19,10 @@
     <div id="tiles" class="tiles-grid"></div>
     <!-- The tray panel's Home view: every device by room (renderHome). -->
     <div id="home-view" class="home-view" hidden>
-      <div id="home-summary" class="home-summary"></div>
+      <div class="home-head">
+        <div id="home-summary" class="home-summary"></div>
+        <div id="home-tools" class="home-tools"></div>
+      </div>
       <div id="home-rooms" class="home-rooms"></div>
       <div id="home-body" class="home-body"></div>
     </div>
@@ -154,6 +157,18 @@
             <option value="compat">相容模式 (較耗資源，會出現在截圖)</option>
           </select>
           <div class="slider-hint">毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。</div>
+        </div>
+        <div class="slider-block">
+          <div class="slider-label"><span>面板背景圖片</span></div>
+          <div class="row gap">
+            <button id="panel-bg-btn" class="pill-btn small">選擇圖片</button>
+            <button id="panel-bg-clear" class="pill-btn small ghost" hidden>移除</button>
+          </div>
+          <div id="panel-bg-blur-block">
+            <div class="slider-label"><span>圖片模糊程度</span></div>
+            <input id="panel-bg-blur" type="range" min="0" max="80" step="2">
+          </div>
+          <div class="slider-hint">在系統匣面板的玻璃位置顯示你選的圖片（先套用一層模糊），取代桌面的毛玻璃。</div>
         </div>
         <div class="slider-block">
           <div class="slider-label"><span>毛玻璃更新</span></div>

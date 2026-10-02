@@ -15,9 +15,9 @@ def api_type():
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
     names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
              '_eval_all', '_all_windows', '_all_tiles', '_watched_entities',
-             '_home_mode', '_on_ha_event'}
+             '_home_mode', '_on_ha_event', '_clean_tiles'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    scope = {'json': json, 'threading': threading}
+    scope = {'json': json, 'threading': threading, 'cfgmod': config}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
     return scope['Api']
 
@@ -54,6 +54,17 @@ class Regressions(unittest.TestCase):
         self.api._window.evaluate_js.reset_mock()
         self.api._on_ha_event('light.on_a_tile', {'state': 'on'})
         self.api._flyout_window.evaluate_js.assert_called_once()
+
+    def test_home_tile_layout_fields_survive_cleaning(self):
+        tiles = self.api._clean_tiles([
+            {'id': 'home:a', 'entity': 'light.a', 'w': 2, 'h': 2, 'order': 3, 'hidden': True},
+            {'id': 'home:b', 'entity': 'light.b', 'w': 7, 'h': 'x', 'order': 'later'},
+            {'id': 'plain', 'entity': 'light.c'}])
+        self.assertEqual((tiles[0]['w'], tiles[0]['h'], tiles[0]['order'], tiles[0]['hidden']), (2, 2, 3.0, True))
+        self.assertEqual((tiles[1]['w'], tiles[1]['h']), (1, 1))
+        self.assertNotIn('order', tiles[1])
+        self.assertNotIn('hidden', tiles[1])
+        self.assertNotIn('w', tiles[2])
 
     def test_status_reaches_panel_and_settings(self):
         self.api._on_ha_status(False)

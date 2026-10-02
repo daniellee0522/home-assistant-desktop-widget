@@ -350,11 +350,61 @@ class Api:
             return {"rooms": [], "entities": [], "error": True}
         areas, devices, registry = self._registry()
         overrides = (self._cfg.get("panel") or {}).get("room_overrides") or {}
-        entities, rooms = home.build_home(states, areas, devices, registry, overrides)
-        self._home_states = {e["entity_id"]: e["state"] for e in entities}
+        entities, sensors, rooms = home.build_home(
+            states, areas, devices, registry, overrides)
+        self._home_states = {e["entity_id"]: e["state"] for e in (*entities, *sensors)}
         self._home_rooms = rooms
         self._sync_client_entities()
-        return {"rooms": rooms, "entities": entities}
+        return {"rooms": rooms, "entities": entities, "sensors": sensors}
+
+    # ---- the panel's background picture ----
+
+    _BG_MAX_SIDE = 1600
+
+    def _panel_bg_path(self):
+        """The chosen picture's file, or None."""
+        tag = (self._cfg.get("panel") or {}).get("bg_image") or ""
+        if not tag:
+            return None
+        path = os.path.join(os.path.dirname(cfgmod.CONFIG_FILE), "panel_bg.jpg")
+        return path if os.path.exists(path) else None
+
+    def choose_panel_background(self):
+        """Ask for a picture, keep a reduced copy in the settings folder and
+        use it behind the panel (blurred; see paintCustomBackdrop)."""
+        source = webview.choose_image_file("選擇面板背景圖片")
+        if not source:
+            return False
+        try:
+            from PIL import Image
+            with Image.open(source) as image:
+                image = image.convert("RGB")
+                # A phone-sized picture is plenty behind a blur, and what a
+                # page decodes is what it keeps in memory.
+                image.thumbnail((self._BG_MAX_SIDE, self._BG_MAX_SIDE))
+                folder = os.path.dirname(cfgmod.CONFIG_FILE)
+                os.makedirs(folder, exist_ok=True)
+                image.save(os.path.join(folder, "panel_bg.jpg"), "JPEG", quality=88)
+        except Exception:
+            return False
+        self._set_panel_bg(str(int(time.time())) + ".jpg")
+        return True
+
+    def clear_panel_background(self):
+        path = self._panel_bg_path()
+        self._set_panel_bg("")
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return True
+
+    def _set_panel_bg(self, tag):
+        panel = dict(self._cfg.get("panel") or {})
+        panel["bg_image"] = tag
+        self._cfg["panel"] = cfgmod.clean_panel(panel, self._clean_tiles)
+        self._tiles_changed()
 
     def get_room_names(self):
         """Room names to offer when moving a device."""
@@ -403,6 +453,11 @@ class Api:
                 "icon": (t.get("icon") or "").strip(),
                 "on_mode": t.get("on_mode") or "cool",
                 "temp_step": t.get("temp_step", 1),
+                # The Home panel's layout: spans in tile cells, deleted, order.
+                **({"w": 2 if t.get("w") == 2 else 1} if "w" in t else {}),
+                **({"h": 2 if t.get("h") == 2 else 1} if "h" in t else {}),
+                **({"hidden": True} if t.get("hidden") else {}),
+                **({"order": float(t["order"])} if isinstance(t.get("order"), (int, float)) else {}),
             })
         return clean
 
@@ -1269,6 +1324,9 @@ class Api:
         """
         if window_kind == "settings":
             # A solid panel: no backdrop to take, and no capture to pay for.
+            return {"skip": True, "retry_ms": 60000}
+        if window_kind == "flyout" and self._panel_bg_path():
+            # The panel has a picture of its own behind it.
             return {"skip": True, "retry_ms": 60000}
         is_popover = window_kind == "popover"
         window = self._window_for(window_kind)

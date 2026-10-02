@@ -27,7 +27,7 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtGui import QCursor
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
 
 _app = None
 _heartbeat = None
@@ -235,7 +235,25 @@ class _Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.split("?", 1)[0] == "/qwebchannel.js":
+        route = self.path.split("?", 1)[0]
+        if route == "/panel-bg":
+            # The picture the user chose for the tray panel.
+            path = getattr(self.server, "api", None) and self.server.api._panel_bg_path()
+            body = b""
+            if path:
+                try:
+                    with open(path, "rb") as f:
+                        body = f.read()
+                except OSError:
+                    body = b""
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if route == "/qwebchannel.js":
             body = _webchannel_script()
             self.send_response(200 if body else 404)
             self.send_header("Content-Type", "text/javascript; charset=utf-8")
@@ -542,6 +560,15 @@ class _Marshal(QObject):
 
 
 _marshal = None
+
+
+def choose_image_file(title):
+    """A native open-file dialog for a picture; the path, or "" if cancelled."""
+    def ask():
+        path, _ = QFileDialog.getOpenFileName(
+            None, title, "", "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        return path or ""
+    return _invoke(None, ask, wait=True) or ""
 
 
 def _invoke(widget, fn, wait=False):

@@ -80,7 +80,8 @@ DEFAULT_CONFIG = {
     # every device is shown by room; home_tiles are the customised ones
     # (name, icon) and room_overrides maps an entity to a room name that
     # replaces its Home Assistant area.
-    "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {}},
+    "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {},
+              "hidden_rooms": [], "bg_image": "", "bg_blur": 28},
 }
 
 # Widget sizes, named rows x columns: "2x4" is two rows of four tiles. Every
@@ -223,6 +224,7 @@ def clean_panel(panel, clean_tiles):
     tiles = panel.get("tiles")
     home_tiles = panel.get("home_tiles")
     overrides = panel.get("room_overrides")
+    hidden = panel.get("hidden_rooms")
     return {
         "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
         "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
@@ -230,7 +232,21 @@ def clean_panel(panel, clean_tiles):
         "room_overrides": ({str(k): str(v).strip()[:40] for k, v in overrides.items()
                             if isinstance(k, str) and str(v).strip()}
                            if isinstance(overrides, dict) else {}),
+        # Rooms left off the Home view's main screen.
+        "hidden_rooms": ([str(r) for r in hidden if isinstance(r, str)]
+                         if isinstance(hidden, list) else []),
+        # A picture behind the panel (a version tag; the file is in the
+        # settings folder), blurred by this many pixels.
+        "bg_image": str(panel.get("bg_image") or ""),
+        "bg_blur": _int_between(panel.get("bg_blur"), 0, 80, 28),
     }
+
+
+def _int_between(value, low, high, default):
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def save_config(cfg):
