@@ -14,6 +14,8 @@ const EN_TEXT = {
   '主題':'Theme', '跟隨系統':'Follow system', '淺色':'Light', '深色':'Dark',
   '玻璃外觀':'Glass appearance', '經典毛玻璃':'Classic frost', '液態玻璃':'Liquid glass',
   'Windows 玻璃':'Windows glass', '每列數量':'Columns', '工作列面板':'Tray panel', '同上':'Same as widget',
+  '毛玻璃更新':'Glass updates', '動態 (桌布變動時即時更新)':'Live (follows every wallpaper change)', '靜態 (每隔幾秒檢查一次，最省資源)':'Still (checks every few seconds, lightest)',
+  '使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。':'With an animated wallpaper (such as Wallpaper Engine), live re-samples on every frame. Neither costs anything while the wallpaper is paused or still; choose still to save resources while it plays.',
   '毛玻璃來源':'Glass source', '系統繪製 (最省資源，即時)':'System rendered (live, efficient)',
   '畫面擷取 (widget 不出現在截圖／錄影)':'Screen capture (widget hidden from recordings)',
   '相容模式 (較耗資源，會出現在截圖)':'Compatibility (widget visible in recordings)',

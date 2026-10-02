@@ -225,7 +225,11 @@ class _Output:
         self.copy_size = (0, 0)
         self.staging = None
         self.staging_size = (0, 0)
-        self.seq = 0
+        # Counts the frames this output has taken. It starts from the clock,
+        # not zero, so that after a rebuild (the duplication is released when
+        # nothing has asked for a while) a caller's older `after` still reads
+        # as stale and is answered with the screen, not "unchanged" for ever.
+        self.seq = int(time.monotonic() * 1000)
         self.history = []          # (seq, texture-space rects that changed)
         self.valid = None          # texture-space area `copy` holds
 

@@ -59,6 +59,10 @@ DEFAULT_CONFIG = {
     #   "compat"  - slower wallpaper rendering; the widget stays visible
     #   "system"  - DWM glass; only offered with HA_WIDGET_SYSTEM_GLASS set
     "glass_mode": "fast",
+    # How often a widget's glass looks at the desktop behind it:
+    #   "live"  - whenever the picture there changes (video wallpapers move it)
+    #   "still" - now and then, and when the widget moves or changes
+    "glass_sampling": "live",
     # The tray panel's own theme; "follow" uses the widget's.
     "panel_theme": "follow",
     # Dim the widget once the desktop has been covered for dim_after_sec

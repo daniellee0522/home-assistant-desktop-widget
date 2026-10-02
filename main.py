@@ -251,6 +251,7 @@ class Api:
             "lock_position": bool(self._cfg.get("lock_position", False)),
             "zoom": self._cfg.get("zoom", 100),
             "glass_mode": self._cfg.get("glass_mode", "fast"),
+            "glass_sampling": self._cfg.get("glass_sampling", "live"),
             "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
             "system_glass_active": self._system_glass_status(),
             "panel_theme": self._cfg.get("panel_theme", "follow"),
@@ -562,6 +563,7 @@ class Api:
         "lock_position": bool,
         "zoom": lambda v: max(50, min(200, int(v))),
         "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",
+        "glass_sampling": lambda v: v if v in ("live", "still") else "live",
         "dim_when_idle": bool,
         "dim_after_sec": lambda v: max(10, min(3600, int(v))),
     }

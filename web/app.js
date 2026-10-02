@@ -103,7 +103,7 @@ function iconNameFor(tile, state) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', tiles: [],
+  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', glass_sampling: 'live', tiles: [],
   widgets: [], panel: { mode: 'grid', tiles: null },
   dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
@@ -438,6 +438,7 @@ const BACKDROP_FLOOR_MS = 16;
 // page), so it samples faster and never backs off.
 const PANEL_DUTY = 2;
 const PANEL_FLOOR_MS = 16;
+const STILL_SAMPLING_MS = 4000;       // 'still' sampling: how often to look
 const BACKDROP_IDLE_MS = 3000;        // once the picture stops changing
 // Identical frames in a row before the desktop counts as still.
 const BACKDROP_STILL_BEFORE_IDLE = 4;
@@ -1017,7 +1018,8 @@ function refreshBackdrop() {
   return window.pywebview.api
     .get_desktop_backdrop(WINDOW_KIND, backdropHash,
                           Math.round(box.width * dpr), Math.round(box.height * dpr),
-                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null)
+                          backdropAt ? backdropAt.x : null, backdropAt ? backdropAt.y : null,
+                          stillSampling() ? 0 : null)
     .then((shot) => applyShot(shot, generation, startedAt))
     .catch(() => { backdropHash = null; backdropPending = false; });
 }
@@ -1061,9 +1063,16 @@ let streamSeq = 0;
 let queuedShot = null;
 const STREAM_BEAT_MS = 5000;
 
+// 'Still' sampling: a widget looks at the desktop behind it now and then
+// instead of following every change (a video wallpaper changes it all the
+// time). Dragging, and the overlay windows, always sample live.
+function stillSampling() {
+  return CONFIG.glass_sampling === 'still' && WINDOW_ROLE === 'grid' && !backdropAt;
+}
+
 function canStream() {
   return !streamUnavailable && backdropPaced && !backdropSkipMs && !backdropAt
-    && !flyoutAnimating && !document.hidden
+    && !flyoutAnimating && !document.hidden && !stillSampling()
     && !!(window.pywebview && window.pywebview.api);
 }
 
@@ -1167,6 +1176,15 @@ function refreshBackdropSoon(delay) {
   backdropSoonTimer = setTimeout(refreshBackdrop, delay === undefined ? 60 : delay);
 }
 
+// The sampling mode changed: end any stream and start over in the new one.
+function restartSampling() {
+  stopBackdropTicker();
+  backdropHash = null;
+  backdropPaced = false;
+  backdropStill = 0;
+  startBackdropTicker();
+}
+
 function stopBackdropTicker() {
   leaveStream(false);
   clearTimeout(backdropTimer);
@@ -1199,7 +1217,7 @@ function startBackdropTicker() {
     // window behind it may start scrolling at any time.
     const openPanel = IS_FLYOUT_WINDOW && flyoutOpen;
     const wait = flyoutAnimating ? 40 : (backdropSkipMs
-      || (backdropPaced ? 0 : openPanel
+      || (stillSampling() ? STILL_SAMPLING_MS : backdropPaced ? 0 : openPanel
         ? Math.max(PANEL_FLOOR_MS, Math.round(backdropFrameMs * PANEL_DUTY))
         : backdropStill >= BACKDROP_STILL_BEFORE_IDLE
           ? BACKDROP_IDLE_MS
@@ -2172,6 +2190,7 @@ function openSettingsView() {
   document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
   const glassSelect = document.getElementById('glass-mode-select');
   glassSelect.value = CONFIG.glass_mode || 'fast';
+  document.getElementById('glass-sampling-select').value = CONFIG.glass_sampling || 'live';
   // Native glass is only offered where it is supported.
   glassSelect.querySelector('option[value="system"]').hidden = CONFIG.system_glass_ok !== true;
   if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
@@ -2797,6 +2816,10 @@ function init() {
     backdropPaced = false;
     refreshBackdropSoon(0);
   });
+  document.getElementById('glass-sampling-select').addEventListener('change', async (e) => {
+    await savePref({ glass_sampling: e.target.value });
+    restartSampling();
+  });
   document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
     await savePref({ panel_theme: e.target.value });
   });
@@ -2897,6 +2920,7 @@ window.__applyPrefs = function (cfg) {
   const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
+  const samplingChanged = cfg.glass_sampling !== CONFIG.glass_sampling;
   const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
   const layoutChanged = cfg.zoom !== CONFIG.zoom || sizeChanged;
   CONFIG = Object.assign({}, CONFIG, cfg);
@@ -2907,6 +2931,7 @@ window.__applyPrefs = function (cfg) {
     backdropHash = null;
     refreshBackdropSoon(0);
   }
+  if (samplingChanged) restartSampling();
   if (panelThemeChanged || themeChanged) applyTheme();
   if (editing && (widgetsChanged || tilesChanged)) renderEditor();
   if (!tilesChanged && !themeChanged && !layoutChanged) return;

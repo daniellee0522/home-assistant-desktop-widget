@@ -138,6 +138,14 @@
           <div class="slider-hint">毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。</div>
         </div>
         <div class="slider-block">
+          <div class="slider-label"><span>毛玻璃更新</span></div>
+          <select id="glass-sampling-select" class="wide-select">
+            <option value="live">動態 (桌布變動時即時更新)</option>
+            <option value="still">靜態 (每隔幾秒檢查一次，最省資源)</option>
+          </select>
+          <div class="slider-hint">使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。</div>
+        </div>
+        <div class="slider-block">
           <div class="slider-label"><span>縮放比例</span><span id="zoom-value">100%</span></div>
           <input id="zoom-range" type="range" min="50" max="200" step="5">
         </div>
