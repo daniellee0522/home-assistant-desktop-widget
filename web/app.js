@@ -1773,6 +1773,8 @@ function flyoutLayers() {
 // the entrance and capture the backdrop there, then report back through
 // backdrop_armed (see _arm_backdrop in main.py).
 window.__armBackdrop = function () {
+  // The Home panel's data is fetched now, while it is still hidden.
+  if (homeMode()) loadHome();
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter', 'flyout-leave');
     el.classList.add('flyout-hold');
@@ -1803,7 +1805,6 @@ let flyoutOpen = false;
 let flyoutAnimating = false;
 
 window.__flyoutEnter = function () {
-  if (homeMode()) loadHome();
   flyoutOpen = true;
   // The glass keeps following the screen while the panel comes in: it used to
   // wait for the entrance to end, and an animated wallpaper behind it then
@@ -1985,15 +1986,30 @@ async function persistHome() {
   try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (e) { /* ignore */ }
 }
 
+let homeSig = '';
 async function loadHome() {
   if (!(window.pywebview && window.pywebview.api)) return;
   let data = null;
   try { data = await window.pywebview.api.get_home(); } catch (e) { /* offline */ }
   if (!data || data.error) { if (!homeData.entities.length) renderHome(); return; }
   for (const s of data.sensors) s.domain = 'sensor';
-  for (const e of [...data.entities, ...data.sensors]) STATES[e.entity_id] = e.state;
+  // The panel is already drawn from the last time: only what has changed is
+  // touched, so opening it does not rebuild it while it is coming in.
+  const sig = JSON.stringify([data.rooms, data.entities.map((e) => [e.entity_id, e.area, e.name]),
+    data.sensors.map((x) => [x.entity_id, x.area, x.name, x.kind])]);
+  const changed = [];
+  for (const e of [...data.entities, ...data.sensors]) {
+    if (JSON.stringify(STATES[e.entity_id]) !== JSON.stringify(e.state)) changed.push(e.entity_id);
+    STATES[e.entity_id] = e.state;
+  }
   homeData = { entities: data.entities, sensors: data.sensors, rooms: data.rooms };
-  renderHome();
+  if (sig !== homeSig) {
+    homeSig = sig;
+    renderHome();
+  } else {
+    for (const id of changed) updateTileByEntity(id);
+    if (changed.length) scheduleHomeSummary();
+  }
 }
 
 // Back to the start when the panel closes.
