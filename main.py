@@ -231,7 +231,7 @@ class Api:
 
     # How long the panel or the card may stay unused before its page is
     # released; the next use makes it again (a few tenths of a second).
-    _OVERLAY_RELEASE_S = 300
+    _OVERLAY_RELEASE_S = 120
 
     def _ensure_overlay(self, kind):
         """The popover or flyout window, made if it is not there (and waited

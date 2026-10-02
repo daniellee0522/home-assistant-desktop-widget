@@ -10,6 +10,7 @@ import json
 import math
 import mmap
 import os
+import re
 import sys
 
 from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
@@ -723,24 +724,44 @@ def draw_liquid_rim(p, W, H, radius, dark):
     p.restore()
 
 
+def wrap_text(text, f, width):
+    """`text` broken into lines no wider than `width`: at spaces, or anywhere between CJK characters."""
+    fm = QFontMetricsF(f)
+    lines, cur = [], ""
+    for token in re.findall(r"\s+|[A-Za-z0-9_.,'\-]+|.", text):
+        trial = cur + token
+        if cur and fm.horizontalAdvance(trial.rstrip()) / 10 * HSCALE > width:
+            lines.append(cur.rstrip())
+            cur = token.lstrip()
+        else:
+            cur = trial
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines or [""]
+
+
 def draw_empty(p, W, H, small, theme, raw_theme, dim):
     """An empty widget's message, and the rectangle of its button (None when there is none)."""
     tcol = tokens(theme, dim)
-    light_title = raw_theme == "light"
-    title_c = tokens("light")["on_text1"] if light_title else tcol["off_text1"]
+    title_c = tokens("light")["on_text1"] if raw_theme == "light" else tcol["off_text1"]
     sub_c = tcol["on_text2"] if raw_theme == "light" else tcol["off_text2"]
     if dim:
         title_c, sub_c = tcol["off_text1"], tcol["off_text2"]
-    items = [("\u2302", font(60 if small else 80, QFont.Normal), ACCENT["blue"], 60 if small else 80),
-             (tr("尚未設定任何配件"), font(26 if small else 40, QFont.Bold), title_c, (26 if small else 40) * 1.2)]
+    width = W - 40
+    blocks = [([chr(0x2302)], font(60 if small else 80, QFont.Normal), ACCENT["blue"], 60 if small else 80)]
+    tf = font(26 if small else 40, QFont.Bold)
+    blocks.append((wrap_text(tr("尚未設定任何配件"), tf, width), tf, title_c, (26 if small else 40) * 1.2))
     if not small:
-        items += [(tr("按這裡開始設定 Home Assistant"), font(26, QFont.Normal), sub_c, 26 * 1.25)]
+        sf = font(26, QFont.Normal)
+        blocks.append((wrap_text(tr("按這裡開始設定 Home Assistant"), sf, width), sf, sub_c, 26 * 1.25))
     btn_h = 26 * 1.33 + 28
-    total = sum(h for *_, h in items) + 8 * (len(items) - 1) + (0 if small else 8 + 8 + btn_h)
+    total = sum(len(lines) * h for lines, _, _, h in blocks) + 8 * (len(blocks) - 1) + (0 if small else 8 + 8 + btn_h)
     y = (H - total) / 2
-    for text, f, color, h in items:
-        draw_centred(p, text, f, color, QRectF(20, y, W - 40, h))
-        y += h + 8
+    for lines, f, color, h in blocks:
+        for line in lines:
+            draw_centred(p, line, f, color, QRectF(20, y, width, h))
+            y += h
+        y += 8
     if small:
         return None
     f = font(26, QFont.DemiBold)
