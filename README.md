@@ -24,15 +24,20 @@ appearance. The glass effect varies with your wallpaper.
 | --- | --- | --- |
 | ![Tray panel](docs/tray-panel.png) | ![Device controls](docs/detail-switch.png) | ![Sensor history](docs/detail-history.png) |
 
+![Widget editor](docs/widget-editor.png)
+
 ![English settings with language and appearance controls](docs/settings-english.png)
 
 ## Features
 
+- **Multiple widgets:** place as many widgets as you like in four sizes (1x1, 2x2, 2x4, 4x4), each with its own devices. Tiles fill the widget as small squares, wide bars or large squares, always the same size and spacing, and snap to each other and to the screen edges.
+- **Visual editor:** Settings → Open widget editor. Drag a size onto the desktop to add a widget, drag the boxes on the layout map to move them, drag devices to reorder. Right-click a widget on the desktop to edit it directly.
 - **Desktop controls:** keep your devices on the desktop, drag to reposition, and lock in place.
 - **Live updates:** device states update through Home Assistant's WebSocket API.
 - **Quick access:** click the tray icon to open a panel beside the taskbar.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
-- **Personalization:** light and dark themes; classic, liquid, and Windows glass; columns, zoom, and fixed size. The glass follows changes on screen; there is no refresh rate to set.
+- **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; there is no refresh rate to set.
+- **Light on resources:** one shared capture serves every widget, and a widget costs about 60 MB of memory. Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.
 - **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it.
 - **Languages:** Traditional Chinese and English.
 
@@ -46,8 +51,11 @@ displacement from [KMPLiquidGlass's Skia Lens.kt](https://github.com/Kashif-E/KM
 to a WebGL shader (with a Canvas fallback) over a capture of the desktop.
 Screen capture uses DXGI Desktop Duplication: Windows reports which parts of
 the screen changed, and the glass is refreshed only when the area behind a
-window did: up to the display's refresh rate for liquid glass, and about 30
-times a second for the other styles. A still desktop costs no captures at all.
+window did, up to about 30 times a second, and a still desktop costs no captures
+at all. Settings → **Glass updates**: *Live* follows every change (an animated
+wallpaper such as Wallpaper Engine changes it constantly; while it is paused
+nothing is captured), *Still* takes the picture once and again only when the
+widget moves or resizes.
 
 ## Glass source
 

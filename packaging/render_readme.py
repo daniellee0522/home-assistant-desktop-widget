@@ -65,9 +65,31 @@ def save_settings():
         target = DOCS / 'settings-english.png'
         view.grab().toImage().save(str(target))
         print(target.relative_to(ROOT))
-        app.quit()
+        save_editor()
 
     QTimer.singleShot(600, save)
+
+
+def save_editor():
+    view.resize(820, 700)
+    layout = {'monitors': [{'x': 0, 'y': 0, 'w': 1920, 'h': 1080, 'primary': True}],
+              'widgets': [{'id': 'w1', 'x': 1200, 'y': 90, 'w': 678, 'h': 334},
+                          {'id': 'w2', 'x': 1500, 'y': 480, 'w': 344, 'h': 332}]}
+    view.page().runJavaScript(f"""
+      CONFIG.widgets = [{{id: 'w1', size: '2x4', x: 1200, y: 90, tiles: {json.dumps(TILES)}}},
+                        {{id: 'w2', size: '2x2', x: 1500, y: 480, tiles: {json.dumps(TILES[:4])}}}];
+      window.pywebview.api = new Proxy({{}}, {{get: (_, name) => () => Promise.resolve(
+        name === 'get_layout' ? {json.dumps(layout)} : null)}});
+      resolveWindowTiles(); openEditor('w1');
+    """)
+
+    def save():
+        target = DOCS / 'widget-editor.png'
+        view.grab().toImage().save(str(target))
+        print(target.relative_to(ROOT))
+        app.quit()
+
+    QTimer.singleShot(900, save)
 
 
 def next_variant():
