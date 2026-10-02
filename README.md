@@ -37,7 +37,7 @@ appearance. The glass effect varies with your wallpaper.
 - **Quick access:** click the tray icon to open a panel beside the taskbar. The panel has its own device list (edit it as "Tray panel" in the widget editor, or let it show every widget's devices); it shows two rows and scrolls past eight. Or switch Settings → **Panel style** to **Home style**: every device grouped by room (your Home Assistant areas, which you can override per device from its detail card), with capsules for the kinds of device (climate, lights, security with locks and cameras, media; shown only if you have them), room capsules with a button to add your own rooms, and the usual click, hold and right-click controls. Press a capsule and the rooms recede while that kind of device comes forward; press it again or the empty space to go back. Temperature and humidity are status, as a range where a room has several. Press **Edit** to drag rooms (the capsules or a room's heading) into a new order, hide a whole room, drag tiles (press and hold) between rooms, pull a tile's corner to make it a square, bar or large square, remove tiles (**+** brings them back), and switch rooms on or off. Settings → **Panel background picture** puts your own picture, blurred, behind the panel.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
 - **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; there is no refresh rate to set.
-- **Light on resources:** one shared capture serves every widget, and a widget costs about 60 MB of memory. Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.
+- **Light on resources:** the desktop widgets are drawn natively, not as browser pages, so the whole program rests at about 65 MB and close to 0 % CPU on a still desktop; the settings window, detail card and tray panel are web pages made only when opened and released again after a while. Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.
 - **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it.
 - **Languages:** Traditional Chinese and English.
 
@@ -48,7 +48,7 @@ for offline use.
 
 The liquid appearance ports the rounded-rectangle distance and edge
 displacement from [KMPLiquidGlass's Skia Lens.kt](https://github.com/Kashif-E/KMPLiquidGlass/blob/master/backdrop/src/skiaMain/kotlin/com/kashif_e/backdrop/effects/Lens.kt)
-to a WebGL shader (with a Canvas fallback) over a capture of the desktop.
+over a capture of the desktop. The ring the lens bends depends only on the card's shape, so it is worked out once as a mesh and each new picture is warped through it (no GPU needed). Settings → **Liquid glass blur** goes from 0 (the clearest, sharpest refraction) to 100 (close to the classic frost).
 Screen capture uses DXGI Desktop Duplication: Windows reports which parts of
 the screen changed, and the glass is refreshed only when the area behind a
 window did, up to about 30 times a second, and a still desktop costs no captures

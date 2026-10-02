@@ -75,12 +75,14 @@ def main():
         '--workpath', str(work / 'pyinstaller'), '--specpath', str(work),
         '--distpath', str(
             output), '--add-data', f'{ROOT / "web"}{os.pathsep}web',
+        '--add-data', f'{ROOT / "nativeui" / "icon_paths.json"}{os.pathsep}nativeui',
         # numpy is optional for Qt and Pillow; loading it costs memory.
         '--exclude-module', 'numpy', '--exclude-module', 'tkinter',
         '--hidden-import', 'PIL._imagingft',
         '--hidden-import', f'{qt_package}.QtCore',
         '--hidden-import', f'{qt_package}.QtWidgets',
         '--hidden-import', f'{qt_package}.QtGui',
+        '--hidden-import', f'{qt_package}.QtSvg',
         str(ROOT / 'main.py'),
     ]
 
@@ -94,7 +96,7 @@ def main():
     (bundle / 'build-info.json').write_text(json.dumps({
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
+                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'nativeui/widget.py', ROOT / 'nativeui/render.py', ROOT / 'nativeui/liquid.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
                                     ROOT / 'web/app.js', ROOT / 'web/bridge.js',
                                     ROOT / 'web/i18n.js', ROOT / 'web/mdi-paths.js']},
     }, indent=2), encoding='utf-8')

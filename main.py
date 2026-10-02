@@ -7,12 +7,16 @@ tile grid, with realtime updates over Home Assistant's WebSocket API. It
 lives at the bottom of the z-order like a desktop gadget and never takes
 focus away from other applications.
 
-Four windows share one page (web/index.html) and one Api instance:
+The desktop widgets are drawn natively (nativeui/), with no browser page; the other
+windows share one page (web/index.html) and, with the widgets, one Api instance:
 
-  * main     - the widget on the desktop
+  * widgets  - the widgets on the desktop (nativeui.widget)
   * popover  - an accessory's detail card, opened by right-click or hold
   * settings - connection, appearance and tile management
   * flyout   - the tray panel, opened by clicking the tray icon
+
+The three pages are made when first wanted and released after a while unused, so the
+browser engine is only in memory while one of them is open.
 
 Settings are saved to ha_widgets_config.json beside this script, or under
 %APPDATA%\\HA Widgets for an installed build (see config.py). Closing the
@@ -31,6 +35,10 @@ import sys
 import threading
 import time
 import zlib
+
+# Pillow imports numpy when it finds it, only to name a type: about 10 MB of memory for nothing.
+sys.modules.setdefault("numpy", None)
+sys.modules.setdefault("numpy.typing", None)
 
 from capture_worker import CaptureWorker
 from dxgi_capture import DesktopDuplication
@@ -52,7 +60,12 @@ if sys.platform == "win32":
         except Exception:
             pass
 
+# Glyphs from the font files rather than DirectWrite, which copies a whole CJK font
+# (about 40 MB) into the process the first time one is used.
+os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
+
 import qtshell as webview  # noqa: E402
+from nativeui import widget as native_widget  # noqa: E402
 
 import config as cfgmod  # noqa: E402
 import home  # noqa: E402
@@ -226,7 +239,7 @@ class Api:
 
     # How long the panel or the card may stay unused before its page is
     # released; the next use makes it again (a few tenths of a second).
-    _OVERLAY_RELEASE_S = 300
+    _OVERLAY_RELEASE_S = 120
 
     def _ensure_overlay(self, kind):
         """The popover or flyout window, made if it is not there (and waited
@@ -340,6 +353,7 @@ class Api:
             "zoom": self._cfg.get("zoom", 100),
             "glass_mode": self._cfg.get("glass_mode", "fast"),
             "glass_sampling": self._cfg.get("glass_sampling", "live"),
+            "liquid_blur": int(self._cfg.get("liquid_blur", 0)),
             "system_glass_ok": bool(_SYSTEM_GLASS_SUPPORTED),
             "system_glass_active": self._system_glass_status(),
             "panel_theme": self._cfg.get("panel_theme", "follow"),
@@ -756,6 +770,7 @@ class Api:
         "zoom": lambda v: max(50, min(200, int(v))),
         "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",
         "glass_sampling": lambda v: v if v in ("live", "still") else "live",
+        "liquid_blur": lambda v: max(0, min(100, int(v))),
         "dim_when_idle": bool,
         "dim_after_sec": lambda v: max(10, min(3600, int(v))),
     }
@@ -1405,7 +1420,7 @@ class Api:
                 _screen_duplication.wait_for_frame(frames, 0.1)
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             at_x=None, at_y=None, wait_secs=None, prefetched=None):
+                             at_x=None, at_y=None, wait_secs=None, prefetched=None, binary=False):
         """The desktop behind a window, blurred, as a small raw-pixel picture.
 
         `last_hash` is the page's previous frame; an identical capture is
@@ -1539,15 +1554,18 @@ class Api:
             # hatching) beats against the 1/4 sampling grid into slow diagonal
             # stripes, so the lens's picture is blurred at half size, before
             # it is sampled, to remove what the grid cannot represent.
-            scale = 4 if liquid else 8
+            level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
+            scale, pre_blur, post_blur = _liquid_params(level) if liquid else (8, 0, 2)
             small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
             if liquid:
                 small = (small.reduce(2) if not (w % 2 or h % 2) else
                          small.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX))
                 small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
-                small = small.filter(ImageFilter.GaussianBlur(radius=1.5))
-                small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
-                                     Image.HAMMING)
+                if pre_blur:
+                    small = small.filter(ImageFilter.GaussianBlur(radius=pre_blur))
+                if scale > 2:
+                    small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
+                                         Image.HAMMING)
             elif w % scale or h % scale:
                 # Not a whole number of cells: stretch the picture over
                 # the window exactly rather than past its edge.
@@ -1572,12 +1590,14 @@ class Api:
             self._backdrop_sent[window_kind] = (digest, small)
             # Blurring the source avoids the dark wedges a canvas blur leaves
             # in rounded corners by sampling past its edges.
-            blur_radius = 0.4 if liquid else 2
-            small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            blur_radius = post_blur
+            if blur_radius:
+                small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
             # Raw pixels, not an image file: a JPEG this small, stretched back
             # up to the window, shows its 8x8 blocks as mottling, and a file
             # needs decoding (and leaves memory behind) for a few KB of data.
-            blur_raw = base64.b64encode(small.tobytes()).decode("ascii")
+            blur_raw = (small.tobytes() if binary
+                        else base64.b64encode(small.tobytes()).decode("ascii"))
             blur_size = small.size
 
             if capture_epoch != self._capture_epoch:
@@ -2572,6 +2592,14 @@ def snap_rect(rect, others, areas, threshold, gap):
     return int(x), int(y)
 
 
+def _liquid_params(level):
+    """How the liquid glass's picture is made for a blur level, 0 (the clearest:
+    half the window's detail, hardly blurred) to 1 (as frosted as the classic glass):
+    (the picture's scale as 1/n, the blur before it is shrunk, the blur after)."""
+    level = max(0.0, min(1.0, level))
+    return round(2 + 6 * level), 0.6 + 0.9 * level, 2.0 * level
+
+
 def _is_widget_kind(kind):
     return kind == "main" or (isinstance(kind, str) and kind.startswith("w:"))
 
@@ -3045,21 +3073,26 @@ def _widget_initial_size(size, zoom):
 
 def _create_widget_window(api, widget, show=False):
     """One desktop widget: its own window, pinned to the bottom of the
-    z-order, bound into the api under its id."""
+    z-order, bound into the api under its id. Drawn natively (nativeui), not as a
+    browser page, which is what keeps the program's resting memory small;
+    HA_WIDGET_WEB=1 brings back the page."""
     widget_id = widget["id"]
-    width, height = _widget_initial_size(widget["size"], api._cfg.get("zoom", 100))
-    window = webview.create_window(
-        "HA Widgets",
-        url=os.path.join(WEB_DIR, "index.html") + "#grid:" + widget_id,
-        js_api=api,
-        width=width,
-        height=height,
-        # Qt scales these by the creation monitor's DPI; on_shown restores
-        # the saved position in physical pixels.
-        x=widget["x"],
-        y=widget["y"],
-        transparent=True,
-    )
+    if os.environ.get("HA_WIDGET_WEB"):
+        width, height = _widget_initial_size(widget["size"], api._cfg.get("zoom", 100))
+        window = webview.create_window(
+            "HA Widgets",
+            url=os.path.join(WEB_DIR, "index.html") + "#grid:" + widget_id,
+            js_api=api,
+            width=width,
+            height=height,
+            # Qt scales these by the creation monitor's DPI; on_shown restores
+            # the saved position in physical pixels.
+            x=widget["x"],
+            y=widget["y"],
+            transparent=True,
+        )
+    else:
+        window = native_widget.create_widget(api, widget)
     api._bind_widget(widget_id, window)
     window.events.moved += lambda x, y: api._on_widget_moved(widget_id)
     stop = threading.Event()

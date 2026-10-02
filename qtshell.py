@@ -23,11 +23,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QFile, QIODevice,
                             QObject, Qt, QTimer, QUrl, Signal)
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtGui import QCursor
-from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
+# The browser engine is imported when the first page is made (see _WebWindow): with the
+# desktop widgets drawn natively, a program with no page open never loads it.
 
 _app = None
 _heartbeat = None
@@ -325,6 +324,9 @@ class _WebWindow(QMainWindow):
 
     def __init__(self, window):
         super().__init__()
+        from PySide6.QtWebChannel import QWebChannel
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        from PySide6.QtWebEngineWidgets import QWebEngineView
         self._window = window
         # Qt.Tool keeps these windows off the taskbar and out of Alt-Tab.
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
@@ -653,6 +655,9 @@ def prepare(web_dir, api, log_dir=None):
             faulthandler.enable(open(_LOG_PATH, "a", encoding="utf-8"))
         except Exception:
             pass
+    # Needed by the browser engine whenever it is first used, and only settable before the
+    # application exists.
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     _app = QApplication.instance() or QApplication([])
     _app.setQuitOnLastWindowClosed(False)
     log("Started pid=%s" % os.getpid())
