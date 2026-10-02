@@ -107,7 +107,7 @@ def native_render(scene):
         form, rects = render.tile_layout(size, count)
         crop = liquid.picture(bg.crop((ORIGIN, ORIGIN, ORIGIN + W, ORIGIN + H)))
         lens = liquid.Lens(W, H, tcol["radius_panel"], 4)
-        frame = lens.frame(crop, lens.card_mask(), [(x, y, w, h, tcol["radius_tile"]) for x, y, w, h in rects], 12)
+        frame = lens.frame(crop, lens.card_mask(), [(x, y, w, h, tcol["radius_tile"]) for x, y, w, h in rects], 8)
         qf = QImage(frame.tobytes(), W, H, W * 4, QImage.Format_RGBA8888)
         p.drawImage(0, 0, qf)
     render.draw_widget(p, size, tiles_for(count), STATES, theme, None, 1.0, dim, style)

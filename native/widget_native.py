@@ -92,6 +92,8 @@ class NativeWidget(QWidget):
         self.frame = QImage(self.px_w, self.px_h, QImage.Format_ARGB32_Premultiplied)
         self._press = None
         self.dragging = False
+        self.latest = None
+        self.frame_queued = threading.Event()
         self.sample_now = threading.Event()        # tells a 'still' glass to look again
         self.sampling = os.environ.get("NATIVE_SAMPLING", cfg.get("glass_sampling", "live"))
         bridge.states.connect(self.on_states)
@@ -194,8 +196,9 @@ class NativeWidget(QWidget):
         self.overlay = self.overlay_dim = None
         self.update()
 
-    def on_frame(self, image):
-        self.frame_img = image
+    def on_frame(self, _):
+        self.frame_img = self.latest
+        self.frame_queued.clear()
         self.update()
 
     def on_backdrop(self, image):
@@ -324,6 +327,11 @@ def backdrop_loop(win, bridge, stop):
                 continue
             after = None
         win.sample_now.clear()
+        # The pace is set before the look, not after it: the picture is as fresh as can be.
+        wait = 1 / 60 - (time.monotonic() - last)
+        if wait > 0:
+            time.sleep(wait)
+        last = time.monotonic()
         x, y, w, h = win.x(), win.y(), win.px_w, win.px_h
         got = dup.grab(x, y, w, h, after, 0.25) if dup.available() else None
         if not got:
@@ -333,10 +341,6 @@ def backdrop_loop(win, bridge, stop):
         if got[1] is None:
             continue
         taken = True
-        wait = 1 / 30 - (time.monotonic() - last)
-        if wait > 0:
-            time.sleep(wait)
-        last = time.monotonic()
         full = Image.frombuffer("RGBA", (w, h), got[1], "raw", "RGBA", 0, 1)
         if lens:
             # The liquid glass keeps 1/4 of the detail (main.py, the same steps).
@@ -351,9 +355,12 @@ def backdrop_loop(win, bridge, stop):
             continue
         sent = probe
         if lens:
-            out = lens.frame(liquid.picture(small), card, tiles, 12 * win.scale)
-            bridge.frame.emit(QImage(out.tobytes(), out.width, out.height, out.width * 4,
-                                     QImage.Format_RGBA8888).copy())
+            out = lens.frame(liquid.picture(small), card, tiles, 8 * win.scale)
+            win.latest = QImage(out.tobytes(), out.width, out.height, out.width * 4,
+                                QImage.Format_RGBA8888).copy()
+            if not win.frame_queued.is_set():           # only the newest is ever painted
+                win.frame_queued.set()
+                bridge.frame.emit(None)
             continue
         small = small.filter(ImageFilter.GaussianBlur(2))
         img = QImage(small.tobytes(), small.width, small.height, small.width * 3, QImage.Format_RGB888).copy()

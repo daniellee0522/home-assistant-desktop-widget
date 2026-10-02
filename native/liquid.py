@@ -34,9 +34,9 @@ def picture(rgb):
     cannot represent (fine patterns beat against it into stripes)."""
     w, h = rgb.size
     half = rgb.reduce(2) if not (w % 2 or h % 2) else rgb.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX)
-    half = half.filter(ImageFilter.GaussianBlur(1.5))
-    quarter = half.resize((max(1, round(w / 4)), max(1, round(h / 4))), Image.HAMMING)
-    return quarter.filter(ImageFilter.GaussianBlur(0.4))
+    half = half.filter(ImageFilter.GaussianBlur(0.8))
+    third = half.resize((max(1, round(w / 3)), max(1, round(h / 3))), Image.HAMMING)
+    return third.filter(ImageFilter.GaussianBlur(0.3))
 
 
 class Lens:
@@ -180,8 +180,8 @@ class Lens:
         out.alpha_composite(lens)
         for x, y, w, h, radius in tiles:
             region = out.crop((x, y, x + w, y + h)).convert("RGB")
-            # Blurred at a quarter of the size: the picture is smooth already.
-            small = region.reduce(4).filter(ImageFilter.GaussianBlur(blur / 4))
+            # Blurred at half the size, which costs a quarter as much.
+            small = region.reduce(2).filter(ImageFilter.GaussianBlur(blur / 2))
             region = small.resize((w, h), Image.BILINEAR)
             out.paste(region, (x, y), self.tile_mask(w, h, radius))
         out.putalpha(card_mask)
