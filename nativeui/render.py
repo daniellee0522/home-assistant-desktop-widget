@@ -211,9 +211,12 @@ def svg_renderer(name, color):
     key = (name, color)
     r = _svg_cache.get(key)
     if r is None:
-        mdi = name[4:] if name.startswith("mdi:") else LEGACY_MDI.get(name)
-        d = mdi_path(mdi) if mdi else None
-        body = '<path d="%s"/>' % d if d else _icon_table().get(name) or _icon_table()["sensor"]
+        if name.startswith("path:"):                # a path of the 24 px grid given as it is
+            body = '<path d="%s"/>' % name[5:]
+        else:
+            mdi = name[4:] if name.startswith("mdi:") else LEGACY_MDI.get(name)
+            d = mdi_path(mdi) if mdi else None
+            body = '<path d="%s"/>' % d if d else _icon_table().get(name) or _icon_table()["sensor"]
         svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%s">%s</svg>'
                % (color, body))
         r = _svg_cache[key] = QSvgRenderer(QByteArray(svg.encode()))

@@ -65,6 +65,7 @@ if sys.platform == "win32":
 os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
 
 import qtshell as webview  # noqa: E402
+from nativeui import detail as native_detail  # noqa: E402
 from nativeui import widget as native_widget  # noqa: E402
 
 import config as cfgmod  # noqa: E402
@@ -256,9 +257,14 @@ class Api:
             if kind == "popover":
                 # Its page numbers its resizes from 1 again.
                 self._popover_last_resize_seq = -1
-                window = _create_overlay_window(
-                    self, "HA Widget Detail", "popover", 260, 336, rehide=False,
-                    x=first.get("x", 200), y=first.get("y", 200))
+                if os.environ.get("HA_WIDGET_WEB"):
+                    window = _create_overlay_window(
+                        self, "HA Widget Detail", "popover", 260, 336, rehide=False,
+                        x=first.get("x", 200), y=first.get("y", 200))
+                else:
+                    window = native_detail.create_popover(
+                        self, x=first.get("x", 200), y=first.get("y", 200))
+                    ready.set()                      # drawn natively: nothing to wait for
                 window.events.shown += lambda: (
                     self._apply_capture_exclusion(), _set_noactivate(window, True),
                     self._apply_system_glass())
