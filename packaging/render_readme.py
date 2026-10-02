@@ -78,11 +78,11 @@ def next_variant():
     glass, theme = variants[index]
     index += 1
     script = f"""
-      CONFIG = Object.assign(CONFIG, {{tiles: {json.dumps(TILES)}, columns: 4,
+      CONFIG = Object.assign(CONFIG, {{widgets: [{{id: 'w1', size: '2x4', tiles: {json.dumps(TILES)}}}],
         glass_style: {json.dumps(glass)}, theme: {json.dumps(theme)}, language: 'en', zoom: 100}});
       STATES = {json.dumps(STATES)};
       window.pywebview.api = new Proxy({{}}, {{get: () => () => Promise.resolve(null)}});
-      setInterfaceLanguage('en'); applyTheme(); renderGrid();
+      resolveWindowTiles(); setInterfaceLanguage('en'); applyTheme(); renderGrid();
       document.body.style.background = {json.dumps('linear-gradient(125deg, #a6bed2, #e4edf2 58%, #8cabc5)' if theme == 'light' else 'linear-gradient(125deg, #293344, #52697c 58%, #1d2838)')};
       document.querySelector('#view-grid').style.position = 'relative';
       document.querySelector('#view-grid').style.zIndex = '1';

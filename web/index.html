@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>HA Widgets</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 <script src="bridge.js"></script>
 </head>
@@ -118,15 +119,6 @@
             </select>
           </label>
           <label class="chip-select">
-            <span>每列數量</span>
-            <select id="columns-select">
-              <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="5">5</option>
-              <option value="6">6</option>
-            </select>
-          </label>
-          <label class="chip-select">
             <span>工作列面板</span>
             <select id="panel-theme-select">
               <option value="follow">同上</option>
@@ -171,28 +163,12 @@
           <input id="start-on-boot-check" type="checkbox">
           <span>開機時自動啟動</span>
         </label>
-        <label class="check-row">
-          <input id="fixed-size-check" type="checkbox">
-          <span>固定視窗大小 (內容超出時可捲動)</span>
-        </label>
-        <div class="row gap" id="fixed-size-fields" hidden>
-          <label class="chip-select">
-            <span>寬度 (px)</span>
-            <input id="fixed-width-input" type="number" min="120" max="2400" step="40" style="width:76px">
-          </label>
-          <label class="chip-select">
-            <span>高度 (px)</span>
-            <input id="fixed-height-input" type="number" min="90" max="1800" step="40" style="width:76px">
-          </label>
-        </div>
       </div>
 
-      <div class="section grow">
-        <div class="section-title row-between">
-          <span>配件 (<span id="tile-count">0</span>)</span>
-          <button id="add-tile-btn" class="pill-btn small">+ 新增配件</button>
-        </div>
-        <div id="tile-list" class="tile-list"></div>
+      <div class="section">
+        <div class="section-title">桌面 Widget</div>
+        <button id="open-editor-btn" class="pill-btn">開啟 Widget 編輯器</button>
+        <div class="slider-hint">用拖曳新增、擺放 Widget，並編排每個 Widget 顯示的配件。也可以在桌面上對 Widget 按右鍵。</div>
       </div>
 
       <div class="row gap end">
@@ -203,6 +179,52 @@
   </section>
 
   <!-- ============ Add/edit tile picker (sub-view over settings) ============ -->
+  <!-- ============ Widget editor ============ -->
+  <section id="view-editor" class="view" hidden>
+    <div class="card-bg"></div>
+    <div class="view-header drag-region">
+      <button class="icon-btn back-btn" data-action="close-editor">‹</button>
+      <div class="header-titles">
+        <div class="header-title">Widget 編輯器</div>
+        <div class="header-sub">拖曳新增、擺放，並編排配件</div>
+      </div>
+      <button class="icon-btn" data-action="close-settings">✕</button>
+    </div>
+    <div class="view-body editor-body">
+      <div class="editor-cols">
+        <div class="editor-left">
+          <div class="editor-label">拖曳到桌面新增</div>
+          <div id="palette" class="palette"></div>
+          <div class="editor-label">桌面配置（拖曳移動）</div>
+          <div id="minimap" class="minimap"></div>
+          <label class="check-row editor-lock">
+            <input id="editor-lock-check" type="checkbox">
+            <span>鎖定位置 (桌面上無法拖曳移動)</span>
+          </label>
+          <div id="widget-hint" class="slider-hint" hidden></div>
+        </div>
+        <div class="editor-right">
+          <div class="editor-label">我的 Widget</div>
+          <div id="widget-chips" class="widget-chips"></div>
+          <div class="editor-label">預覽（拖曳配件調整順序）</div>
+          <div id="editor-preview" class="editor-preview"></div>
+          <div class="row gap editor-tools">
+            <div id="widget-size-chips" class="widget-chips"></div>
+            <button id="remove-widget-btn" class="pill-btn small ghost danger">刪除此 Widget</button>
+          </div>
+      <div class="section grow editor-tiles">
+        <div class="section-title row-between">
+          <span>配件 (<span id="tile-count">0</span>)</span>
+          <button id="add-tile-btn" class="pill-btn small">+ 新增配件</button>
+        </div>
+        <div id="tile-list" class="tile-list"></div>
+      </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section id="view-picker" class="view" hidden>
     <div class="card-bg"></div>
     <div class="view-header drag-region">
@@ -223,6 +245,7 @@
 
 <div id="toast" class="toast" hidden></div>
 
+<script src="qwebchannel.js"></script>
 <script src="settings-select.js"></script>
 <script src="i18n.js"></script>
 <script src="mdi-paths.js"></script>

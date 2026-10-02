@@ -100,6 +100,7 @@ class ResumeTests(unittest.TestCase):
     def test_restore_rechecks_visibility_and_restores_native_state(self):
         window, api = Mock(), Mock()
         api._all_windows.return_value = [window]
+        api._widgets = {"w": window}
         scope = {"window": window, "api": api, "webview": Mock()}
         for name in ("_set_noactivate", "_apply_window_shape", "_send_to_bottom"):
             scope[name] = Mock()

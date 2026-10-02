@@ -69,8 +69,37 @@ DEFAULT_CONFIG = {
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,
-    "tiles": [],
+    "tiles": [],              # legacy mirror of the first widget's tiles
+    # The desktop widgets: [{id, size, x, y, tiles}]. See WIDGET_SIZES.
+    "widgets": [],
+    # The tray panel. tiles=None shows every widget's tiles.
+    "panel": {"mode": "grid", "tiles": None},
 }
+
+# Widget sizes, named rows x columns: "2x4" is two rows of four tiles. Every
+# side is a whole number of tile cells, so sizes stay proportional.
+WIDGET_SIZES = {"1x1": (1, 1), "2x2": (2, 2), "2x4": (4, 2), "4x4": (4, 4)}
+DEFAULT_WIDGET_SIZE = "2x4"
+
+
+def widget_grid(size):
+    """(columns, rows) of tile cells for a widget size."""
+    return WIDGET_SIZES.get(size) or WIDGET_SIZES[DEFAULT_WIDGET_SIZE]
+
+
+def new_widget_id():
+    return os.urandom(3).hex()
+
+
+def size_for_count(n):
+    """The smallest widget size that holds n tiles (4x4 scrolls beyond)."""
+    if n <= 1:
+        return "1x1"
+    if n <= 4:
+        return "2x2"
+    if n <= 8:
+        return "2x4"
+    return "4x4"
 
 
 def domain_of(entity_id):
@@ -93,18 +122,68 @@ def _migrate_tile(t):
     }
 
 
+def _clean_widget(w, fallback_xy=(200, 200)):
+    size = w.get("size")
+    try:
+        x = int(w.get("x", fallback_xy[0]))
+        y = int(w.get("y", fallback_xy[1]))
+    except (TypeError, ValueError):
+        x, y = fallback_xy
+    return {
+        "id": str(w.get("id") or new_widget_id()),
+        "size": size if size in WIDGET_SIZES else DEFAULT_WIDGET_SIZE,
+        "x": x,
+        "y": y,
+        "tiles": [_migrate_tile(t) for t in (w.get("tiles") or [])],
+    }
+
+
+def sync_legacy(cfg):
+    """Mirror the first widget into the old top-level keys, so a downgrade
+    to a single-widget build still finds its tiles and position."""
+    widgets = cfg.get("widgets") or []
+    if widgets:
+        cfg["tiles"] = widgets[0]["tiles"]
+        cfg["window_x"] = widgets[0]["x"]
+        cfg["window_y"] = widgets[0]["y"]
+
+
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            cfg.update({k: v for k, v in loaded.items() if k != "tiles"})
+            cfg.update({k: v for k, v in loaded.items()
+                        if k not in ("tiles", "widgets", "panel")})
             cfg["tiles"] = [_migrate_tile(t) for t in loaded.get("tiles", [])]
             _migrate(cfg, loaded)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log("settings could not be read in full: %r" % (exc,))
+    _ensure_widgets(cfg)
     return cfg
+
+
+def _ensure_widgets(cfg):
+    """At least one widget always exists."""
+    if not cfg.get("widgets"):
+        cfg["widgets"] = [_clean_widget({
+            "id": "w1",
+            "size": (size_for_count(len(cfg["tiles"]))
+                     if cfg.get("tiles") else DEFAULT_WIDGET_SIZE),
+            "x": cfg.get("window_x", 200),
+            "y": cfg.get("window_y", 200),
+            "tiles": cfg.get("tiles") or [],
+        })]
+    sync_legacy(cfg)
+
+
+def _log(text):
+    try:
+        with open(os.path.join(BASE_DIR, "widget.log"), "a", encoding="utf-8") as f:
+            f.write("config: %s\n" % text)
+    except Exception:
+        pass
 
 
 def _migrate(cfg, loaded):
@@ -122,10 +201,23 @@ def _migrate(cfg, loaded):
     # Settings that no longer exist.
     for key in ("system_glass", "fast_glass", "opacity", "sample_fps"):
         cfg.pop(key, None)
+    if loaded.get("widgets"):
+        cfg["widgets"] = [
+            _clean_widget(w, (200 + 40 * i, 200 + 40 * i))
+            for i, w in enumerate(loaded["widgets"]) if isinstance(w, dict)]
+    panel = loaded.get("panel")
+    if isinstance(panel, dict):
+        tiles = panel.get("tiles")
+        cfg["panel"] = {
+            "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
+            "tiles": ([_migrate_tile(t) for t in tiles]
+                      if isinstance(tiles, list) else None),
+        }
     return cfg
 
 
 def save_config(cfg):
+    sync_legacy(cfg)
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(prefix=".ha_widgets_", dir=os.path.dirname(CONFIG_FILE))
     try:

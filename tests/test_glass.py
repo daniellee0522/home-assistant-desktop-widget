@@ -140,7 +140,7 @@ class GlassTests(unittest.TestCase):
         self.assertTrue(scope['_set_system_glass'](window, True))
 
     def test_system_mode_does_not_capture_pixels(self):
-        scope = definitions('Api', _SYSTEM_GLASS_SUPPORTED=True,
+        scope = definitions('Api', '_is_widget_kind', time=time, _SYSTEM_GLASS_SUPPORTED=True,
                             _get_hwnd=lambda w: 123, _user32=Mock(),
                             _nothing_visible_of=lambda *a: False)
         api = scope['Api'].__new__(scope['Api'])
@@ -149,6 +149,7 @@ class GlassTests(unittest.TestCase):
         api._arming_kind = None
         api._cfg = {'glass_mode': 'system'}
         api._system_glass_hwnds = {'main': 123}
+        api._hidden_cache = {}
         result = api.get_desktop_backdrop()
         self.assertTrue(result['system_glass'])
         scope['_user32'].GetWindowRect.assert_not_called()
@@ -157,9 +158,9 @@ class GlassTests(unittest.TestCase):
 
     def test_closed_popover_cannot_leave_widget_in_screen_capture(self):
         affinity = Mock(return_value=True)
-        windows = {kind: object() for kind in ('main', 'flyout', 'popover', 'settings')}
-        scope = definitions('Api', time=time,
-                            _WINDOWS_ABOVE={'main': ('flyout', 'popover', 'settings'),
+        windows = {kind: object() for kind in ('w:a', 'w:b', 'flyout', 'popover', 'settings')}
+        scope = definitions('Api', '_is_widget_kind', time=time,
+                            _WINDOWS_ABOVE={'main': ('flyout', 'popover'),
                                             'flyout': ('popover', 'settings'),
                                             'popover': (), 'settings': ()},
                             _visible_rect=lambda *args: (0, 0, 100, 100),
@@ -167,6 +168,7 @@ class GlassTests(unittest.TestCase):
                             _set_capture_exclusion=affinity)
         api = scope['Api'].__new__(scope['Api'])
         api._window_for = lambda kind: windows[kind]
+        api._widgets = {'a': windows['w:a'], 'b': windows['w:b']}
         api._cfg = {'glass_mode': 'fast', 'glass_style': 'liquid'}
         api._arming_kind = None
         api._overlays_open = set()
@@ -174,13 +176,22 @@ class GlassTests(unittest.TestCase):
         api._capture_epoch = 0
         api._capture_transition_until = 0
         api._apply_capture_exclusion()
-        self.assertIn('main', api._excluded_kinds)
-        affinity.assert_any_call(windows['main'], True)
+        # Every widget reads the screen for its own backdrop.
+        self.assertTrue({'w:a', 'w:b'} <= api._excluded_kinds)
+        affinity.assert_any_call(windows['w:a'], True)
+        affinity.assert_any_call(windows['w:b'], True)
         epoch = api._capture_epoch
         api._overlays_open.add('popover')
         api._apply_capture_exclusion()
-        self.assertIn('main', api._excluded_kinds)
+        self.assertTrue({'w:a', 'w:b'} <= api._excluded_kinds)
         self.assertEqual(api._capture_epoch, epoch)
+        # Settings paints no glass, so opening it over a widget leaves that
+        # widget on the fast capture path, and settings itself stays visible
+        # to screen capture.
+        api._overlays_open = {'settings'}
+        api._apply_capture_exclusion()
+        self.assertTrue({'w:a', 'w:b'} <= api._excluded_kinds)
+        self.assertNotIn('settings', api._excluded_kinds)
 
     def test_liquid_popover_composites_excluded_widget(self):
         scope = definitions('_popover_needs_compat')

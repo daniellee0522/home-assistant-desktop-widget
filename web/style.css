@@ -10,12 +10,12 @@
      window before the page has measured itself. */
   --tile-w: 152px;
   --tile-h: 146px;
-  --gap: 12px;
-  --pad: 20px;
+  --gap: 14px;
+  --pad: 14px;
   /* Nested corners are concentric: the panel's radius derives from the
      tile's plus the padding between them, so the gap never pinches. */
-  --radius-tile: 59px;
-  --radius-panel: calc(var(--radius-tile) + 36.8px);
+  --radius-tile: 70px;
+  --radius-panel: calc(var(--radius-tile) + var(--pad));
 
   /* The panel is a see-through tint over the blurred desktop.
      --panel-solid is the same colour opaque, for the settings menus. */
@@ -171,8 +171,7 @@ html.is-system-glass #backdrop-glass {
 /* Clear captured backdrop, refracted bevel, translucent tint, and directional
    highlight follow the layered glass recipe used by KMPLiquidGlass. */
 html[data-glass-style="liquid"] {
-  --radius-tile: 52px;
-  --radius-panel: 88px;
+  --radius-tile: 62px;
   --panel: rgba(226, 239, 248, 0.18);
   --tile-off: rgba(39, 55, 73, 0.3);
   --tile-off-hover: rgba(48, 66, 86, 0.4);
@@ -240,7 +239,7 @@ html[data-glass-style="liquid"] .tile.is-on {
     inset 0 0 0 1px rgba(255,255,255,.35);
 }
 html[data-glass-style="windows"] {
-  --radius-tile: 22px;
+  --radius-tile: 32px;
   --panel: rgba(231, 237, 244, 0.72);
   --tile-off: rgba(58, 68, 81, 0.66);
   --tile-off-hover: rgba(70, 82, 98, 0.74);
@@ -302,6 +301,95 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   gap: var(--gap);
   pointer-events: none;
 }
+
+/* ===== Desktop widgets =====
+   A widget is a grid of whole tile cells (1x1, 2x2, 2x4, 4x4), padded and
+   spaced like the original widget, so a tile is the same size in every
+   widget. app.js (widgetGeometry) sets --cols/--rows, --widget-w/-h, --cell-w
+   /-h (one tile cell, px), --ts, --tz (the tile content's zoom) and how many
+   cells a tile spans on whatever carries .widget-scope: the page itself in a
+   widget window, or a preview in the editor. Only one tile form is shown per
+   widget. */
+.widget-frame { position: relative; padding: var(--pad); }
+.widget-scope #view-grid,
+.widget-scope .widget-frame {
+  width: var(--widget-w);
+  height: var(--widget-h);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.widget-scope .card-bg {
+  /* Concentric with the tile corner, as at full size. */
+  border-radius: calc(var(--radius-tile) * var(--ts) + var(--radius-panel) - var(--radius-tile));
+}
+.widget-scope .tiles-grid {
+  grid-template-columns: repeat(var(--cols), var(--cell-w));
+  grid-auto-rows: var(--cell-h);
+  height: 100%;
+  align-content: start;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.widget-scope .tiles-grid::-webkit-scrollbar { display: none; }
+.widget-scope .tile {
+  zoom: var(--tz);
+  grid-column: span var(--span-c);
+  grid-row: span var(--span-r);
+  width: calc((var(--span-c) * var(--cell-w) + (var(--span-c) - 1) * var(--gap)) / var(--tz));
+  height: calc((var(--span-r) * var(--cell-h) + (var(--span-r) - 1) * var(--gap)) / var(--tz));
+  /* The same corner whatever the form. */
+  border-radius: calc(var(--radius-tile) * var(--ts) / var(--tz));
+}
+
+/* Long tile: a dark translucent disc with the icon on the left third, the
+   text on the right. */
+.tile.is-bar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  /* (146 - 100) / 2: the disc is as far from the left edge as from the
+     top and bottom. */
+  padding: 0 23px;
+}
+.tile.is-bar .tile-icon {
+  position: static;
+  flex: none;
+  width: 100px;
+  height: 100px;
+  box-sizing: border-box;
+  padding: 26px;
+  border-radius: 50%;
+  corner-shape: round;
+  background: rgba(14, 18, 24, 0.2);
+}
+/* On, the disc takes the icon's own colour and the icon turns white
+   (see tileEl). */
+.tile.is-bar.is-on .tile-icon { color: #fff; }
+.tile.is-bar .tile-icon.is-badge { padding: 0; font-size: 27px; }
+.tile.is-bar .tile-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.tile.is-bar .tile-value,
+.tile.is-bar.is-readonly .tile-value {
+  position: static;
+  font-size: 25.5px;
+  margin: 0;
+}
+.tile.is-bar .mini-btns { top: 8px; right: 10px; }
+
+/* Big tile: drawn a little larger than a small one, not twice the size, with
+   the same inset on every side. */
+.tile.is-big { padding: 18px; }
+.tile.is-big .tile-icon { top: 18px; left: 18px; width: 52px; height: 52px; }
+.tile.is-big .tile-value { top: 78px; left: 18px; right: 18px; }
+.tile.is-big .tile-room { font-size: 21px; }
+.tile.is-big .tile-label { font-size: 17.5px; }
+
 /* An empty grid still reserves its column widths. */
 .tiles-grid:empty {
   display: none;
@@ -495,6 +583,29 @@ html[data-theme="dark"][data-glass-style="liquid"] #view-grid .card-bg::after {
   pointer-events: auto;
 }
 html:not([data-theme="light"]) .empty-hint { color: var(--text-off-2); }
+/* An empty widget fills itself with a larger, centred message. */
+.widget-scope .empty-hint {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  padding: 20px;
+  box-sizing: border-box;
+  gap: 8px;
+  /* Only the button takes the pointer: the rest is still the drag handle. */
+  pointer-events: none;
+}
+.widget-scope .empty-hint .pill-btn { pointer-events: auto; }
+/* Sized for the widget (and drawn under its CSS zoom), so it reads at a
+   glance from across a desk. */
+.widget-scope .empty-hint .empty-icon { font-size: 80px; line-height: 1; }
+.widget-scope .empty-hint .empty-title { font-size: 40px; line-height: 1.2; font-weight: 700; }
+.widget-scope .empty-hint .empty-sub { font-size: 26px; line-height: 1.25; }
+.widget-scope .empty-hint .pill-btn { font-size: 26px; padding: 14px 36px; margin-top: 8px; }
+.widget-scope.is-widget-small .empty-hint .empty-icon { font-size: 60px; }
+.widget-scope.is-widget-small .empty-hint .empty-title { font-size: 26px; }
+.widget-scope.is-widget-small .empty-hint .empty-sub,
+.widget-scope.is-widget-small .empty-hint .pill-btn { display: none; }
 .empty-icon { font-size: 30px; margin-bottom: 2px; color: var(--accent-blue); }
 .empty-title { font-size: 14px; font-weight: 600; color: var(--text-off-1); }
 html[data-theme="light"] .empty-title { color: var(--text-on-1); }
@@ -502,6 +613,7 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
 
 /* ================= Detail / Settings shared chrome ================= */
 
+#view-editor { width: 800px; display: flex; flex-direction: column; overflow: hidden; }
 #view-settings, #view-picker {
   width: 340px;
   display: flex;
@@ -510,18 +622,21 @@ html[data-theme="light"] .empty-title { color: var(--text-on-1); }
 }
 /* Settings is read rather than glanced at, so its panel is nearly solid. */
 #view-settings .card-bg,
+#view-editor .card-bg,
 #view-picker .card-bg {
   border-radius: 48px;
-  --panel: rgba(240, 245, 250, 0.9);
+  --panel: rgb(240, 245, 250);
 }
 html[data-theme="dark"] #view-settings .card-bg,
+html[data-theme="dark"] #view-editor .card-bg,
 html[data-theme="dark"] #view-picker .card-bg {
-  --panel: rgba(26, 29, 34, 0.9);
+  --panel: rgb(26, 29, 34);
 }
 @media (prefers-color-scheme: dark) {
   html[data-theme="auto"] #view-settings .card-bg,
+  html[data-theme="auto"] #view-editor .card-bg,
   html[data-theme="auto"] #view-picker .card-bg {
-    --panel: rgba(26, 29, 34, 0.9);
+    --panel: rgb(26, 29, 34);
   }
 }
 
@@ -1228,9 +1343,124 @@ html.is-dimmed:not(.is-flyout-window) .tile:not(.is-on) .tile-icon {
   color: var(--text-off-1) !important;
   background: transparent !important;
 }
+/* The long tile's disc follows the same pale-glass treatment. */
+html.is-dimmed:not(.is-flyout-window) .tile.is-bar .tile-icon,
+html.is-dimmed:not(.is-flyout-window) .tile.is-bar.is-on .tile-icon {
+  background: rgba(255, 255, 255, 0.10) !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+html.is-dimmed:not(.is-flyout-window) .tile.is-bar.is-on .tile-icon {
+  background: rgba(255, 255, 255, 0.2) !important;
+}
+html.is-dimmed:not(.is-flyout-window) .tile.is-bar .tile-icon.is-badge {
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+/* So does an empty widget's message and button. */
+html.is-dimmed:not(.is-flyout-window) .empty-hint,
+html.is-dimmed:not(.is-flyout-window) .empty-title,
+html.is-dimmed:not(.is-flyout-window) .empty-sub {
+  color: var(--text-off-2);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: color 700ms ease-in-out, text-shadow 700ms ease-in-out;
+}
+html.is-dimmed:not(.is-flyout-window) .empty-title { color: var(--text-off-1); }
+html.is-dimmed:not(.is-flyout-window) .empty-icon { color: var(--text-off-1); opacity: .75; }
+html.is-dimmed:not(.is-flyout-window) .empty-hint .pill-btn {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text-off-1);
+  box-shadow: none;
+}
+.empty-hint, .empty-title, .empty-sub, .empty-icon, .empty-hint .pill-btn {
+  transition: color 260ms ease-out, background 260ms ease-out, opacity 260ms ease-out;
+}
+
 /* A lighter text shadow for the paler type. */
 html.is-dimmed:not(.is-flyout-window) .tile .tile-room,
 html.is-dimmed:not(.is-flyout-window) .tile .tile-label,
 html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
+
+/* ================= Widget manager (settings) ================= */
+.widget-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.widget-chip {
+  border: 0; border-radius: 999px; padding: 6px 12px; font-size: 12px;
+  cursor: pointer; color: var(--btn-text); background: var(--btn-fill);
+}
+.widget-chip.is-active { background: var(--accent, #0a84ff); color: #fff; }
+.widget-chip.add { font-weight: 600; }
+
+/* ================= Widget editor ================= */
+.editor-body { padding: 0 18px 18px; max-height: 640px; overflow-y: auto; }
+.editor-cols { display: grid; grid-template-columns: 300px 1fr; gap: 22px; align-items: start; }
+.editor-label {
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-on-2); margin: 12px 0 8px;
+}
+.editor-left .editor-label:first-child, .editor-right .editor-label:first-child { margin-top: 2px; }
+
+/* The sizes to drag out onto the desktop, drawn in proportion. */
+.palette { display: flex; flex-wrap: wrap; gap: 14px 16px; align-items: flex-end; }
+.palette-item {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  cursor: grab; user-select: none; touch-action: none;
+}
+.palette-item:active { cursor: grabbing; }
+.palette-box {
+  display: grid; gap: 3px; padding: 5px; box-sizing: border-box;
+  border-radius: 14px; background: var(--btn-fill);
+  box-shadow: inset 0 0 0 1px var(--glass-edge);
+  transition: transform .12s ease, background .12s ease;
+}
+.palette-item:hover .palette-box { background: var(--btn-fill-strong); transform: translateY(-2px); }
+.palette-cell { border-radius: 6px; background: var(--btn-text); opacity: .28; }
+.palette-name { font-size: 12px; color: var(--text-on-2); }
+
+/* Every monitor, with the widgets where they are. */
+.minimap {
+  position: relative; width: 100%; min-height: 120px; border-radius: 14px;
+  background: var(--btn-fill); overflow: hidden;
+}
+.mm-monitor {
+  position: absolute; box-sizing: border-box; border-radius: 6px;
+  background: linear-gradient(135deg, rgba(120,140,220,.35), rgba(220,160,200,.3));
+  box-shadow: inset 0 0 0 1.5px var(--text-on-2);
+}
+.mm-widget {
+  position: absolute; box-sizing: border-box; border-radius: 7px;
+  background: var(--panel-solid); color: var(--text-on-1);
+  box-shadow: inset 0 0 0 1.5px var(--text-on-2), 0 2px 6px rgba(0,0,0,.25);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; cursor: grab; touch-action: none; user-select: none;
+}
+.mm-widget.hidden-widget { opacity: .45; }
+.editor-lock { margin-top: 10px; }
+.mm-widget.selected { box-shadow: inset 0 0 0 2px var(--accent-blue), 0 2px 8px rgba(0,0,0,.3); }
+.mm-widget:active { cursor: grabbing; }
+
+/* The selected widget as it will look on the desktop. */
+.editor-preview {
+  border-radius: 22px; padding: 18px; display: flex; justify-content: center;
+  background: linear-gradient(135deg, #7f94dc 0%, #c8a2de 55%, #f2b9a3 100%);
+  min-height: 120px; overflow: hidden;
+}
+.editor-preview .widget-scope { flex: none; }
+.editor-preview .widget-frame { box-shadow: 0 8px 24px rgba(0,0,0,.18); border-radius: inherit; }
+.editor-preview .tile { cursor: grab; position: relative; }
+.editor-preview .tile.dragging { opacity: .35; }
+.editor-preview .tile.drop-before { box-shadow: inset 6px 0 0 var(--accent-blue); }
+.editor-preview .tile.drop-after { box-shadow: inset -6px 0 0 var(--accent-blue); }
+.preview-remove {
+  position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; border: 0;
+  border-radius: 50%; background: rgba(0,0,0,.45); color: #fff; font-size: 13px;
+  line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s ease; z-index: 2;
+}
+.editor-preview .tile:hover .preview-remove { opacity: 1; }
+.preview-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 20px; text-align: center; font-size: 15px; color: var(--text-off-1);
+  text-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+.editor-tools { margin-top: 12px; align-items: center; flex-wrap: wrap; }
+.editor-tiles { margin-top: 10px; }
+.editor-tiles .tile-list { max-height: 190px; overflow-y: auto; }

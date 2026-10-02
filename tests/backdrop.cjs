@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('web/app.js', 'utf8');
-const refresh = source.slice(source.indexOf('function applyShot('),
+const raw = source.slice(source.indexOf('// Base64 RGB pixels'),
+  source.indexOf('function decodeShot('));
+const refresh = raw + source.slice(source.indexOf('function applyShot('),
   source.indexOf('function invalidateBackdrop()'));
 const system = source.slice(source.indexOf('function systemGlass()'),
   source.indexOf('function applySystemGlass()'));
@@ -11,6 +13,7 @@ const system = source.slice(source.indexOf('function systemGlass()'),
 (async () => {
   let fail = true;
   const streamCalls = [];
+  const puts = [];
   let paints = 0;
   let closed = 0;
   let restarted = 0;
@@ -20,7 +23,7 @@ const system = source.slice(source.indexOf('function systemGlass()'),
     backdropStill: 0, backdropSkipMs: 0, backdropAt: null, backdropPaced: false,
     flyoutAnimating: false, backdropTicksOnVsync: () => false,
     startBackdropTicker() { restarted++; }, IS_POPOVER_WINDOW: false,
-    CONFIG: {}, WINDOW_KIND: 'main', performance,
+    CONFIG: {}, WINDOW_KIND: 'main', WINDOW_ROLE: 'grid', performance,
     viewportBox: () => ({ width: 100, height: 100 }), cardGeometry: () => null,
     noteFrameCost() {}, applySystemGlass() {}, refreshBackdropSoon() {},
     paintBackdrop() { paints++; },
@@ -28,7 +31,13 @@ const system = source.slice(source.indexOf('function systemGlass()'),
       if (fail) throw Error('decode failed');
       return { close() { closed++; } };
     },
-    document: { hidden: false },
+    document: { hidden: false, createElement: () => ({
+      width: 0, height: 0, getContext: () => ({
+        createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+        putImageData(image) { puts.push(image); } }),
+    }) },
+    ImageData: class { constructor(data, w, h) { this.data = data; this.width = w; this.height = h; } },
+    atob: (text) => Buffer.from(text, 'base64').toString('binary'),
     setInterval: () => 7, clearInterval() {},
     window: { devicePixelRatio: 1, pywebview: { api: {
       backdrop_stream: async (...args) => { streamCalls.push(args); return true; },
@@ -77,12 +86,21 @@ const system = source.slice(source.indexOf('function systemGlass()'),
   await new Promise(r => setImmediate(r));
   assert.equal(paints, 1);
   assert.equal(context.backdropHash, 55);
+  // The blurred picture arrives as raw pixels and is drawn without decoding.
+  const raw = Buffer.from([1, 2, 3, 4, 5, 6]).toString('base64');
+  context.window.__backdropPush({ token, w: 100, h: 100, hash: 77, blur_raw: raw,
+                                  blur_w: 2, blur_h: 1, paced: true, system_glass: false });
+  await new Promise(r => setImmediate(r));
+  assert.equal(puts.length, 1, 'raw pixels are put straight onto a canvas');
+  assert.deepEqual(Array.from(puts[0].data), [1, 2, 3, 255, 4, 5, 6, 255]);
+  assert.equal(context.backdropHash, 77);
+  assert.equal(paints, 2);
   context.window.__backdropPush({ token, stream_end: true, skip: true, retry_ms: 400 });
   assert.equal(context.backdropSkipMs, 400);
   assert.equal(restarted, 1, 'the ticker resumes when the stream ends');
   context.window.__backdropPush(frame);
   await new Promise(r => setImmediate(r));
-  assert.equal(paints, 1, 'nothing is painted after the stream ended');
+  assert.equal(paints, 2, 'nothing is painted after the stream ended');
   context.backdropSkipMs = 0;
   context.enterStream();
 

@@ -14,7 +14,7 @@ def api_type():
     tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
     names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
-             '_eval_all', '_all_windows'}
+             '_eval_all', '_all_windows', '_all_tiles', '_watched_entities'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
     scope = {'json': json, 'threading': threading}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
@@ -28,9 +28,11 @@ class Regressions(unittest.TestCase):
             setattr(self.api, attr, Mock())
         self.api._ui_ready = True
         self.api._connected = True
+        self.api._widgets = {}
 
     def test_push_reaches_all_windows_even_if_main_is_missing(self):
         self.api._window = None
+        self.api._widgets = {}
         self.api._push_batch([['switch.test', {'state': 'on'}]])
         for attr in ('_popover_window', '_flyout_window', '_settings_window'):
             getattr(self.api, attr).evaluate_js.assert_called_once()
@@ -43,7 +45,8 @@ class Regressions(unittest.TestCase):
     def test_refresh_marks_missing_or_failed_entities_unavailable(self):
         for failure in (False, True):
             with self.subTest(failure=failure):
-                self.api._cfg = {'ha_token': 'test', 'tiles': [{'entity': 'switch.test'}]}
+                self.api._cfg = {'ha_token': 'test', 'widgets': [
+                    {'id': 'w', 'tiles': [{'entity': 'switch.test'}]}]}
                 self.api._client = Mock()
                 self.api._client.get_states.return_value = []
                 if failure:
@@ -57,7 +60,7 @@ class Regressions(unittest.TestCase):
                 self.api._client.get_states.assert_called_once()
 
     def test_empty_panel_opens_settings(self):
-        self.api._cfg = {'tiles': []}
+        self.api._cfg = {'widgets': [{'id': 'w', 'tiles': []}]}
         self.api.open_settings_window = Mock()
         self.api.show_flyout()
         self.api.open_settings_window.assert_called_once()

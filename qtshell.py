@@ -12,7 +12,6 @@ positional is done by HWND in physical pixels, as in main.py.
 """
 
 import faulthandler
-import ctypes
 from ctypes import wintypes
 import json
 import os
@@ -22,7 +21,9 @@ import traceback
 from collections import deque
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QFile, QIODevice,
+                            QObject, Qt, QTimer, QUrl, Signal)
+from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtGui import QCursor
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -199,6 +200,28 @@ class _Events:
 # ---------------------------------------------------------------------
 # The bridge: the page's own origin answers for the API
 # ---------------------------------------------------------------------
+_channel_js = None
+
+
+def _webchannel_script():
+    """Qt's own qwebchannel.js, which lives in its resources, not in web/."""
+    global _channel_js
+    if _channel_js is None:
+        f = QFile(":/qtwebchannel/qwebchannel.js")
+        _channel_js = bytes(f.readAll()) if f.open(QIODevice.ReadOnly) else b""
+        f.close()
+    return _channel_js
+
+
+class _FrameBridge(QObject):
+    """What the page listens to for pictures: a signal carries each one, so
+    nothing is compiled as script (every runJavaScript is a new script, and
+    a few KB of them sixty times a second is memory the page never gets
+    back)."""
+
+    frame = Signal(str)
+
+
 class _Handler(SimpleHTTPRequestHandler):
     """Serves web/ and, at /api/<name>, the api object behind it."""
 
@@ -210,6 +233,18 @@ class _Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] == "/qwebchannel.js":
+            body = _webchannel_script()
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
 
     def do_POST(self):
         if not self.path.startswith("/api/"):
@@ -285,6 +320,11 @@ class _WebWindow(QMainWindow):
         s = page.settings()
         s.setAttribute(QWebEngineSettings.ShowScrollBars, False)
         s.setAttribute(QWebEngineSettings.FocusOnNavigationEnabled, False)
+        # The route pictures take to the page (see _FrameBridge).
+        self._frames = _FrameBridge()
+        self._channel = QWebChannel(self)
+        self._channel.registerObject("frames", self._frames)
+        page.setWebChannel(self._channel)
         self.setCentralWidget(self.view)
         self.view.loadStarted.connect(self._on_load_started)
         self.view.loadFinished.connect(self._on_load)
@@ -448,6 +488,18 @@ class Window:
     def destroy(self):
         _invoke(self._native, self._native.close)
 
+    def dispose(self):
+        """Close for good, unlike destroy(), which a closing handler may veto."""
+        def run():
+            self.events.closing._handlers.clear()
+            self._native.close()
+            self._native.deleteLater()
+        _invoke(self._native, run, wait=True)
+        try:
+            _windows.remove(self)
+        except ValueError:
+            pass
+
     def evaluate_js(self, script):
         def run():
             if self._page_loaded:
@@ -456,6 +508,10 @@ class Window:
                 self._pending_scripts.append(script)
         _invoke(self._native, run)
         return None
+
+    def push_frame(self, text):
+        """Hand the page a picture (a JSON string) without compiling script."""
+        _invoke(self._native, lambda: self._native._frames.frame.emit(text))
 
     def run_on_ui_thread(self, fn):
         """Run fn on the GUI thread and wait for its result."""
@@ -517,12 +573,29 @@ def _invoke(widget, fn, wait=False):
 # ---------------------------------------------------------------------
 def create_window(title, url=None, **kw):
     """`url` may be a path to a file in the web directory; it is served
-    from the bridge's origin so API calls are same-origin."""
+    from the bridge's origin so API calls are same-origin.
+
+    Safe from any thread: Qt objects are made on the GUI thread."""
     if url and not url.startswith("http"):
         path, _, frag = url.partition("#")
         name = os.path.basename(path)
         url = "http://127.0.0.1:%d/%s%s" % (_server_port, name, ("#" + frag) if frag else "")
-    win = Window(title, url=url, **kw)
+    if _marshal is None or threading.current_thread() is threading.main_thread():
+        win = Window(title, url=url, **kw)
+    else:
+        box = {}
+        done = threading.Event()
+
+        def make():
+            try:
+                box["win"] = Window(title, url=url, **kw)
+            finally:
+                done.set()
+        _marshal.post(make)
+        done.wait(10.0)
+        win = box.get("win")
+        if win is None:
+            raise RuntimeError("window could not be created")
     _windows.append(win)
     return win
 
@@ -539,6 +612,13 @@ def start():
 def prepare(web_dir, api, log_dir=None):
     """Create the application and the bridge, before any window exists."""
     global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter, _display_timer
+    # The pages call gc() now and then (see the "garbage" timer in app.js): the
+    # engine collects by the size of the script heap, and the messages and
+    # pixel buffers a page receives live outside it, so left alone a widget
+    # page piles up tens of MB of garbage a minute.
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    if "--expose-gc" not in flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (flags + " --js-flags=--expose-gc").strip()
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
         try:

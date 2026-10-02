@@ -103,10 +103,11 @@ function iconNameFor(tile, state) {
  * Global state
  * ============================================================ */
 let CONFIG = {
-  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', columns: 4, tiles: [],
+  ha_url: '', ha_token: '', theme: 'auto', glass_style: 'classic', tiles: [],
+  widgets: [], panel: { mode: 'grid', tiles: null },
   dim_when_idle: true, dim_after_sec: 120,
   lock_position: false, start_on_boot: false,
-  zoom: 100, fixed_size: false, fixed_width: 400, fixed_height: 300,
+  zoom: 100,
 };
 let STATES = {};
 let CONNECTED = false;
@@ -118,14 +119,72 @@ let allEntities = [];
 // the grid widget (none), #popover, #settings and #flyout (the tray panel).
 // Each window shows one view; the grid never takes focus, Settings must,
 // and Settings ignores the widget's zoom.
-const WINDOW_ROLE = (location.hash || '').replace('#', '') || 'grid';
+const WINDOW_HASH = (location.hash || '').replace('#', '') || 'grid';
+const WINDOW_ROLE = WINDOW_HASH.split(':')[0];
+// Which desktop widget this window is (grid windows only).
+const WIDGET_ID = WINDOW_HASH.indexOf(':') >= 0
+  ? WINDOW_HASH.slice(WINDOW_HASH.indexOf(':') + 1) : '';
 const IS_POPOVER_WINDOW = WINDOW_ROLE === 'popover';
 const IS_FLYOUT_WINDOW = WINDOW_ROLE === 'flyout';
 // What Python calls this window.
-const WINDOW_KIND = WINDOW_ROLE === 'grid' ? 'main' : WINDOW_ROLE;
+const WINDOW_KIND = WINDOW_ROLE === 'grid'
+  ? (WIDGET_ID ? 'w:' + WIDGET_ID : 'main') : WINDOW_ROLE;
 const IS_SETTINGS_WINDOW = WINDOW_ROLE === 'settings';
 
-function findTile(id) { return (CONFIG.tiles || []).find((t) => t.id === id); }
+// Widget sizes as [columns, rows] of tile cells (see config.WIDGET_SIZES).
+const WIDGET_SIZES = { '1x1': [1, 1], '2x2': [2, 2], '2x4': [4, 2], '4x4': [4, 4] };
+
+// Every tile this page knows about: each widget's, plus the panel's own.
+function allTiles(cfg) {
+  const c = cfg || CONFIG;
+  const tiles = [];
+  for (const w of (c.widgets || [])) tiles.push(...(w.tiles || []));
+  if (c.panel && Array.isArray(c.panel.tiles)) tiles.push(...c.panel.tiles);
+  return tiles;
+}
+
+function uniqueByEntity(tiles) {
+  const seen = new Set();
+  return tiles.filter((t) => !seen.has(t.entity) && seen.add(t.entity));
+}
+
+let settingsWidgetId = '';
+
+// The widget the settings window is editing.
+function settingsWidget(cfg) {
+  const widgets = (cfg || CONFIG).widgets || [];
+  return widgets.find((w) => w.id === settingsWidgetId) || widgets[0] || null;
+}
+
+// The tiles this window draws: a widget its own, the panel its own list or
+// every widget's, Settings the widget being edited.
+function tilesFor(cfg) {
+  const widgets = cfg.widgets || [];
+  if (WINDOW_ROLE === 'grid') {
+    const w = widgets.find((x) => x.id === WIDGET_ID) || widgets[0];
+    return w ? w.tiles : [];
+  }
+  if (IS_SETTINGS_WINDOW) {
+    const w = settingsWidget(cfg);
+    return w ? w.tiles : [];
+  }
+  if (IS_FLYOUT_WINDOW) {
+    if (cfg.panel && Array.isArray(cfg.panel.tiles)) return cfg.panel.tiles;
+    return uniqueByEntity(allTiles(cfg));
+  }
+  return allTiles(cfg);
+}
+
+function resolveWindowTiles() {
+  CONFIG.tiles = tilesFor(CONFIG);
+}
+
+function myWidget() {
+  const widgets = CONFIG.widgets || [];
+  return widgets.find((w) => w.id === WIDGET_ID) || widgets[0] || null;
+}
+
+function findTile(id) { return allTiles().find((t) => t.id === id); }
 function friendlyName(state) { return state && state.attributes && state.attributes.friendly_name; }
 
 /* ============================================================
@@ -156,6 +215,7 @@ window.__haStatus = function (connected) {
  * Boot
  * ============================================================ */
 async function boot() {
+  connectFrames();
   try {
     const data = await window.pywebview.api.bootstrap();
     CONFIG = data.config;
@@ -163,11 +223,13 @@ async function boot() {
   } catch (e) {
     /* keep defaults, still render an empty widget */
   }
+  resolveWindowTiles();
+  // A widget made while the others are dimmed starts dimmed as well.
+  if (CONFIG.dimmed && WINDOW_ROLE === 'grid') window.__setDimmed(true);
   setInterfaceLanguage(CONFIG.language);
   applyTheme();
   applySystemGlass();
   applyZoom();
-  applyFixedSizeConstraint();
   renderGrid();
   if (IS_FLYOUT_WINDOW) {
     document.documentElement.classList.add('is-flyout-window');
@@ -178,6 +240,8 @@ async function boot() {
     document.documentElement.classList.add('is-popover-window');
   } else if (IS_SETTINGS_WINDOW) {
     openSettingsView();
+    settingsBooted = true;
+    if (pendingEditor !== null) { openEditor(pendingEditor); pendingEditor = null; }
   }
   updateConnDot();
   markLayoutReady();
@@ -194,7 +258,9 @@ async function boot() {
   }).catch(() => { /* ignore */ });
 
   // First run: only the grid window raises Settings.
-  if (WINDOW_ROLE === 'grid' && !CONFIG.ha_token && (!CONFIG.tiles || !CONFIG.tiles.length)) {
+  const firstWidget = (CONFIG.widgets || [])[0];
+  if (WINDOW_ROLE === 'grid' && (!firstWidget || firstWidget.id === WIDGET_ID) &&
+      !CONFIG.ha_token && !allTiles().length) {
     setTimeout(openSettings, 150);
   }
 }
@@ -212,7 +278,7 @@ function applyTheme() {
  * ============================================================ */
 // Swaps between the views that share the Settings window.
 function showView(name) {
-  for (const id of ['view-grid', 'view-settings', 'view-picker']) {
+  for (const id of ['view-grid', 'view-settings', 'view-picker', 'view-editor']) {
     document.getElementById(id).hidden = id !== name;
   }
 }
@@ -241,17 +307,53 @@ function applyZoom() {
 // pixels in cardGeometry.
 let currentZoom = 1;
 
-function applyFixedSizeConstraint() {
-  const viewGrid = document.getElementById('view-grid');
-  if (WINDOW_ROLE === 'grid' && CONFIG.fixed_size) {
-    viewGrid.style.width = Math.max(120, Number(CONFIG.fixed_width) || 400) + 'px';
-    viewGrid.style.height = Math.max(90, Number(CONFIG.fixed_height) || 300) + 'px';
-    viewGrid.style.overflow = 'auto';
-  } else {
-    viewGrid.style.width = '';
-    viewGrid.style.height = '';
-    viewGrid.style.overflow = '';
-  }
+// A desktop widget is a grid of whole tile cells (1x1, 2x2, 2x4, 4x4),
+// padded and spaced exactly like the original widget, so a tile is the same
+// size in every widget. Only one tile form is used at a time: big squares
+// (2x2 cells), long bars (2x1) or the small squares (1x1), whichever fills
+// the widget for the number of tiles it has.
+const CELL_W = 152, CELL_H = 146, WIDGET_PAD = 14, WIDGET_GAP = 14;
+const BIG_TILE_SCALE = 1.4;
+let tileForm = 'small';
+
+function tileFormFor(cols, rows, count) {
+  const cells = cols * rows;
+  if (count > 0 && cells >= 4 && count <= cells / 4) return 'big';
+  if (count > 0 && cells >= 2 && count <= cells / 2) return 'bar';
+  return 'small';
+}
+
+// Everything a widget's layout needs, as CSS variables, for a size and a
+// number of tiles.
+function widgetGeometry(size, count) {
+  const [cols, rows] = WIDGET_SIZES[size] || WIDGET_SIZES['2x4'];
+  const width = cols * CELL_W + (cols - 1) * WIDGET_GAP + 2 * WIDGET_PAD;
+  const height = rows * CELL_H + (rows - 1) * WIDGET_GAP + 2 * WIDGET_PAD;
+  const form = tileFormFor(cols, rows, count);
+  const span = form === 'big' ? [2, 2] : form === 'bar' ? [2, 1] : [1, 1];
+  return {
+    cols, rows, width, height, form, small: cols * rows === 1,
+    vars: {
+      '--cols': cols, '--rows': rows,
+      '--widget-w': width + 'px', '--widget-h': height + 'px',
+      '--cell-w': CELL_W + 'px', '--cell-h': CELL_H + 'px',
+      '--ts': 1, '--tz': form === 'big' ? BIG_TILE_SCALE : 1,
+      '--span-c': span[0], '--span-r': span[1],
+    },
+  };
+}
+
+function applyWidgetGeometry(el, geometry) {
+  el.classList.add('widget-scope');
+  el.classList.toggle('is-widget-small', geometry.small);
+  for (const [name, value] of Object.entries(geometry.vars)) el.style.setProperty(name, value);
+}
+
+function layoutWidget(count) {
+  const widget = myWidget();
+  const geometry = widgetGeometry(widget && widget.size, count);
+  tileForm = geometry.form;
+  applyWidgetGeometry(document.documentElement, geometry);
 }
 
 // The last resize requested, so work that needs the final size can wait
@@ -284,11 +386,11 @@ function syncWindowSize() {
     const sizeKey = `${physW}:${physH}`;
     if (sizeKey === lastRequestedSize) return;
     lastRequestedSize = sizeKey;
-    const resize = IS_POPOVER_WINDOW ? window.pywebview.api.resize_popover_window
-      : IS_SETTINGS_WINDOW ? window.pywebview.api.resize_settings_window
-      : IS_FLYOUT_WINDOW ? window.pywebview.api.resize_flyout_window
-      : window.pywebview.api.resize_window;
-    const done = resize(physW, physH, resizeSeq);
+    const api = window.pywebview.api;
+    const done = IS_POPOVER_WINDOW ? api.resize_popover_window(physW, physH, resizeSeq)
+      : IS_SETTINGS_WINDOW ? api.resize_settings_window(physW, physH, resizeSeq)
+      : IS_FLYOUT_WINDOW ? api.resize_flyout_window(physW, physH, resizeSeq)
+      : api.resize_window(physW, physH, resizeSeq, WIDGET_ID);
     pendingResize = Promise.resolve(done).catch(() => {
       if (lastRequestedSize === sizeKey) lastRequestedSize = '';
     });
@@ -369,7 +471,7 @@ function systemGlass() {
   return CONFIG.glass_style !== 'liquid'
     && CONFIG.glass_mode === 'system' && CONFIG.system_glass_ok === true
     && CONFIG.system_glass_active?.[WINDOW_KIND] === true
-    && (WINDOW_KIND === 'main' || WINDOW_KIND === 'popover'
+    && (WINDOW_ROLE === 'grid' || WINDOW_KIND === 'popover'
         || WINDOW_KIND === 'flyout');
 }
 
@@ -803,6 +905,10 @@ function paintBackdrop(blurred, lens, w, h) {
   if (!card) return;
   if (!lensed) {
     applyGlassClip(glass, card, window.devicePixelRatio || 1);
+    // The picture is a small, already blurred copy: stretch it with the
+    // smooth filter, or the interpolation grid shows through as noise.
+    glassCtx.imageSmoothingEnabled = true;
+    glassCtx.imageSmoothingQuality = 'high';
     glassCtx.drawImage(blurred || lens, 0, 0, w, h);
     return;
   }
@@ -812,6 +918,33 @@ function paintBackdrop(blurred, lens, w, h) {
   glassCtx.drawImage(blurred || lens, 0, 0, w, h);
   paintLiquidLens(glassCtx, lens, w, h, card);
   glassCtx.restore();
+}
+
+// Base64 RGB pixels (blur_w x blur_h) to a canvas, reused from frame to frame.
+let rawScratch = null;
+let rawCtx = null;
+let rawImage = null;
+function rawToCanvas(shot) {
+  const w = shot.blur_w, h = shot.blur_h;
+  if (!rawScratch) {
+    rawScratch = document.createElement('canvas');
+    rawCtx = rawScratch.getContext('2d');
+  }
+  if (!rawImage || rawImage.width !== w || rawImage.height !== h) {
+    rawScratch.width = w;
+    rawScratch.height = h;
+    rawImage = rawCtx.createImageData(w, h);
+    rawImage.data.fill(255);                    // alpha stays opaque
+  }
+  const bin = atob(shot.blur_raw);
+  const rgba = rawImage.data;
+  for (let i = 0, j = 0, p = 0; i < w * h; i++, p += 4) {
+    rgba[p] = bin.charCodeAt(j++);
+    rgba[p + 1] = bin.charCodeAt(j++);
+    rgba[p + 2] = bin.charCodeAt(j++);
+  }
+  rawCtx.putImageData(rawImage, 0, 0);
+  return rawScratch;
 }
 
 // Decoded off the main thread and closed after drawing, so frames never
@@ -824,7 +957,8 @@ function decodeShot(url) {
       const bin = atob(url.slice(url.indexOf(',') + 1));
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+      const mime = url.slice(5, url.indexOf(';'));
+      return createImageBitmap(new Blob([bytes], { type: mime }));
     } catch (e) { /* fall through */ }
   }
   return fetch(url).then((r) => r.blob()).then(createImageBitmap);
@@ -857,7 +991,7 @@ function applyShot(shot, generation, startedAt) {
   if (!shot) { backdropPending = false; return; }
   if (shot.unchanged) { backdropStill += 1; backdropPending = false; return; }
   backdropStill = 0;
-  if (!shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
+  if (!shot.blur_raw && !shot.blur_url && !shot.lens_url) { backdropPending = false; return; }
   // The window may have been resized while this was in flight; a frame
   // of the old size would be stretched, so drop it and ask again.
   const live = viewportBox();
@@ -870,12 +1004,16 @@ function applyShot(shot, generation, startedAt) {
     refreshBackdropSoon(0);
     return;
   }
+  // The blurred picture arrives as raw pixels and is drawn straight onto a
+  // small canvas: no file to decode, nothing to release.
+  const rawBlur = shot.blur_raw ? rawToCanvas(shot) : null;
   return Promise.allSettled([
-    shot.blur_url ? decodeShot(shot.blur_url) : null,
+    rawBlur ? null : (shot.blur_url ? decodeShot(shot.blur_url) : null),
     shot.lens_url ? decodeShot(shot.lens_url) : null,
   ]).then((results) => {
-    const [blurred, lens] = results.map(result =>
+    const [decodedBlur, lens] = results.map(result =>
       result.status === 'fulfilled' ? result.value : null);
+    const blurred = rawBlur || decodedBlur;
     try {
       const failure = results.find(result => result.status === 'rejected');
       if (failure) throw failure.reason;
@@ -890,7 +1028,7 @@ function applyShot(shot, generation, startedAt) {
       paintBackdrop(blurred, lens, shot.w, shot.h);
       backdropHash = shot.hash;
     } finally {
-      if (blurred) blurred.close();
+      if (decodedBlur) decodedBlur.close();
       if (lens) lens.close();
       backdropPending = false;
     }
@@ -921,6 +1059,31 @@ function refreshBackdrop() {
 // is told once to keep watching and runs JavaScript here when there is a new
 // picture. Anything that would change what is being asked for (a resize, a
 // drag, an animation) ends the stream and the ticker takes over again.
+// Pictures reach the page as messages on a Qt WebChannel, not as script text
+// (see _FrameBridge in qtshell.py). False until the channel is connected.
+let framesChannel = false;
+function connectFrames() {
+  if (!(window.QWebChannel && window.qt && window.qt.webChannelTransport)) return;
+  try {
+    new QWebChannel(window.qt.webChannelTransport, (channel) => {
+      const bridge = channel.objects && channel.objects.frames;
+      if (!bridge) return;
+      bridge.frame.connect((text) => window.__backdropPush(JSON.parse(text)));
+      framesChannel = true;
+    });
+  } catch (e) { /* the script route still works */ }
+}
+
+// Collect garbage now and then (the engine is started with --expose-gc; see
+// qtshell.prepare). Each frame leaves a few KB of message and pixel buffers
+// that the engine does not count towards a collection, so it would not run
+// one on its own for a long time.
+setInterval(() => {
+  if (typeof window.gc === 'function' && !document.hidden) {
+    try { window.gc(); } catch (e) { /* ignore */ }
+  }
+}, 8000);
+
 let streaming = false;
 let streamToken = null;
 let streamBeat = 0;
@@ -942,7 +1105,7 @@ function enterStream() {
   const w = Math.round(box.width * dpr);
   const h = Math.round(box.height * dpr);
   const send = () => window.pywebview.api
-    .backdrop_stream(WINDOW_KIND, token, w, h, backdropHash);
+    .backdrop_stream(WINDOW_KIND, token, w, h, backdropHash, framesChannel);
   streaming = true;
   streamToken = token;
   queuedShot = null;
@@ -1106,7 +1269,7 @@ const DRAG_THRESHOLD_PX = 5;
 function installWindowDrag() {
   // The popover and the tray panel are placed by Python.
   if (IS_POPOVER_WINDOW || IS_FLYOUT_WINDOW) return;
-  const kind = IS_SETTINGS_WINDOW ? 'settings' : 'main';
+  const kind = IS_SETTINGS_WINDOW ? 'settings' : WINDOW_KIND;
   let start = null;
 
   document.addEventListener('mousedown', (e) => {
@@ -1230,7 +1393,7 @@ function defaultLabel(domain, state) {
   return map[domain] || s || '';
 }
 
-function tileEl(tile) {
+function tileEl(tile, form, preview) {
   const state = STATES[tile.entity];
   const domain = tile.domain;
   const meta = domainMeta(domain);
@@ -1238,7 +1401,9 @@ function tileEl(tile) {
   const on = ok && !meta.momentary && isOnState(domain, state);
 
   const div = document.createElement('div');
-  div.className = 'tile' + (on ? ' is-on' : '') + (meta.readonly ? ' is-readonly' : '');
+  div.className = 'tile' + (on ? ' is-on' : '') + (meta.readonly ? ' is-readonly' : '')
+    + ((form || (WINDOW_ROLE === 'grid' ? tileForm : 'small')) !== 'small'
+      ? ' is-' + (form || tileForm) : '');
   div.dataset.id = tile.id;
 
   const iconWrap = document.createElement('div');
@@ -1255,25 +1420,36 @@ function tileEl(tile) {
   }
   div.appendChild(iconWrap);
 
+  // A long tile keeps its text in a column beside the icon disc.
+  const isBar = div.classList.contains('is-bar');
+  const body = isBar ? document.createElement('div') : div;
+  if (isBar) { body.className = 'tile-text'; div.appendChild(body); }
+
+  // On a long tile the disc takes the icon's colour and the icon is white.
+  if (isBar && on && !badge) {
+    iconWrap.style.background = iconWrap.style.color;
+    iconWrap.style.color = '#fff';
+  }
+
   const valueText = ok && !badge ? valueTextFor(domain, state) : '';
   if (valueText) {
     const v = document.createElement('div');
     v.className = 'tile-value';
     v.textContent = valueText;
-    div.appendChild(v);
+    body.appendChild(v);
   }
 
   const room = document.createElement('div');
   room.className = 'tile-room';
   room.textContent = tile.room || friendlyName(state) || tile.entity;
-  div.appendChild(room);
+  body.appendChild(room);
 
   // A read-only tile with a reading needs no second line repeating it.
   if (!meta.readonly || !valueText) {
     const label = document.createElement('div');
     label.className = 'tile-label';
     label.textContent = ok ? (tile.label || defaultLabel(domain, state)) : '無法連線';
-    div.appendChild(label);
+    body.appendChild(label);
   }
 
   if (!ok) {
@@ -1284,7 +1460,7 @@ function tileEl(tile) {
 
   if (domain === 'climate' && on) addClimateMiniButtons(div, tile);
 
-  attachTileInteraction(div, tile);
+  if (!preview) attachTileInteraction(div, tile);
   return div;
 }
 
@@ -1372,6 +1548,7 @@ function requestPopover(tile) {
     // The tile's size lets the popover flip to its far edge near a screen edge.
     return window.pywebview.api.open_popover(
       tile.id, screenX, screenY, Math.round(r.width * dpr), Math.round(r.height * dpr),
+      WINDOW_KIND,
     );
   }).catch(() => {});
 }
@@ -1387,15 +1564,21 @@ window.__setDimmed = function (on) {
   const next = !!on;
   if (next === dimmed) return;
   dimmed = next;
+  wakeRequested = false;
   document.documentElement.classList.toggle('is-dimmed', dimmed);
-  if (!dimmed) restartBackdropTicker();
 };
 
+// Waking is decided in one place: this asks Python, which wakes every widget
+// in the same breath (including this one), so they come back together. The
+// backdrop never stopped, so there is nothing to restart.
+let wakeRequested = false;
 function wakeFromDim() {
   if (!dimmed) return false;
-  window.__setDimmed(false);
-  if (window.pywebview && window.pywebview.api) {
+  if (!wakeRequested && window.pywebview && window.pywebview.api) {
+    wakeRequested = true;
     window.pywebview.api.wake().catch(() => {});
+    // Should Python never answer, wake this one on its own.
+    setTimeout(() => { if (wakeRequested) window.__setDimmed(false); }, 600);
   }
   return true;
 }
@@ -1495,9 +1678,13 @@ function renderGrid() {
   grid.innerHTML = '';
   entityToTileIds = {};
   const tiles = CONFIG.tiles || [];
-  // Never more columns than tiles (keep in step with main.py).
-  const cols = Math.max(1, Math.min(CONFIG.columns || 4, tiles.length || 1));
-  document.documentElement.style.setProperty('--cols', cols);
+  if (WINDOW_ROLE === 'grid') {
+    layoutWidget(tiles.length);
+  } else {
+    // The panel and Settings fit their tiles: four across at most.
+    const cols = Math.max(1, Math.min(4, tiles.length || 1));
+    document.documentElement.style.setProperty('--cols', cols);
+  }
   if (!tiles.length) {
     grid.hidden = true;
     emptyHint.hidden = IS_FLYOUT_WINDOW;
@@ -2016,6 +2203,7 @@ function openSettings() {
 
 // See Api.open_settings_window in main.py.
 window.__enterSettings = function () {
+  if (IS_SETTINGS_WINDOW && !settingsBooted) return;       // boot opens it
   try { openSettingsView(); } catch (e) { /* ignore */ }
 };
 
@@ -2026,7 +2214,6 @@ function openSettingsView() {
   document.getElementById('theme-select').value = CONFIG.theme || 'auto';
   document.getElementById('language-select').value = CONFIG.language || 'zh-TW';
   document.getElementById('glass-style-select').value = CONFIG.glass_style || 'classic';
-  document.getElementById('columns-select').value = String(CONFIG.columns || 4);
   setZoomSlider(CONFIG.zoom || 100);
   document.getElementById('dim-idle-check').checked = CONFIG.dim_when_idle !== false;
   setDimAfterSlider(CONFIG.dim_after_sec || 120);
@@ -2039,10 +2226,6 @@ function openSettingsView() {
   if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
   document.getElementById('panel-theme-select').value = CONFIG.panel_theme || 'follow';
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
-  document.getElementById('fixed-size-check').checked = !!CONFIG.fixed_size;
-  document.getElementById('fixed-width-input').value = String(CONFIG.fixed_width || 400);
-  document.getElementById('fixed-height-input').value = String(CONFIG.fixed_height || 300);
-  document.getElementById('fixed-size-fields').hidden = !CONFIG.fixed_size;
   document.getElementById('test-conn-result').textContent = '';
   renderTileList();
   updateConnDot();
@@ -2089,8 +2272,331 @@ async function closeSettingsAndSave() {
   }
 }
 
+// ---- Widget editor -------------------------------------------------------
+const WIDGET_SOFT_LIMIT = 6;
+const PALETTE_SCALE = 0.19;
+let editorLayout = null;
+let editorTimer = 0;
+let editorDragging = false;
+let pickerReturn = 'view-settings';
+
+function editorVisible() {
+  const el = document.getElementById('view-editor');
+  return !!el && !el.hidden;
+}
+
+function openEditor(widgetId) {
+  if (widgetId) settingsWidgetId = widgetId;
+  const w = settingsWidget();
+  if (w) settingsWidgetId = w.id;
+  resolveWindowTiles();
+  showView('view-editor');
+  renderEditor();
+  refreshEditorLayout();
+  clearInterval(editorTimer);
+  editorTimer = setInterval(() => { if (!editorDragging) refreshEditorLayout(); }, 900);
+}
+
+function closeEditor() {
+  clearInterval(editorTimer);
+  showView('view-settings');
+  renderTileList();
+}
+
+// Settings is made when asked for, so these can arrive before its page has
+// booted; they are held until then.
+let settingsBooted = false;
+let pendingEditor = null;
+window.__enterEditor = function (widgetId) {
+  if (IS_SETTINGS_WINDOW && !settingsBooted) { pendingEditor = widgetId || ''; return; }
+  openEditor(widgetId || '');
+};
+
+function renderEditor() {
+  document.getElementById('editor-lock-check').checked = !!CONFIG.lock_position;
+  renderEditorChips();
+  renderPalette();
+  renderEditorPreview();
+  renderTileList();
+  renderMinimap();
+  syncWindowSize();
+}
+
+function renderEditorChips() {
+  const widgets = CONFIG.widgets || [];
+  const current = settingsWidget();
+  const chips = document.getElementById('widget-chips');
+  chips.innerHTML = '';
+  widgets.forEach((w, i) => {
+    const b = document.createElement('button');
+    b.className = 'widget-chip' + (current && w.id === current.id ? ' is-active' : '');
+    b.textContent = '#' + (i + 1) + ' · ' + w.size;
+    b.addEventListener('click', () => selectEditorWidget(w.id));
+    chips.appendChild(b);
+  });
+  const sizes = document.getElementById('widget-size-chips');
+  sizes.innerHTML = '';
+  for (const size of Object.keys(WIDGET_SIZES)) {
+    const b = document.createElement('button');
+    b.className = 'widget-chip' + (current && current.size === size ? ' is-active' : '');
+    b.textContent = size;
+    b.addEventListener('click', () => setWidgetSize(size));
+    sizes.appendChild(b);
+  }
+  document.getElementById('remove-widget-btn').disabled = widgets.length <= 1;
+  const hint = document.getElementById('widget-hint');
+  hint.hidden = widgets.length <= WIDGET_SOFT_LIMIT;
+  hint.textContent = '已超過 ' + WIDGET_SOFT_LIMIT
+    + ' 個 Widget，每多一個都會多用一份記憶體 (約 60 MB)。';
+}
+
+function selectEditorWidget(id) {
+  settingsWidgetId = id;
+  resolveWindowTiles();
+  renderEditor();
+}
+
+// The four sizes, drawn to scale. Pressing one makes a real widget that
+// follows the pointer onto the desktop (Python carries it until release).
+function renderPalette() {
+  const host = document.getElementById('palette');
+  if (host.dataset.ready) return;
+  host.dataset.ready = '1';
+  for (const size of Object.keys(WIDGET_SIZES)) {
+    const g = widgetGeometry(size, 0);
+    const item = document.createElement('div');
+    item.className = 'palette-item';
+    item.title = '拖曳到桌面';
+    const box = document.createElement('div');
+    box.className = 'palette-box';
+    box.style.width = Math.round(g.width * PALETTE_SCALE) + 'px';
+    box.style.height = Math.round(g.height * PALETTE_SCALE) + 'px';
+    box.style.gridTemplateColumns = 'repeat(' + g.cols + ', 1fr)';
+    box.style.gridTemplateRows = 'repeat(' + g.rows + ', 1fr)';
+    for (let i = 0; i < g.cols * g.rows; i++) {
+      const cell = document.createElement('div');
+      cell.className = 'palette-cell';
+      box.appendChild(cell);
+    }
+    const name = document.createElement('div');
+    name.className = 'palette-name';
+    name.textContent = size;
+    item.appendChild(box);
+    item.appendChild(name);
+    item.addEventListener('pointerdown', async (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      editorDragging = true;
+      try {
+        const r = await window.pywebview.api.begin_widget_drag(size);
+        if (r && r.id) settingsWidgetId = r.id;
+      } catch (err) { showToast('新增 Widget 失敗'); }
+      // Python lets go when the button comes up.
+      setTimeout(() => { editorDragging = false; refreshEditorLayout(); }, 400);
+    });
+    host.appendChild(item);
+  }
+}
+
+// The selected widget, laid out exactly as on the desktop. Tiles drag to
+// reorder, and a cross removes one.
+function renderEditorPreview() {
+  const host = document.getElementById('editor-preview');
+  host.innerHTML = '';
+  const widget = settingsWidget();
+  if (!widget) return;
+  const geometry = widgetGeometry(widget.size, widget.tiles.length);
+  const scope = document.createElement('div');
+  applyWidgetGeometry(scope, geometry);
+  const frame = document.createElement('div');
+  frame.className = 'widget-frame';
+  const card = document.createElement('div');
+  card.className = 'card-bg';
+  frame.appendChild(card);
+  const grid = document.createElement('div');
+  grid.className = 'tiles-grid';
+  let dragIndex = -1;
+  widget.tiles.forEach((tile, index) => {
+    const el = tileEl(tile, geometry.form, true);
+    el.draggable = true;
+    const remove = document.createElement('button');
+    remove.className = 'preview-remove';
+    remove.textContent = '✕';
+    remove.title = '移除';
+    remove.addEventListener('click', (e) => { e.stopPropagation(); removeTileAt(index); });
+    el.appendChild(remove);
+    el.addEventListener('dragstart', (e) => {
+      dragIndex = index;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(index));
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      for (const t of grid.children) t.classList.remove('drop-before', 'drop-after');
+    });
+    el.addEventListener('dragover', (e) => {
+      if (dragIndex < 0) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const before = e.clientX < r.left + r.width / 2;
+      el.classList.toggle('drop-before', before);
+      el.classList.toggle('drop-after', !before);
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const before = e.clientX < r.left + r.width / 2;
+      let to = index + (before ? 0 : 1);
+      const from = dragIndex;
+      dragIndex = -1;
+      if (from < 0) return;
+      if (from < to) to -= 1;
+      if (to === from) { renderEditorPreview(); return; }
+      const [moved] = widget.tiles.splice(from, 1);
+      widget.tiles.splice(to, 0, moved);
+      persistTiles();
+      renderEditor();
+    });
+    grid.appendChild(el);
+  });
+  frame.appendChild(grid);
+  if (!widget.tiles.length) {
+    const empty = document.createElement('div');
+    empty.className = 'preview-empty';
+    empty.textContent = '尚無配件，按下方「新增配件」';
+    frame.appendChild(empty);
+  }
+  scope.appendChild(frame);
+  host.appendChild(scope);
+  // Fit the column; never larger than life.
+  const room = Math.max(120, host.clientWidth - 36);
+  scope.style.zoom = String(Math.min(1, room / geometry.width));
+}
+
+function removeTileAt(index) {
+  const widget = settingsWidget();
+  if (!widget) return;
+  widget.tiles.splice(index, 1);
+  persistTiles();
+  renderEditor();
+}
+
+// ---- the desktop map ----
+async function refreshEditorLayout() {
+  if (!editorVisible()) { clearInterval(editorTimer); return; }
+  try { editorLayout = await window.pywebview.api.get_layout(); } catch (e) { return; }
+  renderMinimap();
+}
+
+function renderMinimap() {
+  const host = document.getElementById('minimap');
+  const layout = editorLayout;
+  if (!host || !layout || !layout.monitors.length) return;
+  const mons = layout.monitors;
+  const minX = Math.min(...mons.map((m) => m.x)), minY = Math.min(...mons.map((m) => m.y));
+  const maxX = Math.max(...mons.map((m) => m.x + m.w)), maxY = Math.max(...mons.map((m) => m.y + m.h));
+  const pad = 8;
+  const width = host.clientWidth || 300;
+  const scale = Math.min((width - 2 * pad) / (maxX - minX), 210 / (maxY - minY));
+  host.style.height = Math.round((maxY - minY) * scale + 2 * pad) + 'px';
+  host.innerHTML = '';
+  const at = (x, y) => [Math.round((x - minX) * scale + pad), Math.round((y - minY) * scale + pad)];
+  for (const m of mons) {
+    const el = document.createElement('div');
+    el.className = 'mm-monitor';
+    const [x, y] = at(m.x, m.y);
+    el.style.cssText = `left:${x}px;top:${y}px;width:${Math.round(m.w * scale)}px;height:${Math.round(m.h * scale)}px`;
+    host.appendChild(el);
+  }
+  const current = settingsWidget();
+  (layout.widgets || []).forEach((w, i) => {
+    const el = document.createElement('div');
+    el.className = 'mm-widget' + (current && w.id === current.id ? ' selected' : '')
+      + (w.visible ? '' : ' hidden-widget');
+    const [x, y] = at(w.x, w.y);
+    el.style.cssText = `left:${x}px;top:${y}px;width:${Math.max(14, Math.round(w.w * scale))}px;height:${Math.max(14, Math.round(w.h * scale))}px`;
+    el.textContent = '#' + ((CONFIG.widgets || []).findIndex((c) => c.id === w.id) + 1);
+    el.title = w.size;
+    attachMapDrag(el, w, scale);
+    host.appendChild(el);
+  });
+}
+
+// Dragging a box moves the real widget (snapped by Python).
+function attachMapDrag(el, widget, scale) {
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    editorDragging = true;
+    if (settingsWidgetId !== widget.id) { settingsWidgetId = widget.id; resolveWindowTiles(); renderEditorChips(); renderEditorPreview(); renderTileList(); }
+    const startX = e.clientX, startY = e.clientY;
+    const originLeft = parseFloat(el.style.left), originTop = parseFloat(el.style.top);
+    // Where the widget was when the drag began: the reply moves `widget`,
+    // so the target must not be measured from it.
+    const baseX = widget.x, baseY = widget.y;
+    let pending = false, moved = false;
+    const move = (ev) => {
+      moved = true;
+      el.style.left = (originLeft + ev.clientX - startX) + 'px';
+      el.style.top = (originTop + ev.clientY - startY) + 'px';
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(async () => {
+        pending = false;
+        try {
+          const r = await window.pywebview.api.move_widget(
+            widget.id,
+            Math.round(baseX + (ev.clientX - startX) / scale),
+            Math.round(baseY + (ev.clientY - startY) / scale));
+          // The snapped spot: the box follows the real widget.
+          if (r) {
+            el.style.left = Math.round(originLeft + (r.x - baseX) * scale) + 'px';
+            el.style.top = Math.round(originTop + (r.y - baseY) * scale) + 'px';
+          }
+        } catch (err) { /* ignore */ }
+      });
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      editorDragging = false;
+      refreshEditorLayout();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+  });
+}
+
+async function setWidgetSize(size) {
+  const w = settingsWidget();
+  if (!w || w.size === size) return;
+  try { await window.pywebview.api.set_widget_size(w.id, size); } catch (e) { /* ignore */ }
+  const mine = (CONFIG.widgets || []).find((x) => x.id === w.id);
+  if (mine) mine.size = size;
+  renderEditor();
+  setTimeout(refreshEditorLayout, 350);
+}
+
+async function removeWidget() {
+  const w = settingsWidget();
+  if (!w || (CONFIG.widgets || []).length <= 1) return;
+  settingsWidgetId = '';
+  try { await window.pywebview.api.remove_widget(w.id); } catch (e) { /* ignore */ }
+  resolveWindowTiles();
+  renderEditor();
+  setTimeout(refreshEditorLayout, 200);
+}
+
 async function persistTiles() {
-  try { await window.pywebview.api.save_tiles(CONFIG.tiles); } catch (e) { /* ignore */ }
+  try {
+    await window.pywebview.api.save_widgets(CONFIG.widgets);
+    if (CONFIG.panel && Array.isArray(CONFIG.panel.tiles)) {
+      await window.pywebview.api.save_panel(CONFIG.panel);
+    }
+  } catch (e) { /* ignore */ }
   renderGrid();
 }
 
@@ -2190,6 +2696,7 @@ function attachTileListDnD(wrap) {
 async function openPicker() {
   document.getElementById('picker-search').value = '';
   document.getElementById('picker-list').innerHTML = '<div class="hint">載入中...</div>';
+  pickerReturn = editorVisible() ? 'view-editor' : 'view-settings';
   showView('view-picker');
   try { allEntities = await window.pywebview.api.get_entities(); } catch (e) { allEntities = []; }
   renderPickerList('');
@@ -2238,11 +2745,14 @@ async function addTileFromEntity(e) {
     entity: e.entity_id, domain: e.domain,
     room: e.name || e.entity_id, label: '', icon: '', on_mode: 'cool', temp_step: 1,
   };
-  CONFIG.tiles = (CONFIG.tiles || []).concat([tile]);
+  const widget = settingsWidget();
+  if (widget) widget.tiles.push(tile);
+  resolveWindowTiles();
   if (e.state && !STATES[e.entity_id]) STATES[e.entity_id] = e.state;
   await persistTiles();
-  showView('view-settings');
+  showView(pickerReturn);
   renderTileList();
+  if (pickerReturn === 'view-editor') renderEditor();
 }
 
 /* ============================================================
@@ -2264,6 +2774,15 @@ function init() {
   if (IS_SETTINGS_WINDOW) SettingsSelect.install();
   document.getElementById('empty-add-btn').addEventListener('click', openSettings);
   document.getElementById('add-tile-btn').addEventListener('click', openPicker);
+  document.getElementById('remove-widget-btn').addEventListener('click', removeWidget);
+  document.getElementById('open-editor-btn').addEventListener('click', () => openEditor(''));
+  // Right-clicking a widget's own surface (not a tile, which opens its detail)
+  // edits that widget.
+  document.addEventListener('contextmenu', (e) => {
+    if (WINDOW_ROLE !== 'grid' || e.target.closest('.tile')) return;
+    e.preventDefault();
+    window.pywebview.api.open_widget_editor(WIDGET_ID).catch(() => {});
+  });
   document.getElementById('detail-backdrop').addEventListener('click', closeDetail);
   document.getElementById('detail-edit-btn').addEventListener('click', () => showEditMode(true));
   document.getElementById('edit-done-btn').addEventListener('click', () => showEditMode(false));
@@ -2310,13 +2829,14 @@ function init() {
     invalidateBackdrop();
     refreshBackdropSoon(0);
   });
-  document.getElementById('columns-select').addEventListener('change', async (e) => {
-    await savePref({ columns: Number(e.target.value) });
-    renderGrid();
-  });
-  document.getElementById('lock-position-check').addEventListener('change', async (e) => {
-    await savePref({ lock_position: !!e.target.checked });
-  });
+  // The same preference is offered in Settings and in the editor.
+  for (const id of ['lock-position-check', 'editor-lock-check']) {
+    document.getElementById(id).addEventListener('change', async (e) => {
+      await savePref({ lock_position: !!e.target.checked });
+      document.getElementById('lock-position-check').checked = !!CONFIG.lock_position;
+      document.getElementById('editor-lock-check').checked = !!CONFIG.lock_position;
+    });
+  }
   document.getElementById('glass-mode-select').addEventListener('change', async (e) => {
     await savePref({ glass_mode: e.target.value });
     applySystemGlass();
@@ -2354,23 +2874,6 @@ function init() {
     applyZoom();
     syncWindowSize();
   });
-  document.getElementById('fixed-size-check').addEventListener('change', async (e) => {
-    await savePref({ fixed_size: !!e.target.checked });
-    document.getElementById('fixed-size-fields').hidden = !CONFIG.fixed_size;
-    applyFixedSizeConstraint();
-    syncWindowSize();
-  });
-  for (const [id, key, min, fallback] of [
-    ['fixed-width-input', 'fixed_width', 120, 400],
-    ['fixed-height-input', 'fixed_height', 90, 300],
-  ]) {
-    document.getElementById(id).addEventListener('change', async (e) => {
-      await savePref({ [key]: Math.max(min, Number(e.target.value) || fallback) });
-      e.target.value = String(CONFIG[key]);
-      applyFixedSizeConstraint();
-      syncWindowSize();
-    });
-  }
   document.getElementById('start-on-boot-check').addEventListener('change', async (e) => {
     const wanted = !!e.target.checked;
     e.target.disabled = true;
@@ -2410,12 +2913,14 @@ function init() {
     const action = el.dataset.action;
     if (action === 'close-detail') closeDetail();
     else if (action === 'close-settings') closeSettingsAndSave();
-    else if (action === 'close-picker') { showView('view-settings'); renderTileList(); }
+    else if (action === 'close-picker') { showView(pickerReturn); renderTileList(); }
+    else if (action === 'close-editor') closeEditor();
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!document.getElementById('view-picker').hidden) { showView('view-settings'); renderTileList(); }
+    if (!document.getElementById('view-picker').hidden) { showView(pickerReturn); renderTileList(); }
+    else if (editorVisible()) closeEditor();
     else if (IS_SETTINGS_WINDOW) closeSettingsAndSave();
     else if (currentDetailTileId) closeDetail();
   });
@@ -2428,16 +2933,23 @@ function init() {
 // before re-rendering anything under someone mid-edit.
 window.__applyPrefs = function (cfg) {
   if (!cfg) return;
-  const tilesChanged = JSON.stringify(cfg.tiles || []) !== JSON.stringify(CONFIG.tiles || []);
+  const mine = (c) => (c.widgets || []).find((w) => w.id === WIDGET_ID);
+  const tilesChanged = JSON.stringify(tilesFor(cfg)) !== JSON.stringify(CONFIG.tiles || []);
+  // A widget's own size is part of its layout.
+  const sizeChanged = WINDOW_ROLE === 'grid' &&
+    (mine(cfg) || {}).size !== (mine(CONFIG) || {}).size;
+  const widgetsChanged = IS_SETTINGS_WINDOW &&
+    JSON.stringify((cfg.widgets || []).map((w) => [w.id, w.size, w.tiles.length])) !==
+    JSON.stringify((CONFIG.widgets || []).map((w) => [w.id, w.size, w.tiles.length]));
+  const editing = IS_SETTINGS_WINDOW && editorVisible();
   const languageChanged = cfg.language !== CONFIG.language;
   const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
   const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
-  const layoutChanged = cfg.zoom !== CONFIG.zoom || cfg.columns !== CONFIG.columns ||
-    cfg.fixed_size !== CONFIG.fixed_size || cfg.fixed_width !== CONFIG.fixed_width ||
-    cfg.fixed_height !== CONFIG.fixed_height;
+  const layoutChanged = cfg.zoom !== CONFIG.zoom || sizeChanged;
   CONFIG = Object.assign({}, CONFIG, cfg);
+  resolveWindowTiles();
   if (languageChanged) setInterfaceLanguage(CONFIG.language);
   if (glassChanged) {
     applySystemGlass();
@@ -2445,10 +2957,11 @@ window.__applyPrefs = function (cfg) {
     refreshBackdropSoon(0);
   }
   if (panelThemeChanged || themeChanged) applyTheme();
+  if (editing && (widgetsChanged || tilesChanged)) renderEditor();
   if (!tilesChanged && !themeChanged && !layoutChanged) return;
   if (themeChanged) invalidateBackdrop();
-  if (layoutChanged) { applyZoom(); applyFixedSizeConstraint(); }
-  // The column count lives in renderGrid's --cols.
+  if (layoutChanged) applyZoom();
+  // The widget's cell counts live in renderGrid's --cols/--rows.
   if ((tilesChanged || layoutChanged) && !IS_POPOVER_WINDOW) renderGrid();
   if (tilesChanged && !document.getElementById('view-settings').hidden) renderTileList();
   if (currentDetailTileId) renderDetailBody();

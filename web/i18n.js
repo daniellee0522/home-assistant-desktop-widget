@@ -19,6 +19,8 @@ const EN_TEXT = {
   '相容模式 (較耗資源，會出現在截圖)':'Compatibility (widget visible in recordings)',
   '毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。':'Glass blurs a capture of the desktop behind the window. Screen capture excludes the widget for speed, so it will not appear in recordings. Compatibility mode keeps it visible but captures more slowly.',
   '縮放比例':'Scale',
+  '桌面 Widget':'Desktop widgets', '+ 新增 Widget':'+ Add widget', '刪除此 Widget':'Delete this widget',
+  '新增 Widget 失敗':'Could not add the widget',
   '行為':'Behavior', '鎖定位置 (無法拖曳移動)':'Lock position (disable dragging)',
   '離開桌面時淡化 (全螢幕時立刻淡化，回到桌面或點一下恢復)':'Dim away from desktop (immediately in full screen; return or click to restore)',
   '離開桌面多久後淡化':'Dim after leaving desktop', '開機時自動啟動':'Start with Windows',
@@ -54,6 +56,7 @@ function translateInterfaceText(source) {
   if (!translated) {
     const patterns = [
       [/^配件 \((\d+)\)$/, m => `Devices (${m[1]})`],
+      [/^已超過 (\d+) 個 Widget，每多一個都會多用一份記憶體 \(約 60 MB\)。$/, m => `More than ${m[1]} widgets: each extra one uses about 60 MB more memory.`],
       [/^過去 (\d+) 小時$/, m => `Past ${m[1]} hours`],
       [/^目前 (.+)$/, m => `Current ${m[1]}`],
       [/^(\d+(?:\.\d+)?) 秒$/, m => `${m[1]} sec`],
