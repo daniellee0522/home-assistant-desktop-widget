@@ -1,7 +1,9 @@
-# Tools for the native widget
+# Tools for the native windows
 
-The desktop widgets are drawn natively (`nativeui/`), not as browser pages. This folder only
-holds the tools used to check that they look like the web page did.
+Every window is drawn natively (`nativeui/`): the widgets (`widget.py`), the detail card (`detail.py`), the
+tray panel (`panel.py`, `homeview.py`, `homeedit.py`, rules in `homemodel.py`) and Settings (`settings.py`,
+`editor.py`), on a small retained-mode toolkit (`ui.py`). This folder only holds the tools used to check that
+the widgets look like the web page did (`web/`, the earlier interface, which is no longer shipped).
 
 - `parity.py [outdir] [filter]` renders the same demo widget with the web page
   (`web/index.html`) and with `nativeui/render.py` over the same picture, for every glass

@@ -15,6 +15,7 @@ node tests/layout.cjs
   DWM rollback logic, capture worker timeout/restart, and per-page push
   delivery during loading. Resume checks cover short sleeps, preserving
   manually hidden widgets, and tray recovery independent of desktop visibility.
+- **`test_native_panel.py`**, **`test_native_settings.py`** and **`test_home_model.py`** run the natively drawn tray panel (tile and Home views, editing by dragging, the capsules), the detail card, Settings with its widget editor and picker, and the Home panel's layout rules, against a stand-in Api.
 - **`test_native_widget.py`** runs the natively drawn desktop widget (`nativeui/`) against a stand-in Api: taps, holds, right-click, the climate buttons, dragging, dimming, the wheel, pushed preferences and states, the empty widget, and that every glass style, theme and tile form draws.
 - **`backdrop.cjs`** needs only Node.js. It runs the page's backdrop loop
   with a mocked bridge: decode recovery, stale-frame rejection, native glass

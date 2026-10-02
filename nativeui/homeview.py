@@ -271,6 +271,8 @@ class HomeView(EditMixin, View):
         self.build_rooms_row(names, hidden)
         self.build_body()
         self.cat_view = ScrollView(0, 0, W - 4, STAGE_H)
+        self.cat_view.on_press = lambda e: True
+        self.cat_view.on_click = lambda e: self.cat_background_click()
         self.stage.add(self.cat_view)
         self.build_category()
         self.apply_category_state(animate=False)
@@ -480,7 +482,7 @@ class HomeView(EditMixin, View):
         chosen = self.m.category_chosen(e)
         tv.interactive = True
         tv.on_press = lambda ev: True
-        tv.on_click = None
+        tv.on_click = lambda ev: True
         tv.alpha = 1.0 if chosen else 0.4
         btn = Button("−" if chosen else "＋", size=17, weight=QFont.Bold, w=34, h=34, fill="accent_red" if chosen else "accent_green",
                      hover_fill="accent_red" if chosen else "accent_green", color="white",
@@ -562,6 +564,16 @@ class HomeView(EditMixin, View):
         self.cat_scroll_keep = 0.0
         self.build()
         self.apply_category_state(animate=True)
+
+    def cat_background_click(self):
+        """The empty space around a capsule's devices: leaves editing, or the capsule."""
+        if self.m.cat_editing:
+            self.m.cat_editing = False
+            self.build()
+            self.apply_category_state(animate=False)
+        elif self.m.category:
+            self.toggle_category(self.m.category)
+        return True
 
     def toggle_cat_member(self, e, chosen):
         rec = self.m.ensure_record(e["entity_id"])

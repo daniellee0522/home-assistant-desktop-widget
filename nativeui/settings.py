@@ -132,8 +132,12 @@ class SettingsScene(EditorMixin, OverlayScene):
 
     def close_settings(self):
         """Saves the connection fields and has main.py close (and release) the window."""
-        url = (self.fields_text.get("url") or self.url_field.value()).strip() if hasattr(self, "url_field") else None
-        token = (self.token_field.value()).strip() if hasattr(self, "token_field") else None
+        if self.page == "settings" and hasattr(self, "url_field"):
+            self.fields_text["url"], self.fields_text["token"] = self.url_field.value(), self.token_field.value()
+        url = self.fields_text.get("url")
+        token = self.fields_text.get("token")
+        url = url.strip() if url is not None else None
+        token = token.strip() if token is not None else None
         api = self.facade.api
 
         def go():
