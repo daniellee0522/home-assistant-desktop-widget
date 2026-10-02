@@ -1805,16 +1805,15 @@ let flyoutAnimating = false;
 window.__flyoutEnter = function () {
   if (homeMode()) loadHome();
   flyoutOpen = true;
-  flyoutAnimating = true;
-  const view = document.getElementById('view-grid');
-  const settled = () => {
-    if (!flyoutAnimating) return;
-    flyoutAnimating = false;
-    restartBackdropTicker();
-  };
-  if (view) view.addEventListener('animationend', settled, { once: true });
-  setTimeout(settled, 500);       // in case the animation never reports
-  restartBackdropTicker();
+  // The glass keeps following the screen while the panel comes in: it used to
+  // wait for the entrance to end, and an animated wallpaper behind it then
+  // stood still for a moment and jumped.
+  flyoutAnimating = false;
+  // Straight into the stream: going through a sample first (restartBackdropTicker)
+  // costs a round trip before the first picture, during which the glass is
+  // the one taken when the panel was armed, already out of date.
+  stopBackdropTicker();
+  if (canStream()) enterStream(); else startBackdropTicker();
   for (const el of flyoutLayers()) {
     el.classList.remove('flyout-enter', 'flyout-leave', 'flyout-hold');
     void el.offsetWidth;
