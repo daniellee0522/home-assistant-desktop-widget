@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QWidget
 import qtshell
 
 from . import render
+from .actions import TileActions
 from .glass import GlassMixin
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -533,6 +534,7 @@ class NativeWidget:
         self.events = qtshell._Events()
         self._hidden = False
         self._native = _Surface(self, api, widget_id)
+        self.actions = TileActions(api, lambda: self._native.states, self._native.optimistic)
         self._native.configure(api._prefs())
         render.set_language(self._native.language)
 
@@ -639,61 +641,12 @@ class NativeWidget:
             tile["id"], sx, sy, round(w * surf.scale), round(h * surf.scale), self.api._widget_kind(self.widget_id)),
             daemon=True).start()
 
-    def _call(self, domain, service, entity, extra=None):
-        def go():
-            try:
-                self.api.call_service(domain, service, entity, extra or {})
-            except Exception:
-                traceback.print_exc()
-        threading.Thread(target=go, daemon=True).start()
-
     def quick_action(self, tile, index):
-        """What a tap does (quickAction in app.js), with the guess shown at once."""
-        surf = self._native
-        domain, entity = tile["domain"], tile["entity"]
-        st = surf.states.get(entity)
-        if domain in ("light", "switch", "fan", "input_boolean"):
-            if st:
-                surf.optimistic(entity, {"state": "off" if st.get("state") == "on" else "on"})
-            self._call(domain, "toggle", entity)
-        elif domain == "climate":
-            on = bool(st) and st.get("state") != "off"
-            mode = "off" if on else (tile.get("on_mode") or "cool")
-            if st:
-                surf.optimistic(entity, {"state": mode})
-            self._call("climate", "set_hvac_mode", entity, {"hvac_mode": mode})
-        elif domain == "cover":
-            is_open = bool(st) and st.get("state") == "open"
-            if st:
-                surf.optimistic(entity, {"state": "closing" if is_open else "opening"})
-            self._call("cover", "close_cover" if is_open else "open_cover", entity)
-        elif domain == "media_player":
-            self._call("media_player", "media_play_pause", entity)
-        elif domain == "lock":
-            locked = bool(st) and st.get("state") == "locked"
-            if st:
-                surf.optimistic(entity, {"state": "unlocked" if locked else "locked"})
-            self._call("lock", "unlock" if locked else "lock", entity)
-        elif domain == "vacuum":
-            cleaning = bool(st) and st.get("state") in ("cleaning", "returning")
-            self._call("vacuum", "pause" if cleaning else "start", entity)
-        elif domain in ("scene", "script"):
-            self._call(domain, "turn_on", entity)
-            surf.flash_tile(index)
-        elif domain == "automation":
-            self._call("automation", "trigger", entity)
-            surf.flash_tile(index)
+        """What a tap does (nativeui.actions), with the guess shown at once."""
+        self.actions.quick_action(tile, flash=lambda: self._native.flash_tile(index))
 
     def climate_step(self, tile, sign):
-        surf = self._native
-        st = surf.states.get(tile["entity"]) or {}
-        attrs = st.get("attributes") or {}
-        if attrs.get("temperature") is None:
-            return
-        step = float(tile.get("temp_step") or 1) * sign
-        nxt = round((attrs["temperature"] + step) * 10) / 10
-        surf.optimistic(tile["entity"], {"attributes": dict(attrs, temperature=nxt)})
-        self._call("climate", "set_temperature", tile["entity"], {"temperature": nxt})
+        self.actions.climate_step(tile, sign)
 
     # -- the first moments ------------------------------------------------------------
     def boot(self):
