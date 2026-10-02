@@ -132,6 +132,41 @@ class HAClient:
             data["entity_id"] = entity_id
         return self._request("/api/services/%s/%s" % (domain, service), "POST", data, timeout=timeout)
 
+    def ws_commands(self, types, timeout=15):
+        """Run several websocket commands on one short-lived connection and
+        return their results in order. The areas and registries of Home
+        Assistant are not in the REST API."""
+        if not self.url or not self.token:
+            raise RuntimeError("not configured")
+        ws = websocket.create_connection(self._ws_url(), timeout=timeout)
+        try:
+            if json.loads(ws.recv()).get("type") != "auth_required":
+                raise RuntimeError("unexpected handshake")
+            ws.send(json.dumps({"type": "auth", "access_token": self.token}))
+            if json.loads(ws.recv()).get("type") != "auth_ok":
+                raise RuntimeError("invalid token")
+            results = []
+            for number, kind in enumerate(types, start=1):
+                ws.send(json.dumps({"id": number, "type": kind}))
+                while True:
+                    msg = json.loads(ws.recv())
+                    if msg.get("id") == number and msg.get("type") == "result":
+                        results.append(msg.get("result") if msg.get("success") else [])
+                        break
+            return results
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def get_registry(self):
+        """(areas, devices, entities) from Home Assistant's registries."""
+        areas, devices, entities = self.ws_commands([
+            "config/area_registry/list", "config/device_registry/list",
+            "config/entity_registry/list"])
+        return areas or [], devices or [], entities or []
+
     # ---- websocket (realtime push) ----
 
     def _ws_url(self):

@@ -76,8 +76,11 @@ DEFAULT_CONFIG = {
     "tiles": [],              # legacy mirror of the first widget's tiles
     # The desktop widgets: [{id, size, x, y, tiles}]. See WIDGET_SIZES.
     "widgets": [],
-    # The tray panel. tiles=None shows every widget's tiles.
-    "panel": {"mode": "grid", "tiles": None},
+    # The tray panel. tiles=None shows every widget's tiles. In "home" mode
+    # every device is shown by room; home_tiles are the customised ones
+    # (name, icon) and room_overrides maps an entity to a room name that
+    # replaces its Home Assistant area.
+    "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {}},
 }
 
 # Widget sizes, named rows x columns: "2x4" is two rows of four tiles. Every
@@ -211,13 +214,23 @@ def _migrate(cfg, loaded):
             for i, w in enumerate(loaded["widgets"]) if isinstance(w, dict)]
     panel = loaded.get("panel")
     if isinstance(panel, dict):
-        tiles = panel.get("tiles")
-        cfg["panel"] = {
-            "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
-            "tiles": ([_migrate_tile(t) for t in tiles]
-                      if isinstance(tiles, list) else None),
-        }
+        cfg["panel"] = clean_panel(panel, lambda tiles: [_migrate_tile(t) for t in tiles])
     return cfg
+
+
+def clean_panel(panel, clean_tiles):
+    """The tray panel's settings, whatever shape they arrive in."""
+    tiles = panel.get("tiles")
+    home_tiles = panel.get("home_tiles")
+    overrides = panel.get("room_overrides")
+    return {
+        "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
+        "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
+        "home_tiles": clean_tiles(home_tiles) if isinstance(home_tiles, list) else [],
+        "room_overrides": ({str(k): str(v).strip()[:40] for k, v in overrides.items()
+                            if isinstance(k, str) and str(v).strip()}
+                           if isinstance(overrides, dict) else {}),
+    }
 
 
 def save_config(cfg):

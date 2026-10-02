@@ -14,7 +14,8 @@ def api_type():
     tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
     names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
-             '_eval_all', '_all_windows', '_all_tiles', '_watched_entities'}
+             '_eval_all', '_all_windows', '_all_tiles', '_watched_entities',
+             '_home_mode', '_on_ha_event'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
     scope = {'json': json, 'threading': threading}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
@@ -36,6 +37,23 @@ class Regressions(unittest.TestCase):
         self.api._push_batch([['switch.test', {'state': 'on'}]])
         for attr in ('_popover_window', '_flyout_window', '_settings_window'):
             getattr(self.api, attr).evaluate_js.assert_called_once()
+
+    def test_home_only_events_reach_only_the_panel_and_its_card(self):
+        self.api._cfg = {'widgets': [{'id': 'w', 'tiles': [{'entity': 'light.on_a_tile'}]}]}
+        self.api._home_states = {'sensor.only_in_home': {}}
+        self.api._pending = []
+        self.api._pending_lock = threading.Lock()
+        self.api._on_ha_event('sensor.only_in_home', {'state': '1'})
+        self.api._flyout_window.evaluate_js.assert_called_once()
+        self.api._popover_window.evaluate_js.assert_called_once()
+        self.api._window.evaluate_js.assert_not_called()
+        self.api._settings_window.evaluate_js.assert_not_called()
+        self.assertEqual(self.api._home_states['sensor.only_in_home'], {'state': '1'})
+        # A device on a tile still reaches every window.
+        self.api._flyout_window.evaluate_js.reset_mock()
+        self.api._window.evaluate_js.reset_mock()
+        self.api._on_ha_event('light.on_a_tile', {'state': 'on'})
+        self.api._flyout_window.evaluate_js.assert_called_once()
 
     def test_status_reaches_panel_and_settings(self):
         self.api._on_ha_status(False)

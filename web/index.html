@@ -17,6 +17,12 @@
   <section id="view-grid" class="view">
     <div class="card-bg drag-region"></div>
     <div id="tiles" class="tiles-grid"></div>
+    <!-- The tray panel's Home view: every device by room (renderHome). -->
+    <div id="home-view" class="home-view" hidden>
+      <div id="home-summary" class="home-summary"></div>
+      <div id="home-rooms" class="home-rooms"></div>
+      <div id="home-body" class="home-body"></div>
+    </div>
     <div id="empty-hint" class="empty-hint" hidden>
       <div class="empty-icon">⌂</div>
       <div class="empty-title">尚未設定任何配件</div>
@@ -53,6 +59,11 @@
       <label class="field">
         <span>名稱</span>
         <input id="edit-room-input" type="text" maxlength="40">
+      </label>
+      <label id="edit-area-field" class="field" hidden>
+        <span>房間</span>
+        <input id="edit-area-input" type="text" maxlength="40" list="area-options" placeholder="沿用 Home Assistant 的區域">
+        <datalist id="area-options"></datalist>
       </label>
       <label class="field">
         <span>類別名稱</span>
@@ -116,6 +127,13 @@
               <option value="classic">經典毛玻璃</option>
               <option value="liquid">液態玻璃</option>
               <option value="windows">Windows 玻璃</option>
+            </select>
+          </label>
+          <label class="chip-select">
+            <span>面板樣式</span>
+            <select id="panel-mode-select">
+              <option value="grid">配件方塊</option>
+              <option value="home">Home 風格 (依房間)</option>
             </select>
           </label>
           <label class="chip-select">

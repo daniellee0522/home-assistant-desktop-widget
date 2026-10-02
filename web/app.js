@@ -140,6 +140,7 @@ function allTiles(cfg) {
   const tiles = [];
   for (const w of (c.widgets || [])) tiles.push(...(w.tiles || []));
   if (c.panel && Array.isArray(c.panel.tiles)) tiles.push(...c.panel.tiles);
+  if (c.panel && Array.isArray(c.panel.home_tiles)) tiles.push(...c.panel.home_tiles);
   return tiles;
 }
 
@@ -207,7 +208,9 @@ function myWidget() {
   return widgets.find((w) => w.id === WIDGET_ID) || widgets[0] || null;
 }
 
-function findTile(id) { return allTiles().find((t) => t.id === id); }
+function findTile(id) {
+  return allTiles().find((t) => t.id === id) || (isHomeId(id) ? homeTileFromId(id) : undefined);
+}
 function friendlyName(state) { return state && state.attributes && state.attributes.friendly_name; }
 
 /* ============================================================
@@ -256,6 +259,7 @@ async function boot() {
   renderGrid();
   if (IS_FLYOUT_WINDOW) {
     document.documentElement.classList.add('is-flyout-window');
+    if (homeMode()) loadHome();
   }
   if (IS_POPOVER_WINDOW) {
     document.getElementById('view-grid').hidden = true;
@@ -1637,6 +1641,7 @@ let flyoutOpen = false;
 let flyoutAnimating = false;
 
 window.__flyoutEnter = function () {
+  if (homeMode()) loadHome();
   flyoutOpen = true;
   flyoutAnimating = true;
   const view = document.getElementById('view-grid');
@@ -1684,6 +1689,9 @@ window.__showPopoverForTile = function (tileId) {
 };
 
 function renderGrid() {
+  if (IS_FLYOUT_WINDOW && homeMode()) { renderHome(); return; }
+  const homeView = document.getElementById('home-view');
+  if (homeView) homeView.hidden = true;
   const grid = document.getElementById('tiles');
   const emptyHint = document.getElementById('empty-hint');
   grid.innerHTML = '';
@@ -1720,7 +1728,157 @@ function updateTileByEntity(entityId) {
     if (old) old.replaceWith(tileEl(tile));
   }
   if (currentDetailTileId && ids.includes(currentDetailTileId)) renderDetailBody();
+  if (IS_FLYOUT_WINDOW && homeMode()) scheduleHomeSummary();
 }
+
+/* ============================================================
+ * The Home-style panel
+ * ============================================================ */
+// Every device, by room (a Home Assistant area, or where the user moved it),
+// in the tray panel. Tiles are the ordinary ones, so click, hold and
+// right-click behave as everywhere else.
+const HOME_PREFIX = 'home:';
+const OTHER_ROOM = '\u0000other';       // the chip for devices without a room
+let homeData = { entities: [], rooms: [] };
+let homeRoom = '';                      // '' = every room
+let homeSummaryRaf = 0;
+
+function homeMode() { return !!(CONFIG.panel && CONFIG.panel.mode === 'home'); }
+function isHomeId(id) { return typeof id === 'string' && id.startsWith(HOME_PREFIX); }
+
+function homeTileFromId(id) {
+  const entity = id.slice(HOME_PREFIX.length);
+  const found = homeData.entities.find((e) => e.entity_id === entity);
+  const state = STATES[entity];
+  return {
+    id, entity, domain: found ? found.domain : entity.split('.')[0],
+    room: (found && found.name) || friendlyName(state) || entity,
+    label: '', icon: '', on_mode: 'cool', temp_step: 1,
+  };
+}
+
+function homeTileFor(entity) {
+  const id = HOME_PREFIX + entity.entity_id;
+  return ((CONFIG.panel && CONFIG.panel.home_tiles) || []).find((t) => t.id === id)
+    || homeTileFromId(id);
+}
+
+async function loadHome() {
+  if (!(window.pywebview && window.pywebview.api)) return;
+  let data = null;
+  try { data = await window.pywebview.api.get_home(); } catch (e) { /* offline */ }
+  if (!data || data.error) { if (!homeData.entities.length) renderHome(); return; }
+  for (const e of data.entities) STATES[e.entity_id] = e.state;
+  homeData = { entities: data.entities, rooms: data.rooms };
+  renderHome();
+}
+
+// Rooms with their devices, the unplaced ones last.
+function homeGroups() {
+  const groups = new Map();
+  for (const e of homeData.entities) {
+    if (homeRoom === OTHER_ROOM ? !!e.area : (homeRoom && e.area !== homeRoom)) continue;
+    if (!groups.has(e.area)) groups.set(e.area, []);
+    groups.get(e.area).push(e);
+  }
+  return [...groups.entries()].sort(([a], [b]) =>
+    a === b ? 0 : !a ? 1 : !b ? -1 : a.localeCompare(b));
+}
+
+function renderHome() {
+  const view = document.getElementById('home-view');
+  document.getElementById('tiles').hidden = true;
+  document.getElementById('empty-hint').hidden = true;
+  view.hidden = false;
+  if (homeRoom && homeRoom !== OTHER_ROOM && !homeData.rooms.includes(homeRoom)) homeRoom = '';
+  renderHomeSummary();
+
+  const chips = document.getElementById('home-rooms');
+  chips.innerHTML = '';
+  const names = ['', ...homeData.rooms];
+  if (homeData.rooms.length && homeData.entities.some((e) => !e.area)) names.push(OTHER_ROOM);
+  for (const name of names) {
+    const b = document.createElement('button');
+    b.className = 'home-chip' + (homeRoom === name ? ' is-active' : '');
+    b.textContent = name === '' ? '全部' : name === OTHER_ROOM ? '其他' : name;
+    b.addEventListener('click', () => { homeRoom = name; renderHome(); });
+    chips.appendChild(b);
+  }
+
+  const body = document.getElementById('home-body');
+  body.innerHTML = '';
+  entityToTileIds = {};
+  const groups = homeGroups();
+  if (!groups.length) {
+    const empty = document.createElement('div');
+    empty.className = 'home-empty';
+    empty.textContent = homeData.entities.length ? '這個房間沒有配件' : '正在載入配件…';
+    body.appendChild(empty);
+  }
+  for (const [room, entities] of groups) {
+    const section = document.createElement('section');
+    section.className = 'home-section';
+    const title = document.createElement('div');
+    title.className = 'home-section-title';
+    title.textContent = room || '其他';
+    section.appendChild(title);
+    const grid = document.createElement('div');
+    grid.className = 'home-grid';
+    for (const e of entities) {
+      const tile = homeTileFor(e);
+      (entityToTileIds[e.entity_id] || (entityToTileIds[e.entity_id] = [])).push(tile.id);
+      grid.appendChild(tileEl(tile));
+    }
+    section.appendChild(grid);
+    body.appendChild(section);
+  }
+  syncWindowSize();
+}
+
+// What needs attention, at a glance, as the Home app's header does.
+function homeSummaryItems() {
+  const count = (domain, test) => homeData.entities.filter(
+    (e) => e.domain === domain && STATES[e.entity_id] && test(STATES[e.entity_id])).length;
+  const lights = count('light', (s) => s.state === 'on');
+  const unlocked = count('lock', (s) => s.state !== 'locked' && s.state !== 'unavailable');
+  const locks = homeData.entities.filter((e) => e.domain === 'lock').length;
+  const covers = count('cover', (s) => s.state === 'open');
+  const items = [];
+  if (lights) items.push({ icon: 'light', text: lights + ' 盞燈亮著' });
+  if (unlocked) items.push({ icon: 'lock-open', text: unlocked + ' 個門鎖未上鎖', warn: true });
+  else if (locks) items.push({ icon: 'lock', text: '門鎖皆已上鎖' });
+  if (covers) items.push({ icon: 'mdi:blinds', text: covers + ' 個窗簾或百葉窗開啟' });
+  return items;
+}
+
+function renderHomeSummary() {
+  const host = document.getElementById('home-summary');
+  host.innerHTML = '';
+  const items = homeSummaryItems();
+  if (!items.length) {
+    const none = document.createElement('div');
+    none.className = 'home-summary-item';
+    none.textContent = homeData.entities.length ? '一切正常' : '';
+    host.appendChild(none);
+    return;
+  }
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.className = 'home-summary-item' + (item.warn ? ' is-warn' : '');
+    const icon = document.createElement('span');
+    icon.className = 'home-summary-icon';
+    icon.innerHTML = svgIcon(item.icon);
+    el.appendChild(icon);
+    el.appendChild(document.createTextNode(item.text));
+    host.appendChild(el);
+  }
+}
+
+function scheduleHomeSummary() {
+  if (homeSummaryRaf) return;
+  homeSummaryRaf = requestAnimationFrame(() => { homeSummaryRaf = 0; renderHomeSummary(); });
+}
+
 
 function optimisticSet(entity, patch) {
   if (!STATES[entity]) return;
@@ -1876,9 +2034,32 @@ function showEditMode(show) {
   if (show) populateEditForm();
 }
 
+// A Home panel device only has a record once it is customised.
+function ownHomeTile(id) {
+  const panel = CONFIG.panel || (CONFIG.panel = { mode: 'home', tiles: null });
+  if (!Array.isArray(panel.home_tiles)) panel.home_tiles = [];
+  if (!panel.home_tiles.some((t) => t.id === id)) panel.home_tiles.push(homeTileFromId(id));
+}
+
 function populateEditForm() {
+  if (isHomeId(currentDetailTileId)) ownHomeTile(currentDetailTileId);
   const tile = findTile(currentDetailTileId);
   if (!tile) return;
+  const homeTile = isHomeId(tile.id);
+  document.getElementById('edit-area-field').hidden = !homeTile;
+  if (homeTile) {
+    const overrides = (CONFIG.panel && CONFIG.panel.room_overrides) || {};
+    document.getElementById('edit-area-input').value = overrides[tile.entity] || '';
+    window.pywebview.api.get_room_names().then((names) => {
+      const list = document.getElementById('area-options');
+      list.innerHTML = '';
+      for (const name of names || []) {
+        const o = document.createElement('option');
+        o.value = name;
+        list.appendChild(o);
+      }
+    }).catch(() => {});
+  }
   document.getElementById('edit-room-input').value = tile.room || '';
   document.getElementById('edit-label-input').value = tile.label || '';
   document.getElementById('edit-mdi-input').value = tile.icon && tile.icon.startsWith('mdi:') ? tile.icon : '';
@@ -2237,6 +2418,7 @@ function openSettingsView() {
   glassSelect.querySelector('option[value="system"]').hidden = CONFIG.system_glass_ok !== true;
   if (CONFIG.system_glass_ok !== true && glassSelect.value === 'system') glassSelect.value = 'fast';
   document.getElementById('panel-theme-select').value = CONFIG.panel_theme || 'follow';
+  document.getElementById('panel-mode-select').value = (CONFIG.panel && CONFIG.panel.mode) || 'grid';
   document.getElementById('start-on-boot-check').checked = !!CONFIG.start_on_boot;
   document.getElementById('test-conn-result').textContent = '';
   renderTileList();
@@ -2633,7 +2815,7 @@ async function persistTiles() {
   const panel = CONFIG.panel;
   try {
     await window.pywebview.api.save_widgets(widgets);
-    if (panel && Array.isArray(panel.tiles)) await window.pywebview.api.save_panel(panel);
+    if (panel) await window.pywebview.api.save_panel(panel);
   } catch (e) { /* ignore */ }
   renderGrid();
 }
@@ -2832,6 +3014,15 @@ function init() {
     document.getElementById('detail-room').textContent = tile.room;
     await persistTiles();
   });
+  document.getElementById('edit-area-input').addEventListener('change', async (e) => {
+    const tile = findTile(currentDetailTileId);
+    if (!tile || !isHomeId(tile.id)) return;
+    const overrides = Object.assign({}, CONFIG.panel && CONFIG.panel.room_overrides);
+    const value = e.target.value.trim();
+    if (value) overrides[tile.entity] = value; else delete overrides[tile.entity];
+    CONFIG.panel = Object.assign({}, CONFIG.panel, { room_overrides: overrides });
+    await persistTiles();
+  });
   document.getElementById('edit-label-input').addEventListener('change', async (e) => {
     const tile = findTile(currentDetailTileId);
     if (!tile) return;
@@ -2889,6 +3080,10 @@ function init() {
     restartSampling();
   });
   document.getElementById('panel-follow-btn').addEventListener('click', panelFollowWidgets);
+  document.getElementById('panel-mode-select').addEventListener('change', async (e) => {
+    CONFIG.panel = Object.assign({}, CONFIG.panel, { mode: e.target.value });
+    try { await window.pywebview.api.save_panel(CONFIG.panel); } catch (err) { /* ignore */ }
+  });
   document.getElementById('panel-theme-select').addEventListener('change', async (e) => {
     await savePref({ panel_theme: e.target.value });
   });
@@ -2989,6 +3184,9 @@ window.__applyPrefs = function (cfg) {
   const themeChanged = cfg.theme !== CONFIG.theme || cfg.glass_style !== CONFIG.glass_style;
   const glassChanged = cfg.glass_mode !== CONFIG.glass_mode ||
     JSON.stringify(cfg.system_glass_active) !== JSON.stringify(CONFIG.system_glass_active);
+  const homeKey = (c) => JSON.stringify([(c.panel || {}).mode, (c.panel || {}).home_tiles,
+    (c.panel || {}).room_overrides]);
+  const homeChanged = IS_FLYOUT_WINDOW && homeKey(cfg) !== homeKey(CONFIG);
   const samplingChanged = cfg.glass_sampling !== CONFIG.glass_sampling;
   const panelThemeChanged = cfg.panel_theme !== CONFIG.panel_theme;
   const layoutChanged = cfg.zoom !== CONFIG.zoom || sizeChanged;
@@ -3001,6 +3199,7 @@ window.__applyPrefs = function (cfg) {
     refreshBackdropSoon(0);
   }
   if (samplingChanged) restartSampling();
+  if (homeChanged) { if (homeMode()) loadHome(); else renderGrid(); }
   if (panelThemeChanged || themeChanged) applyTheme();
   if (editing && (widgetsChanged || tilesChanged)) renderEditor();
   if (!tilesChanged && !themeChanged && !layoutChanged) return;

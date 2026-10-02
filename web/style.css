@@ -1482,3 +1482,67 @@ html.is-dimmed:not(.is-flyout-window) .tile .tile-value {
 .editor-tools { margin-top: 12px; align-items: center; flex-wrap: wrap; }
 .editor-tiles { margin-top: 10px; }
 .editor-tiles .tile-list { max-height: 190px; overflow-y: auto; }
+
+/* ================= Home-style panel =================
+   The tray panel's alternative to the tile grid: a summary, the rooms as
+   chips, and every device under its room. Sizes are in the panel's own
+   pre-zoom pixels, so they read at half size like the tiles do. */
+.home-view {
+  position: relative;
+  width: calc(4 * var(--tile-w) + 3 * var(--gap));
+  color: var(--text-on-1);
+}
+.home-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  min-height: 34px;
+  padding: 6px 6px 2px;
+  font-size: 25px;
+  font-weight: 600;
+}
+.home-summary-item { display: flex; align-items: center; gap: 8px; color: var(--text-on-2); }
+.home-summary-item.is-warn { color: var(--accent-red); }
+.home-summary-icon { display: inline-flex; width: 30px; height: 30px; }
+.home-summary-icon svg { width: 100%; height: 100%; fill: currentColor; }
+.home-rooms {
+  display: flex;
+  gap: 10px;
+  padding: 10px 2px 14px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.home-rooms::-webkit-scrollbar { display: none; }
+.home-chip {
+  flex: none;
+  padding: 8px 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--btn-fill);
+  color: var(--text-on-1);
+  font: inherit;
+  font-size: 23px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.home-chip:hover { background: var(--btn-fill-strong); }
+.home-chip.is-active { background: var(--text-on-1); color: var(--panel-solid); }
+.home-body {
+  max-height: calc(3 * var(--tile-h) + 2 * var(--gap) + 90px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.home-body::-webkit-scrollbar { display: none; }
+.home-section + .home-section { margin-top: 18px; }
+.home-section-title {
+  padding: 0 6px 10px;
+  font-size: 27px;
+  font-weight: 700;
+}
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(4, var(--tile-w));
+  gap: var(--gap);
+}
+.home-empty { padding: 40px 6px; font-size: 25px; color: var(--text-on-2); }

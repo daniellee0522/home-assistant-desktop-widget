@@ -34,7 +34,7 @@ appearance. The glass effect varies with your wallpaper.
 - **Visual editor:** Settings → Open widget editor. Drag a size onto the desktop to add a widget, drag the boxes on the layout map to move them, drag devices to reorder. Right-click a widget on the desktop to edit it directly.
 - **Desktop controls:** keep your devices on the desktop, drag to reposition, and lock in place.
 - **Live updates:** device states update through Home Assistant's WebSocket API.
-- **Quick access:** click the tray icon to open a panel beside the taskbar. The panel has its own device list (edit it as "Tray panel" in the widget editor, or let it show every widget's devices); it shows two rows and scrolls past eight.
+- **Quick access:** click the tray icon to open a panel beside the taskbar. The panel has its own device list (edit it as "Tray panel" in the widget editor, or let it show every widget's devices); it shows two rows and scrolls past eight. Or switch Settings → **Panel style** to **Home style**: every device grouped by room (your Home Assistant areas, which you can override per device from its detail card), with a summary of lights on and unlocked doors, room chips, and the usual click, hold and right-click controls.
 - **Device details:** right-click or hold a tile for additional controls and sensor history.
 - **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; there is no refresh rate to set.
 - **Light on resources:** one shared capture serves every widget, and a widget costs about 60 MB of memory. Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.

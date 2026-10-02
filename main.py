@@ -55,6 +55,7 @@ if sys.platform == "win32":
 import qtshell as webview  # noqa: E402
 
 import config as cfgmod  # noqa: E402
+import home  # noqa: E402
 from ha_client import HAClient  # noqa: E402
 from tray import build_tray_icon, restore_tray_icon  # noqa: E402
 
@@ -161,6 +162,9 @@ class Api:
         self._popover_size = None
         self._popover_last_resize_seq = -1
 
+        self._registry_cache = None
+        self._home_states = {}
+        self._home_rooms = []
         self._settings_window = None
         self._settings_lock = threading.Lock()
         self._settings_resize_lock = threading.Lock()
@@ -260,7 +264,8 @@ class Api:
             # Positions stay on this side; the pages only need what to draw.
             "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"]}
                         for w in self._cfg.get("widgets", [])],
-            "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None},
+            "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None,
+                                                 "home_tiles": [], "room_overrides": {}},
         }
 
     def bootstrap(self):
@@ -319,6 +324,53 @@ class Api:
         out.sort(key=lambda e: (e["domain"], e["name"]))
         return out
 
+    # ---- the Home-style panel ----
+
+    _REGISTRY_TTL_S = 300
+
+    def _registry(self):
+        """Areas, devices and entity registry, cached: they rarely change and
+        cost three websocket round trips."""
+        cached = self._registry_cache
+        if cached and time.monotonic() - cached[0] < self._REGISTRY_TTL_S:
+            return cached[1]
+        try:
+            data = self._client.get_registry()
+        except Exception:
+            return cached[1] if cached else ([], [], [])
+        self._registry_cache = (time.monotonic(), data)
+        return data
+
+    def get_home(self):
+        """Every device by room, with its current state, for the panel's
+        Home view. Also what the panel listens for while it is open."""
+        try:
+            states = self._client.get_states()
+        except Exception:
+            return {"rooms": [], "entities": [], "error": True}
+        areas, devices, registry = self._registry()
+        overrides = (self._cfg.get("panel") or {}).get("room_overrides") or {}
+        entities, rooms = home.build_home(states, areas, devices, registry, overrides)
+        self._home_states = {e["entity_id"]: e["state"] for e in entities}
+        self._home_rooms = rooms
+        self._sync_client_entities()
+        return {"rooms": rooms, "entities": entities}
+
+    def get_room_names(self):
+        """Room names to offer when moving a device."""
+        return list(self._home_rooms)
+
+    def _home_mode(self):
+        return (self._cfg.get("panel") or {}).get("mode") == "home"
+
+    def _sync_client_entities(self):
+        """What the websocket client reports: the tiles' devices, and while
+        the Home panel is open, every device it shows."""
+        ids = self._watched_entities()
+        if self._flyout_open and self._home_mode():
+            ids = ids + list(self._home_states)
+        self._client.set_entities(ids)
+
     def test_connection(self, url, token):
         tmp = HAClient()
         tmp.configure(url, token)
@@ -356,7 +408,7 @@ class Api:
 
     def _tiles_changed(self):
         cfgmod.save_config(self._cfg)
-        self._client.set_entities(self._watched_entities())
+        self._sync_client_entities()
         self._push_prefs()
 
     def save_widgets(self, widgets):
@@ -374,11 +426,8 @@ class Api:
         the widgets)."""
         if not isinstance(panel, dict):
             return False
-        tiles = panel.get("tiles")
-        self._cfg["panel"] = {
-            "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
-            "tiles": self._clean_tiles(tiles) if isinstance(tiles, list) else None,
-        }
+        self._cfg["panel"] = cfgmod.clean_panel(panel, self._clean_tiles)
+        self._home_cache = None             # rooms may have moved
         self._tiles_changed()
         return True
 
@@ -776,7 +825,7 @@ class Api:
             )
 
     def show_flyout(self):
-        if not self._all_tiles():
+        if not self._all_tiles() and not self._home_mode():
             self.open_settings_window()
             return
         window = self._flyout_window
@@ -786,6 +835,7 @@ class Api:
         if not hwnd:
             return
         self._flyout_open = True
+        self._sync_client_entities()
         self._flyout_anchor = self._tray_corner()
         size = self._flyout_size
         if not size:
@@ -846,6 +896,7 @@ class Api:
         if not self._flyout_open:
             return
         self._flyout_open = False
+        self._sync_client_entities()
         self.close_popover()
         window = self._flyout_window
         self._overlays_open.discard("flyout")
@@ -950,6 +1001,15 @@ class Api:
         if not self._popover_window:
             return
         self._popover_owner = owner_kind
+        if tile_id.startswith("home:"):
+            state = self._home_states.get(tile_id[5:])
+            if state:
+                try:
+                    self._popover_window.evaluate_js(
+                        "window.__haPushBatch && window.__haPushBatch(%s)"
+                        % json.dumps([[tile_id[5:], state]], ensure_ascii=False))
+                except Exception:
+                    pass
         hwnd = _get_hwnd(self._popover_window)
         if hwnd:
             # Anchored at the tile's top-left, flipping at screen edges.
@@ -1681,6 +1741,19 @@ class Api:
                 self._pending.append([entity_id, new_state])
                 if len(self._pending) > 500:
                     self._pending = self._pending[-500:]
+            return
+        if entity_id in self._home_states:
+            self._home_states[entity_id] = new_state
+        if entity_id not in self._watched_entities():
+            # Only the Home panel (and a card opened from it) shows it.
+            payload = json.dumps([[entity_id, new_state]], ensure_ascii=False,
+                                 separators=(",", ":"))
+            for window in (self._flyout_window, self._popover_window):
+                try:
+                    window.evaluate_js(
+                        'if (typeof window.__haPushBatch === "function") window.__haPushBatch(%s)' % payload)
+                except Exception:
+                    pass
             return
         self._push_batch([[entity_id, new_state]])
 
