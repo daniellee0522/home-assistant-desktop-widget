@@ -505,6 +505,11 @@ class Window:
     def hide(self):
         _invoke(self._native, self._native.hide)
 
+    def set_opacity(self, value):
+        """The whole window's opacity: 0 shows it to the page (which draws only while shown)
+        and to nobody else."""
+        _invoke(self._native, lambda: self._native.setWindowOpacity(value), wait=True)
+
     def destroy(self):
         _invoke(self._native, self._native.close)
 

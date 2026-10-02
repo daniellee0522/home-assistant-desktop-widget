@@ -179,6 +179,7 @@ class Api:
         # released after a while unused: each is a browser page, tens of MB.
         self._overlay_lock = threading.Lock()
         self._ready = {}
+        self._fresh = set()           # overlay pages made just now, which have not yet drawn
         self._release_timers = {}
         self._registry_cache = None
         self._home_states = {}
@@ -250,6 +251,7 @@ class Api:
             if window:
                 return window
             ready = self._ready[kind] = threading.Event()
+            self._fresh.add(kind)
             first = (self._cfg.get("widgets") or [{}])[0]
             if kind == "popover":
                 # Its page numbers its resizes from 1 again.
@@ -274,7 +276,8 @@ class Api:
                 window.events.deactivated += lambda: threading.Thread(
                     target=self.dismiss_flyout, daemon=True).start()
                 self._bind_flyout_window(window)
-        ready.wait(4.0)
+        # The first page of a run also starts the browser engine, which takes a while.
+        ready.wait(10.0)
         return window
 
     @staticmethod
@@ -308,6 +311,7 @@ class Api:
             else:
                 self._flyout_window = None
             self._ready.pop(kind, None)
+            self._fresh.discard(kind)
         self._streams.pop(kind, None)
         if window:
             try:
@@ -947,7 +951,7 @@ class Api:
         self._armed.set()
         return True
 
-    def _arm_backdrop(self, kind, window):
+    def _arm_backdrop(self, kind, window, timeout=0.3):
         """Have a hidden, already-positioned window capture the backdrop of
         where it is about to appear, so it does not open showing a frosted
         picture of wherever it was last time."""
@@ -959,7 +963,7 @@ class Api:
         except Exception:
             pass
         # The timeout only guards against a page that never answers.
-        self._armed.wait(0.3)
+        self._armed.wait(timeout)
         # A moment for the compositor to put that frame on the surface.
         time.sleep(0.04)
         self._arming_kind = None
@@ -1001,6 +1005,22 @@ class Api:
         self._overlays_open.add("flyout")
         self._arming_kind = "flyout"
         self._apply_capture_exclusion()
+        if "flyout" in self._fresh:
+            # A page just made has drawn nothing and does not know its size yet; shown now it
+            # would open blank and then jump. Let it size itself, fetch its data and take its
+            # backdrop while it is still hidden, as the detail card does.
+            self._fresh.discard("flyout")
+            # A hidden page does not draw, so it is shown, at no opacity, while it does.
+            window.set_opacity(0.0)
+            try:
+                window.show()
+                time.sleep(0.05)
+                self._arm_backdrop("flyout", window, timeout=6.0)
+            finally:
+                window.set_opacity(1.0)
+            if self._flyout_size:
+                self._place_flyout(window, hwnd, self._flyout_size)
+            self._arming_kind = "flyout"
         # Shown before its backdrop is armed, unlike the popover: waiting up
         # to 300ms for the page after a tray click reads as a stutter, while
         # a stale first frame lasts only a frame or two.
@@ -3270,6 +3290,26 @@ def main():
     webview.on_resume(on_resume)
 
     api._watch_for_idle()
+    if os.environ.get("HA_WIDGET_OPEN_PANEL"):
+        # For looking at the first opening of the panel: opens it after a pause and writes
+        # a picture of it every 0.25 s into the folder named.
+        def probe():
+            from PySide6.QtGui import QImage
+            folder = os.environ["HA_WIDGET_OPEN_PANEL"]
+            os.makedirs(folder, exist_ok=True)
+            time.sleep(6)
+            api.dismiss_flyout = lambda: None
+            t0 = time.time()
+            api.toggle_flyout()
+            webview.log("probe: toggle returned after %.2fs" % (time.time() - t0))
+            for i in range(32):
+                w = api._flyout_window
+                if w:
+                    w.run_on_ui_thread(lambda i=i: w.native.grab().save(
+                        os.path.join(folder, "p%02d_%04d.png" % (i, int((time.time() - t0) * 1000)))))
+                time.sleep(0.25)
+            os._exit(0)
+        threading.Thread(target=probe, daemon=True).start()
 
     tray_icon = build_tray_icon(activate, toggle_visibility, open_settings,
                                 toggle_theme, refresh_now, quit_action)
