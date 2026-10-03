@@ -130,7 +130,12 @@ class LocalMedia:
                      # (Apple Music gives "artist — album"; the artist is what is shown)
                      "media_artist": (props.artist or "").split(" — ")[0],
                      "app_name": app_name(session.source_app_user_model_id),
-                     "supported_features": 2 if info.controls.is_playback_position_enabled else 0}
+                     # what it can be asked, as Home Assistant's features: pause 1, seek 2, previous 16,
+                     # next 32, play 16384
+                     "supported_features": ((1 | 16384 if info.controls.is_play_pause_toggle_enabled else 0)
+                                            | (2 if info.controls.is_playback_position_enabled else 0)
+                                            | (16 if info.controls.is_previous_enabled else 0)
+                                            | (32 if info.controls.is_next_enabled else 0))}
             duration = _seconds(line.end_time) - _seconds(line.start_time)
             if duration > 0:
                 attrs["media_duration"] = round(duration, 1)

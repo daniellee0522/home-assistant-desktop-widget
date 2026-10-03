@@ -528,6 +528,30 @@ def cover_color(art):
     return color
 
 
+# Home Assistant's media player features (MediaPlayerEntityFeature); this computer's player gives the same
+PAUSE, SEEK, PREVIOUS, NEXT, PLAY = 1, 2, 16, 32, 16384
+ACTIVE = ("playing", "paused", "buffering")
+
+
+def media_controls(state):
+    """Which of previous / play_pause / next work now: none with nothing playing, and only what the player
+    says it can (a player that says nothing is taken to do all)."""
+    s = (state or {}).get("state")
+    if s not in ACTIVE:
+        return set()
+    features = int(((state or {}).get("attributes") or {}).get("supported_features") or 0)
+    if not features:
+        return {"previous", "play_pause", "next"}
+    out = set()
+    if features & PREVIOUS:
+        out.add("previous")
+    if features & NEXT:
+        out.add("next")
+    if features & (PLAY | PAUSE):
+        out.add("play_pause")
+    return out
+
+
 def play_pause_patch(state):
     """What a player is at once when play/pause is pressed (before Home Assistant says so): playing or
     paused, and its place taken now, so the bar neither jumps on (the time since it was last told counted
@@ -603,7 +627,7 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
         p.drawRoundedRect(QRectF(x, y, tw, 6), 3, 3)
         p.setBrush(white)
         p.drawRoundedRect(QRectF(x, y, max(6.0, tw * pos / dur), 6), 3, 3)
-        if int(attrs.get("supported_features") or 0) & 2:            # MediaPlayerEntityFeature.SEEK
+        if int(attrs.get("supported_features") or 0) & SEEK and s in ACTIVE:
             r = 11 if seek_to is not None else 8
             p.drawEllipse(QPointF(x + tw * pos / dur, y + 3), r, r)
             buttons.append((QRectF(x, y - 16, tw, 38), "seek"))
@@ -611,10 +635,15 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
     big, small = 76, 58
     cy = H - pad - big / 2
     cx = x + tw / 2
+    can = media_controls(state)
     for action, icon, size, dx in (("previous", "mdi:skip-previous", small, -(big / 2 + 22 + small / 2)),
                                    ("play_pause", "mdi:pause" if playing else "mdi:play", big, 0),
                                    ("next", "mdi:skip-next", small, big / 2 + 22 + small / 2)):
         r = QRectF(cx + dx - size / 2, cy - size / 2, size, size)
+        on = action in can
+        p.save()
+        if not on:                                     # nothing playing, or the player cannot: faint, inert
+            p.setOpacity(p.opacity() * 0.35)
         if action == "play_pause":
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 235))
@@ -622,7 +651,9 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
             render.draw_icon(p, icon, "#1d1d1f", r.adjusted(18, 18, -18, -18))
         else:
             render.draw_icon(p, icon, "#ffffff", r.adjusted(10, 10, -10, -10))
-        buttons.append((r, action))
+        p.restore()
+        if on:
+            buttons.append((r, action))
     return buttons
 
 

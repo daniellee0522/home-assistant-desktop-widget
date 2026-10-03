@@ -852,11 +852,17 @@ def build_media(card, stack, tile, state):
                         lambda: card.call("media_player", "repeat_set", entity, {"repeat": nxt})))
     gap = 12
     x = (BODY_W - (sum(b[0] for b in buttons) + gap * (len(buttons) - 1))) / 2
+    can = kinds.media_controls(state)
+    needs = {"mdi:skip-previous": "previous", "mdi:skip-next": "next", "mdi:pause": "play_pause",
+             "mdi:play": "play_pause"}
     for size, icon, click in buttons:
         big = size == 64
-        row.add(Button(x=x, y=(64 - size) / 2, w=size, h=size, icon=icon, icon_size=28 if big else 22,
-                       fill="accent_blue" if big else None, hover_fill="accent_blue" if big else "btn_fill",
-                       color="white" if big else "ink1", on_click=lambda e, c=click: c()))
+        b = Button(x=x, y=(64 - size) / 2, w=size, h=size, icon=icon, icon_size=28 if big else 22,
+                   fill="accent_blue" if big else None, hover_fill="accent_blue" if big else "btn_fill",
+                   color="white" if big else "ink1", on_click=lambda e, c=click: c())
+        if icon in needs and needs[icon] not in can:     # nothing playing, or the player cannot: inert
+            b.alpha, b.interactive = 0.35, False
+        row.add(b)
         x += size + gap
     stack.place(row, 8, 8)
     if attrs.get("volume_level") is not None:

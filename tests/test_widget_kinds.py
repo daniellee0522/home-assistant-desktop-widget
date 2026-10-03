@@ -206,6 +206,18 @@ class ClockCalendarPlayer(unittest.TestCase):
 
 
 class PlayerOnTheDesktop(unittest.TestCase):
+    def test_with_nothing_playing_its_buttons_are_inert(self):
+        self.assertEqual(kinds.media_controls({"state": "off", "attributes": {}}), set())
+        self.assertEqual(kinds.media_controls({"state": "idle", "attributes": {"supported_features": 16 | 32 | 1}}),
+                         set())
+        self.assertEqual(kinds.media_controls({"state": "paused", "attributes": {"supported_features": 1 | 32}}),
+                         {"play_pause", "next"})                   # and only what the player can do
+        api, win, surf = make([T("media_player.s", "media_player")], "media")
+        surf.push_states([("media_player.s", {"state": "off", "attributes": {}})])
+        TW.pump(200)
+        self.assertEqual([a for _, a in surf.kind_buttons], ["source"])
+        TW.done(win)
+
     def test_play_takes_the_place_now_so_the_bar_does_not_jump(self):
         import datetime
         long_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)).isoformat()
