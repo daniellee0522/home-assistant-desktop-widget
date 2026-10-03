@@ -1,6 +1,6 @@
 """The other kinds of desktop widget (nativeui/kinds.py): the weather, a camera, a chart, shortcuts. What
-each shows of its devices, that it fetches what it needs besides states, what a tap does, and the editor
-that chooses the kind."""
+each shows of its devices, that it fetches what it needs besides states, what a tap does, and the editor:
+a kind is dragged from its palette, keeps its size and its devices, and its picker offers what it shows."""
 import os
 import sys
 import unittest
@@ -72,7 +72,7 @@ class WhatEachShows(unittest.TestCase):
                  T("sensor.a", "sensor"), T("sensor.b", "sensor"), T("sensor.c", "sensor"), T("sensor.d", "sensor"),
                  T("scene.x", "scene"), T("script.y", "script")]
         self.assertEqual([t["entity"] for t in kinds.shown("weather", tiles)], ["weather.home"])
-        self.assertEqual(len(kinds.shown("chart", tiles)), 3)
+        self.assertEqual(len(kinds.shown("chart", tiles)), 2)
         self.assertEqual([t["entity"] for t in kinds.shown("shortcuts", tiles)], ["scene.x", "script.y"])
         self.assertEqual(kinds.shown("tiles", tiles), tiles)
 
@@ -92,10 +92,22 @@ class WhatEachShows(unittest.TestCase):
                     centre = img.pixelColor(w // 2, h // 2)
                     self.assertGreater(centre.alpha(), 0, (kind, size, theme))
 
-    def test_config_keeps_the_kind(self):
-        w = config._clean_widget({"id": "a", "size": "2x2", "kind": "weather", "tiles": []})
-        self.assertEqual(w["kind"], "weather")
+    def test_config_keeps_the_kind_in_its_own_size(self):
+        w = config._clean_widget({"id": "a", "size": "4x4", "kind": "weather", "tiles": []})
+        self.assertEqual((w["kind"], w["size"]), ("weather", config.KIND_SIZE["weather"]))
         self.assertEqual(config._clean_widget({"id": "a", "kind": "nonsense"})["kind"], "tiles")
+        self.assertEqual(config._clean_widget({"id": "a", "size": "4x4"})["size"], "4x4")
+        self.assertEqual(kinds.KIND_SIZE, config.KIND_SIZE)
+
+    def test_an_empty_one_asks_for_its_devices_and_is_its_button(self):
+        for kind in ("weather", "camera", "chart", "shortcuts"):
+            w, h = render.widget_size(kinds.KIND_SIZE[kind])
+            img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            p = QPainter(img)
+            button = kinds.draw_widget(p, kind, kinds.KIND_SIZE[kind], [], {}, "dark")
+            p.end()
+            self.assertEqual((button.width(), button.height()), (w, h), kind)
 
 
 class OnTheDesktop(unittest.TestCase):
@@ -145,33 +157,162 @@ class OnTheDesktop(unittest.TestCase):
 
 
 class InTheEditor(unittest.TestCase):
-    def test_choosing_a_kind_keeps_what_it_shows_and_the_picker_follows(self):
+    def setUp(self):
         import test_native_settings as TS
-        api, win, sc = TS.make()
-        w = sc.settings_widget()
-        w["tiles"] = [T("light.a", "light"), T("weather.home", "weather")]
-        sc.open_editor(w["id"])
-        TW.pump(100)
-        sc.set_kind("weather")
-        self.assertEqual(w["kind"], "weather")
-        self.assertEqual([t["entity"] for t in w["tiles"]], ["weather.home"])
-        self.assertFalse(sc.can_add())                       # one weather is all it takes
-        sc.entities = [{"entity_id": "weather.x", "domain": "weather", "name": "W", "state": {}},
-                       {"entity_id": "light.b", "domain": "light", "name": "L", "state": {}}]
-        w["tiles"] = []
-        from nativeui.ui import View
-        host = View(0, 0, 300, 0)
-        sc.fill_picker(host)
-        offered = []
+        self.TS = TS
+        self.api, self.win, self.sc = TS.make()
 
-        def walk(v):
-            if v.__class__.__name__ == "PickerRow":
-                offered.append(v.e["entity_id"])
+    def tearDown(self):
+        self.win.dispose()
+
+    def walk(self, view, cls):
+        out = []
+
+        def go(v):
+            if v.__class__.__name__ == cls:
+                out.append(v)
             for c in v.children:
-                walk(c)
-        walk(host)
-        self.assertEqual(offered, ["weather.x"])
-        win.dispose()
+                go(c)
+        go(view)
+        return out
+
+    def offer(self, ents):
+        self.api.get_entities = lambda: ents
+        self.sc.open_picker()
+        TW.pump(200)
+        self.assertEqual(self.sc.entities, ents)
+
+    def kind_widget(self, kind, tiles):
+        w = {"id": "k1", "size": kinds.KIND_SIZE[kind], "kind": kind, "tiles": tiles, "x": 0, "y": 0}
+        self.sc.prefs["widgets"].append(w)
+        self.sc.open_editor("k1")
+        TW.pump(100)
+        return w
+
+    def test_each_kind_is_dragged_from_the_palette(self):
+        sc = self.sc
+        sc.open_editor("")
+        TW.pump(100)
+        items = {v.kind: v for v in self.walk(sc.root, "KindItem")}
+        self.assertEqual(sorted(items), sorted(kinds.KINDS[1:]))
+        sc.body_scroll.scroll_to(items["weather"].abs_pos()[1] - 100)
+        TW.pump(50)
+        x, y, k = items["weather"].in_scene()
+        s = sc.scale / sc.devicePixelRatioF()
+        QTest.mousePress(sc, Qt.LeftButton, pos=QPoint(round((x + 30) * s), round((y + 20) * s)))
+        TW.pump(700)
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=QPoint(round((x + 30) * s), round((y + 20) * s)))
+        self.assertIn(("drag", "2x4", "weather"), self.api.calls)
+
+    def test_a_kind_keeps_its_size_and_offers_no_other(self):
+        sc = self.sc
+        w = self.kind_widget("weather", [T("weather.home", "weather")])
+        self.assertFalse([c for c in self.walk(sc.root, "Chip") if c.text in ("1x1", "4x4")])
+        sc.set_size("4x4")
+        self.assertEqual(w["size"], kinds.KIND_SIZE["weather"])
+        self.assertFalse([c for c in self.api.calls if c[0] == "size"])
+
+    def test_one_weather_chosen_takes_the_place_of_the_last(self):
+        sc = self.sc
+        w = self.kind_widget("weather", [T("weather.home", "weather")])
+        self.assertTrue(sc.can_add())                         # its button changes the weather
+        self.offer([{"entity_id": "weather.x", "domain": "weather", "name": "W", "state": {}},
+                    {"entity_id": "light.b", "domain": "light", "name": "L", "state": {}}])
+        rows = self.walk(sc.root, "PickerRow")
+        self.assertEqual([r.e["entity_id"] for r in rows], ["weather.x"])
+        rows[0].on_click(None)                                # chosen at once
+        self.assertEqual(sc.page, "editor")
+        self.assertEqual([t["entity"] for t in w["tiles"]], ["weather.x"])
+
+    def test_the_picker_ticks_several_up_to_what_fits(self):
+        sc = self.sc
+        w = self.kind_widget("chart", [])
+        self.offer([{"entity_id": "sensor.%s" % c, "domain": "sensor", "name": c, "state": {}} for c in "abc"])
+        rows = self.walk(sc.root, "PickerRow")
+        for r in rows:
+            r.on_click(None)
+        self.assertEqual([e["entity_id"] for e in sc.picker_sel], ["sensor.a", "sensor.b"])   # a chart shows two
+        rows[0].on_click(None)                                # ticked again: not any more
+        self.assertEqual([e["entity_id"] for e in sc.picker_sel], ["sensor.b"])
+        self.assertTrue(sc.picker_add.interactive)
+        sc.picker_add.on_click(None)
+        self.assertEqual(sc.page, "editor")
+        self.assertEqual([t["entity"] for t in w["tiles"]], ["sensor.b"])
+
+    def test_select_all_of_a_group(self):
+        sc = self.sc
+        sc.open_editor("w1")
+        self.offer([{"entity_id": "switch.%s" % c, "domain": "switch", "name": c, "state": {}} for c in "abc"])
+        every = [b for b in self.walk(sc.root, "Button") if b.text == "全選"]
+        self.assertEqual(len(every), 1)
+        every[0].on_click(None)
+        self.assertEqual(len(sc.picker_sel), 3)
+        before = len(sc.current_tiles())
+        sc.picker_add.on_click(None)
+        self.assertEqual(len(sc.current_tiles()), before + 3)
+
+
+class DraggingInTheEditor(unittest.TestCase):
+    """A tile carried in the preview, or a row of the list, shows where it will go before it is let go."""
+
+    def setUp(self):
+        import test_native_settings as TS
+        self.api, self.win, self.sc = TS.make()
+        self.sc.open_editor("w1")
+        TW.pump(150)
+        self.s = self.sc.scale / self.sc.devicePixelRatioF()
+
+    def tearDown(self):
+        self.win.dispose()
+
+    def at(self, view, x, y):
+        vx, vy, k = view.in_scene()
+        return QPoint(round((vx + x * k) * self.s), round((vy + y * k) * self.s))
+
+    def test_the_preview_makes_room_while_a_tile_is_carried(self):
+        sc = self.sc
+        pv = sc.preview
+        z = pv.zoom_k
+        r0, r2 = pv.rects[0], pv.rects[2]
+        QTest.mousePress(sc, Qt.LeftButton, pos=self.at(pv, (r0[0] + 60) * z, (r0[1] + 60) * z))
+        for f in (0.5, 1.0):
+            QTest.mouseMove(sc, self.at(pv, (r0[0] + 60 + (r2[0] - r0[0]) * f) * z,
+                                        (r0[1] + 60 + (r2[1] - r0[1]) * f) * z))
+            TW.pump(40)
+        self.assertTrue(pv.dragging())
+        self.assertEqual(pv.press["to"], 2)
+        self.assertEqual([t["id"] for t in pv.order()], ["t1", "t2", "t0"])      # as it will be
+        self.assertEqual([t["id"] for t in sc.current_tiles()], ["t0", "t1", "t2"])   # not yet
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=self.at(pv, (r2[0] + 60) * z, (r2[1] + 60) * z))
+        TW.pump(100)
+        self.assertEqual([t["id"] for t in sc.current_tiles()], ["t1", "t2", "t0"])
+
+    def test_a_row_carried_down_the_list_moves_the_others_up(self):
+        sc = self.sc
+        rows = sorted(self.walk(sc.root), key=lambda r: r.index)
+        first = rows[0]
+        QTest.mousePress(sc, Qt.LeftButton, pos=self.at(first, 120, 20))
+        for dy in (20, 60, 100):
+            QTest.mouseMove(sc, self.at(first, 120, 20 + dy))
+            TW.pump(40)
+        self.assertTrue(first.lifted)
+        self.assertEqual(first.press["to"], 2)
+        TW.pump(250)
+        self.assertEqual([r.goal for r in rows[1:]], [0, 46])                   # they made room
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=self.at(first, 120, 20))
+        TW.pump(100)
+        self.assertEqual([t["id"] for t in sc.current_tiles()], ["t1", "t2", "t0"])
+
+    def walk(self, view):
+        out = []
+
+        def go(v):
+            if v.__class__.__name__ == "TileRow":
+                out.append(v)
+            for c in v.children:
+                go(c)
+        go(view)
+        return out
 
 
 if __name__ == "__main__":

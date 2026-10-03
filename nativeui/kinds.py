@@ -1,8 +1,9 @@
 """The other kinds of desktop widget, after iOS's own: the weather, a camera, a chart of sensors and a
 row of shortcuts (scenes, scripts, automations). A widget of the tiles kind is render.draw_widget's.
 
-A widget's devices (its tiles) say what it shows: the first weather entity, the first camera, up to three
-sensors, or the shortcuts. Sizes are the tiles' (1x1, 2x2, 2x4, 4x4) and every kind draws in each.
+A widget is made of its kind, dragged from the editor's palette, and keeps it. Its devices (its tiles) say
+what it shows: a weather entity, a camera, two sensors, or the shortcuts. Each kind has one size of its own
+(KIND_SIZE, as config.KIND_SIZE); the drawing still works in every size.
 What comes from elsewhere than the states (the forecast, the camera's picture, the sensors' history) is in
 `extras`, fetched by the widget (nativeui/widget.py).
 """
@@ -16,10 +17,15 @@ from . import render
 
 KINDS = ("tiles", "weather", "camera", "chart", "shortcuts")
 KIND_LABELS = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "圖表", "shortcuts": "捷徑"}
+KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4", "shortcuts": "2x4"}
+KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "chart": "mdi:chart-line",
+              "shortcuts": "mdi:gesture-tap-button"}
+# what an empty one asks for
+KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器", "shortcuts": "加入場景或腳本"}
 # which devices each kind takes, and how many (None: any number)
 KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",),
                 "shortcuts": ("scene", "script", "automation")}
-KIND_MAX = {"weather": 1, "camera": 1, "chart": 3}
+KIND_MAX = {"weather": 1, "camera": 1, "chart": 2}
 
 CONDITIONS = {
     "sunny": ("weather-sunny", "晴", "Sunny"), "clear-night": ("weather-night", "晴朗", "Clear"),
@@ -323,7 +329,8 @@ def draw_chart(p, W, H, cols, rows, tiles, states, history, tcol):
 
 # ---------------------------------------------------------------------------------- shortcuts
 
-def draw_shortcuts(p, tiles, rects, states, ui):
+def draw_shortcuts(p, tiles, rects, states, ui, first=0):
+    """The shortcuts as coloured buttons; each one's colour is its place's (first: the place of tiles[0])."""
     flash = (ui or {}).get("flash") or {}
     for i, (tile, (x, y, w, h)) in enumerate(zip(tiles, rects)):
         p.save()
@@ -331,7 +338,7 @@ def draw_shortcuts(p, tiles, rects, states, ui):
             p.translate(x + w / 2, y + h / 2)
             p.scale(0.95, 0.95)
             p.translate(-(x + w / 2), -(y + h / 2))
-        c = QColor(SHORTCUT_COLORS[i % len(SHORTCUT_COLORS)])
+        c = QColor(SHORTCUT_COLORS[(i + first) % len(SHORTCUT_COLORS)])
         shape = render.squircle(x, y, w, h, 40)
         g = QLinearGradient(0, y, 0, y + h)
         g.setColorAt(0, c.lighter(112))
@@ -353,6 +360,51 @@ def draw_shortcuts(p, tiles, rects, states, ui):
         p.restore()
 
 
+# ---------------------------------------------------------------------------------- empty, and the samples
+
+def draw_kind_empty(p, W, H, kind, tcol, dim):
+    """An empty widget of a kind: its icon and what to choose. The whole card is its button (returned)."""
+    ink1, ink2 = render.parse_color(tcol["off_text1"]), render.parse_color(tcol["off_text2"])
+    blue = QColor(render.ACCENT["blue"])
+    r = 34
+    cy = H / 2 - 22
+    p.setPen(Qt.NoPen)
+    tint = QColor(blue)
+    tint.setAlphaF(0.16)
+    p.setBrush(tint)
+    p.drawEllipse(QPointF(W / 2, cy), r, r)
+    render.draw_icon(p, KIND_ICONS.get(kind, "mdi:plus"), blue.name(), QRectF(W / 2 - 20, cy - 20, 40, 40))
+    f = _font(20, QFont.DemiBold)
+    _text(p, render.tr(KIND_ASK.get(kind, "")), f, ink1, 0, cy + r + 14, "c", W)
+    _text(p, render.tr("按這裡設定"), _font(15), ink2, 0, cy + r + 42, "c", W)
+    return QRectF(0, 0, W, H)
+
+
+def sample(kind):
+    """(tiles, states, extras) that show a kind in the editor's palette."""
+    t = lambda e, d, name: {"id": e, "entity": e, "domain": d, "room": name, "label": "", "icon": ""}
+    if kind == "weather":
+        days = [{"datetime": "2026-01-0%dT04:00:00+00:00" % (i + 1), "condition": c, "temperature": hi}
+                for i, (c, hi) in enumerate((("sunny", 27), ("partlycloudy", 26), ("rainy", 23), ("cloudy", 24),
+                                             ("sunny", 28), ("sunny", 29)))]
+        days[0]["templow"] = 19
+        return ([t("weather.home", "weather", render.tr("家"))],
+                {"weather.home": {"state": "sunny", "attributes": {"temperature": 25}}}, {"forecast": days})
+    if kind == "camera":
+        return [t("camera.door", "camera", render.tr("門口"))], {}, {}
+    if kind == "chart":
+        hist = {"sensor.t": [[i, 22 + 2 * __import__("math").sin(i / 5)] for i in range(40)],
+                "sensor.h": [[i, 55 + 6 * __import__("math").cos(i / 7)] for i in range(40)]}
+        return ([t("sensor.t", "sensor", render.tr("溫度")), t("sensor.h", "sensor", render.tr("濕度"))],
+                {"sensor.t": {"state": "23.4", "attributes": {"unit_of_measurement": "°C"}},
+                 "sensor.h": {"state": "58", "attributes": {"unit_of_measurement": "%"}}}, {"history": hist})
+    if kind == "shortcuts":
+        names = (("scene.home", "回家", "mdi:home"), ("scene.away", "出門", "mdi:exit-run"),
+                 ("scene.night", "晚安", "mdi:weather-night"), ("script.movie", "電影", "mdi:movie-open"))
+        return ([dict(t(e, e.split(".")[0], render.tr(n)), icon=i) for e, n, i in names], {}, {})
+    return [], {}, {}
+
+
 # ---------------------------------------------------------------------------------- the widget
 
 def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style="classic", ui=None,
@@ -371,7 +423,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
     if kind in ("chart", "shortcuts") or not mine:
         render.draw_card_bg(p, W, H, tcol, style, theme)
     if not mine:
-        button = render.draw_empty(p, W, H, cols == 1, theme, raw_theme or theme, dim) if message else None
+        button = draw_kind_empty(p, W, H, kind, tcol, dim) if message else None
     elif kind == "weather":
         draw_weather(p, W, H, cols, rows, mine[0], states.get(mine[0]["entity"]), extras.get("forecast"), card)
     elif kind == "camera":

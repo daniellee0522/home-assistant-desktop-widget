@@ -482,6 +482,7 @@ class _Surface(GlassMixin, QWidget):
             return
         if e.button() != Qt.LeftButton or not press:
             return
+        moved = self.dragging or press.get("moved")
         if self.dragging:
             self.dragging = False
             self.sample_now.set()                 # a still glass takes the picture where it was dropped
@@ -489,9 +490,13 @@ class _Surface(GlassMixin, QWidget):
         self.pressed = -1
         self._invalidate_overlay()
         if i < 0:
-            if press.get("button") and self._button_at(x, y):
-                threading.Thread(target=self.api.open_settings_window, daemon=True).start()
-            elif self.wkind in EXTRAS_EVERY and self.tiles and not press.get("moved"):
+            if press.get("button") and self._button_at(x, y) and not moved:
+                if self.wkind == "tiles":
+                    threading.Thread(target=self.api.open_settings_window, daemon=True).start()
+                else:                             # an empty weather, camera...: the editor, on it
+                    wid = self.widget_id
+                    threading.Thread(target=lambda: self.api.open_widget_editor(wid), daemon=True).start()
+            elif self.wkind in EXTRAS_EVERY and self.tiles and not moved:
                 self.facade.popover(self.tiles[0])        # a weather, a camera, a chart: its detail
             return
         if i >= len(self.tiles) or press.get("fired"):

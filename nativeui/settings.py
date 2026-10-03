@@ -8,7 +8,7 @@ import time
 import traceback
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
 import hotkey as hotkeymod
 
@@ -64,6 +64,7 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.states = {}
         self.page = "settings"
         self.return_page = "settings"
+        self.picker_sel = []
         self.widget_id = ""
         self.zoom_css = 1.0
         self.system_glass = False
@@ -247,7 +248,11 @@ class SettingsScene(EditorMixin, OverlayScene):
             top = self.header("Widget 編輯器", "拖曳新增、擺放，並編排配件", back=self.close_editor)
             body, max_h, width = self.build_editor_body(), 640, 800
         elif self.page == "picker":
-            top = self.header("新增配件", "選擇一個實體", back=lambda e: self.go(self.return_page), dot=True)
+            kind = self.current_kind()
+            title = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "新增感測器", "shortcuts": "新增捷徑"}
+            top = self.header(title.get(kind, "新增配件"),
+                              "選擇一個實體" if self.picker_single() else "可複選，選好後按「加入」",
+                              back=lambda e: self.go(self.return_page), dot=True)
             body, max_h, width = self.build_picker_body(), BODY_MAX, CARD_W
         else:
             top = self.header("設定", self.t_("已連線 (即時同步)") if self.connected else self.t_("未連線"), dot=True)
@@ -260,7 +265,16 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.body_scroll = sv
         sv.scroll_to(self.scroll_keep.get(self.page, 0.0))
         self.card_w = width
-        self.set_css_size(width, top + shown_h)
+        foot = 0
+        if self.page == "picker" and not self.picker_single():
+            # what is ticked is added at once, from under the list
+            self.picker_add = Button("", x=BODY_X, y=top + shown_h + 10, w=BODY_W, h=40, size=14,
+                                     weight=QFont.DemiBold, fill="accent_blue", hover_fill="accent_blue", color="white",
+                                     on_click=lambda e: self.add_entities(list(self.picker_sel)))
+            self.root.add(self.picker_add)
+            self.picker_counted()
+            foot = 10 + 40 + 14
+        self.set_css_size(width, top + shown_h + foot)
         self.request_size()
         for f in self.fields:
             f.place()
@@ -605,9 +619,14 @@ class SettingsScene(EditorMixin, OverlayScene):
         threading.Thread(target=go, daemon=True).start()
 
     # -- the picker --------------------------------------------------------------------------------------------------------
+    def picker_single(self):
+        """Whether the picker takes one device (a weather, a camera) and goes back as soon as it is chosen."""
+        return kinds.KIND_MAX.get(self.current_kind()) == 1
+
     def open_picker(self):
         self.return_page = "editor" if self.page == "editor" else "settings"
         self.picker_query = ""
+        self.picker_sel = []                    # the devices ticked, in the order they were
         self.entities = None
         self.go("picker")
 
@@ -649,6 +668,48 @@ class SettingsScene(EditorMixin, OverlayScene):
             self.body_scroll.scroll_to(0)
         self.request_paint()
 
+    def picker_room(self):
+        """How many more can be ticked (None: any number)."""
+        left = self.room_left()
+        return None if left is None else left - len(self.picker_sel)
+
+    def picker_counted(self):
+        """The add button says how many are ticked; nothing ticked, it does nothing."""
+        n = len(self.picker_sel)
+        btn = getattr(self, "picker_add", None)
+        if btn is None:
+            return
+        btn.text = render.tr("加入 %d 個") % n if n else render.tr("請選擇要加入的項目")
+        btn.alpha, btn.interactive = (1.0, True) if n else (0.45, False)
+        btn.changed()
+
+    def pick_entity(self, e):
+        """A row was pressed: a weather or a camera is chosen at once; otherwise it is ticked (or not)."""
+        if self.picker_single():
+            self.add_entities([e])
+            return
+        ids = [x["entity_id"] for x in self.picker_sel]
+        if e["entity_id"] in ids:
+            del self.picker_sel[ids.index(e["entity_id"])]
+        elif self.picker_room() is None or self.picker_room() > 0:
+            self.picker_sel.append(e)
+        self.picker_counted()
+        self.request_paint()
+
+    def pick_group(self, items):
+        """A group's 全選: all of it ticked, or, when it all was, none of it."""
+        ids = {x["entity_id"] for x in self.picker_sel}
+        if all(e["entity_id"] in ids for e in items):
+            drop = {e["entity_id"] for e in items}
+            self.picker_sel = [x for x in self.picker_sel if x["entity_id"] not in drop]
+        else:
+            for e in items:
+                if e["entity_id"] not in ids and (self.picker_room() is None or self.picker_room() > 0):
+                    self.picker_sel.append(e)
+        self.fill_picker(self.picker_list)
+        self.picker_counted()
+        self.request_paint()
+
     def fill_picker(self, host):
         host.clear()
         y = 0
@@ -673,9 +734,17 @@ class SettingsScene(EditorMixin, OverlayScene):
                 continue
             any_ = True
             host.add(Label(DOMAIN_LABELS[domain], 11, QFont.Bold, "ink2", x=2, y=y + 10, spacing=0.3))
+            if not self.picker_single() and self.picker_room() is None and len(items) > 1:
+                ids = {x["entity_id"] for x in self.picker_sel}
+                every = all(e["entity_id"] in ids for e in items)
+                b = Button("取消全選" if every else "全選", size=11, weight=QFont.DemiBold, h=22, pad=9,
+                           color="accent_blue", fill=None, hover_fill="btn_fill",
+                           on_click=lambda ev, items=items: self.pick_group(items))
+                b.x, b.y = BODY_W - b.w, y + 5
+                host.add(b)
             y += 10 + 13 + 4
             for e in items:
-                host.add(PickerRow(e, y, BODY_W, self.add_entity))
+                host.add(PickerRow(e, y, BODY_W, self.pick_entity, self))
                 y += 44 + 4
         if not any_:
             host.add(Label("沒有符合的實體", 11.5, QFont.Normal, "ink2", w=BODY_W))
@@ -684,22 +753,43 @@ class SettingsScene(EditorMixin, OverlayScene):
 
 
 class PickerRow(View):
+    """A device to choose: its icon, name and entity, and (choosing several) a tick on the right."""
     cursor = Qt.PointingHandCursor
 
-    def __init__(self, entity, y, w, on_pick):
+    def __init__(self, entity, y, w, on_pick, picker=None):
         super().__init__(0, y, w, 44)
         self.interactive = True
-        self.e = entity
+        self.e, self.picker = entity, picker
         self.on_press = lambda e: True
         self.on_click = lambda ev: on_pick(entity)
+        self.on_enter = self.on_leave = lambda ev: self.changed()
+
+    def ticked(self):
+        return self.picker is not None and any(x["entity_id"] == self.e["entity_id"] for x in self.picker.picker_sel)
 
     def paint(self, p):
-        if self.hovered:
+        multi = self.picker is not None and not self.picker.picker_single()
+        on = multi and self.ticked()
+        full = multi and not on and self.picker.picker_room() == 0
+        if self.hovered or on:
             p.setPen(Qt.NoPen)
-            p.setBrush(ui.resolve(self.scene, "btn_fill"))
+            p.setBrush(ui.resolve(self.scene, "btn_fill_strong" if on else "btn_fill"))
             p.drawRoundedRect(QRectF(0, 0, self.w, self.h), 22, 22)
-        render.draw_icon(p, render.DEFAULT_ICON.get(self.e["domain"], "sensor"), self.scene.t["ink2"], QRectF(8 + 0, 11, 22, 22)) \
-            if False else None
+        if full:
+            p.setOpacity(p.opacity() * 0.45)
+        if multi:
+            c = QPointF(self.w - 22, self.h / 2)
+            p.setPen(Qt.NoPen if on else QPen(ui.resolve(self.scene, "input_border"), 1.5))
+            p.setBrush(ui.resolve(self.scene, "accent_blue") if on else Qt.NoBrush)
+            p.drawEllipse(c, 10, 10)
+            if on:
+                p.setPen(QPen(QColor(255, 255, 255), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                tick = QPainterPath()
+                tick.moveTo(c.x() - 4.5, c.y())
+                tick.lineTo(c.x() - 1.2, c.y() + 3.4)
+                tick.lineTo(c.x() + 4.8, c.y() - 3.6)
+                p.setBrush(Qt.NoBrush)
+                p.drawPath(tick)
         c = ui.resolve(self.scene, "ink2")
         render.draw_icon(p, render.DEFAULT_ICON.get(self.e["domain"], "sensor"), (c.red(), c.green(), c.blue(), c.alphaF()),
                          QRectF(8, 11, 22, 22))
@@ -707,10 +797,12 @@ class PickerRow(View):
         m1, m2 = ui.QFontMetricsF(f1), ui.QFontMetricsF(f2)
         p.setPen(Qt.NoPen)
         p.setBrush(ui.resolve(self.scene, "ink1"))
-        p.drawPath(render.text_path(QPointF(0, 0), f1, ui.ellipsize(self.e.get("name") or self.e["entity_id"], f1, self.w - 56),
+        right = 48 if multi else 0
+        p.drawPath(render.text_path(QPointF(0, 0), f1, ui.ellipsize(self.e.get("name") or self.e["entity_id"], f1,
+                                                                     self.w - 56 - right),
                                     40, 6 + (16 - m1.height() / 10) / 2 + m1.ascent() / 10))
         p.setBrush(ui.resolve(self.scene, "ink2"))
-        p.drawPath(render.text_path(QPointF(0, 0), f2, ui.ellipsize(self.e["entity_id"], f2, self.w - 56), 40,
+        p.drawPath(render.text_path(QPointF(0, 0), f2, ui.ellipsize(self.e["entity_id"], f2, self.w - 56 - right), 40,
                                     24 + (14 - m2.height() / 10) / 2 + m2.ascent() / 10))
 
 

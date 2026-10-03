@@ -37,8 +37,10 @@ SUPPORTED_DOMAINS = [
     "lock", "vacuum", "camera", "scene", "script", "automation",
     "sensor", "binary_sensor", "input_boolean", "weather",
 ]
-# What a widget shows: its devices as tiles, or one of the other kinds (nativeui/kinds.py).
+# What a widget shows: its devices as tiles, or one of the other kinds (nativeui/kinds.py). A widget is made
+# of its kind (dragged from the editor's palette) and keeps it; the other kinds have a size of their own.
 WIDGET_KINDS = ("tiles", "weather", "camera", "chart", "shortcuts")
+KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4", "shortcuts": "2x4"}
 
 DEFAULT_CONFIG = {
     "ha_url": "http://homeassistant.local:8123",
@@ -176,13 +178,14 @@ def _clean_widget(w, fallback_xy=(200, 200)):
         y = int(w.get("y", fallback_xy[1]))
     except (TypeError, ValueError):
         x, y = fallback_xy
+    kind = w.get("kind") if w.get("kind") in WIDGET_KINDS else "tiles"
     return {
         "id": str(w.get("id") or new_widget_id()),
-        "size": size if size in WIDGET_SIZES else DEFAULT_WIDGET_SIZE,
+        "size": KIND_SIZE.get(kind) or (size if size in WIDGET_SIZES else DEFAULT_WIDGET_SIZE),
         "x": x,
         "y": y,
         "tiles": [_migrate_tile(t) for t in (w.get("tiles") or [])],
-        "kind": w.get("kind") if w.get("kind") in WIDGET_KINDS else "tiles",
+        "kind": kind,
     }
 
 

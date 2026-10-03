@@ -564,8 +564,6 @@ class Api:
             mine = self._widget_cfg(incoming.get("id"))
             if mine is not None:
                 mine["tiles"] = self._clean_tiles(incoming.get("tiles"))
-                if incoming.get("kind") in cfgmod.WIDGET_KINDS:
-                    mine["kind"] = incoming["kind"]
         self._tiles_changed()
         return True
 
@@ -581,18 +579,37 @@ class Api:
     # The editor suggests no more widgets than this (each has its own glass to keep).
     WIDGET_SOFT_LIMIT = 6
 
-    def add_widget(self, size="2x4"):
-        size = size if size in cfgmod.WIDGET_SIZES else cfgmod.DEFAULT_WIDGET_SIZE
+    def add_widget(self, size="2x4", kind="tiles"):
+        kind = kind if kind in cfgmod.WIDGET_KINDS else "tiles"
+        size = cfgmod.KIND_SIZE.get(kind) or (size if size in cfgmod.WIDGET_SIZES else cfgmod.DEFAULT_WIDGET_SIZE)
         widgets = self._cfg.setdefault("widgets", [])
         x, y = self._next_widget_position()
         widget = {"id": cfgmod.new_widget_id(), "size": size,
-                  "x": x, "y": y, "tiles": []}
+                  "x": x, "y": y, "tiles": self._first_of_kind(kind), "kind": kind}
         widgets.append(widget)
         cfgmod.save_config(self._cfg)
         _create_widget_window(self, widget, show=True)
         self._push_prefs()
         return {"id": widget["id"], "soft_limit": self.WIDGET_SOFT_LIMIT,
                 "count": len(widgets)}
+
+    def _first_of_kind(self, kind):
+        """What a new widget of this kind starts with: a weather or a camera shows the first there is (the
+        editor changes it); the others start empty."""
+        domain = {"weather": "weather", "camera": "camera"}.get(kind)
+        if not domain or not self._cfg.get("ha_token"):
+            return []
+        try:
+            states = self._client.get_states()
+        except Exception:
+            return []
+        for s in sorted(states, key=lambda s: s.get("entity_id", "")):
+            eid = s.get("entity_id", "")
+            if cfgmod.domain_of(eid) == domain:
+                name = (s.get("attributes") or {}).get("friendly_name") or eid
+                return self._clean_tiles([{"id": os.urandom(4).hex(), "entity": eid, "domain": domain,
+                                           "room": name}])
+        return []
 
     def _next_widget_position(self):
         """Beside the newest widget, or below the row when that runs off
@@ -672,11 +689,11 @@ class Api:
         return {"monitors": [{k: m[k] for k in ("x", "y", "w", "h")} for m in _monitors()],
                 "widgets": widgets}
 
-    def begin_widget_drag(self, size="2x4"):
+    def begin_widget_drag(self, size="2x4", kind="tiles"):
         """Make a widget under the pointer and carry it along, snapping, until
         the left button is released - so it can be dragged from the editor
         straight onto the desktop."""
-        added = self.add_widget(size)
+        added = self.add_widget(size, kind)
         threading.Thread(target=self._carry_widget, args=(added["id"],),
                          daemon=True).start()
         return added
@@ -741,8 +758,8 @@ class Api:
 
     def set_widget_size(self, widget_id, size):
         widget = self._widget_cfg(widget_id)
-        if widget is None or size not in cfgmod.WIDGET_SIZES:
-            return False
+        if widget is None or size not in cfgmod.WIDGET_SIZES or widget.get("kind", "tiles") != "tiles":
+            return False                  # the other kinds keep their own size
         widget["size"] = size
         cfgmod.save_config(self._cfg)
         self._push_prefs()

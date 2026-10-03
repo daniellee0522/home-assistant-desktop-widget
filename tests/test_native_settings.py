@@ -74,8 +74,8 @@ class FakeApi:
     def move_widget(self, i, x, y):
         return {"x": x, "y": y}
 
-    def begin_widget_drag(self, s):
-        self.calls.append(("drag", s))
+    def begin_widget_drag(self, s, kind="tiles"):
+        self.calls.append(("drag", s) if kind == "tiles" else ("drag", s, kind))
         return {"id": "w9"}
 
     def set_start_on_boot(self, on):
@@ -180,6 +180,9 @@ class Editor(unittest.TestCase):
         sc.drag_new_widget("2x2")
         pump(700)
         self.assertIn(("drag", "2x2"), api.calls)
+        sc.drag_new_kind("camera")
+        pump(700)
+        self.assertIn(("drag", "2x4", "camera"), api.calls)
         win.dispose()
 
     def test_panel_list_is_its_own(self):

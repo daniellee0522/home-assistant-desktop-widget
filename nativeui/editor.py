@@ -1,5 +1,6 @@
-"""The widget editor of Settings: the sizes to drag onto the desktop, a map of the desktop, the selected
-widget as it will look (tiles drag to reorder), and its list of devices. The page's openEditor and its
+"""The widget editor of Settings: the widgets to drag onto the desktop (the tiles in their four sizes and the
+other kinds, each in its own size), a map of the desktop, the selected widget as it will look (tiles drag to
+reorder, the others making room as they will), and its list of devices. The page's openEditor and its
 renderers."""
 import threading
 import time
@@ -7,10 +8,10 @@ import traceback
 import uuid
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPixmap, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
 
 from . import kinds, render, ui
-from .ui import Button, CheckRow, Label, Rect, ScrollView, TextField, View
+from .ui import Button, CheckRow, Label, Rect, TextField, View
 
 PANEL_ID = "__panel"
 SIZES = ["1x1", "2x2", "2x4", "4x4"]
@@ -20,10 +21,36 @@ EDITOR_W = 800
 LEFT_X, LEFT_W = 18, 300
 RIGHT_X = LEFT_X + LEFT_W + 22
 RIGHT_W = EDITOR_W - 18 - RIGHT_X
+ROW_STEP = 46                    # a device row and the space under it
+# what the list of devices is called, and its button, by the widget's kind
+LIST_TITLE = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "感測器", "shortcuts": "捷徑"}
+ADD_TEXT = {"tiles": "+ 新增配件", "weather": "選擇天氣", "camera": "選擇攝影機", "chart": "+ 新增感測器",
+            "shortcuts": "+ 新增捷徑"}
 
 
 def new_tile_id():
     return str(uuid.uuid4())
+
+
+def device_image(p, w, h, draw):
+    """A picture of w x h of the painter's units at the device's resolution: draw(q) paints it in those units."""
+    k = p.transform().m11() or 1.0
+    img = QImage(max(1, round(w * k) + 2), max(1, round(h * k) + 2), QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    q = QPainter(img)
+    q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+    q.scale(k, k)
+    try:
+        draw(q)
+    finally:
+        q.end()                          # (a painter left open on a picture brings Qt down when it is freed)
+    return img
+
+
+def put_image(p, img, x, y):
+    """A device_image at (x, y) of the painter's units, on whole device pixels (crisp)."""
+    ox, oy, _, _ = ui.on_pixels(p, x, y)
+    ui.draw_device_image(p, img, ox, oy)
 
 
 class PreviewBackdrop(View):
@@ -50,11 +77,11 @@ class Chip(Button):
 
 
 class Palette(View):
-    """The sizes, drawn in proportion; pressing one makes a real widget that follows the pointer."""
+    """What can be dragged onto the desktop: a widget of tiles in each size (drawn in proportion), then the other
+    kinds of widget (drawn as they look). Pressing one makes a real widget that follows the pointer."""
 
-    def __init__(self, scene_ref, on_press_size):
+    def __init__(self, scene_ref, on_press_size, on_press_kind=None):
         super().__init__(0, 0, LEFT_W, 0)
-        x = y = 0
         items = []
         for size in SIZES:
             cols, rows = render.SIZES[size]
@@ -81,7 +108,60 @@ class Palette(View):
                 self.add(item)
                 x += bw + 16
             y += lh + 14
+        if on_press_kind is not None:
+            self.add(Label("天氣、攝影機、圖表與捷徑", 11.5, QFont.Normal, "ink2", x=0, y=y - 4))
+            y += 14 + 8
+            gap = 12
+            kw = (LEFT_W - gap) / 2
+            others = kinds.KINDS[1:]
+            for i, kind in enumerate(others):
+                item = KindItem(kind, kw, on_press_kind)
+                item.x, item.y = (i % 2) * (kw + gap), y + (i // 2) * (item.h + 14)
+                self.add(item)
+            y += ((len(others) + 1) // 2) * (item.h + 14)
         self.h = y - 14
+
+
+class KindItem(View):
+    """A kind of widget in the palette, drawn as it looks (with made-up devices), its name under it."""
+    cursor = Qt.OpenHandCursor
+
+    def __init__(self, kind, w, on_press_kind):
+        self.kind, self.size_key = kind, kinds.KIND_SIZE[kind]
+        cw, ch = render.widget_size(self.size_key)
+        self.bw, self.bh = w, round(w * ch / cw)
+        super().__init__(0, 0, w, self.bh + 6 + 14)
+        self.interactive = True
+        self.on_press = lambda e: (on_press_kind(kind), True)[1]
+        self.on_enter = self.on_leave = lambda e: self.changed()
+        self.pic = None
+
+    def paint(self, p):
+        up = -2 if self.hovered else 0
+        sc = self.scene
+        key = (sc.theme, sc.style, render._language, p.transform().m11())
+        if self.pic is None or self.pic[0] != key:
+            cw, _ = render.widget_size(self.size_key)
+            tiles, states, extras = kinds.sample(self.kind)
+
+            def draw(q):
+                q.scale(self.bw / cw, self.bw / cw)
+                kinds.draw_widget(q, self.kind, self.size_key, tiles, states, sc.theme, 1.0, False, sc.style, None,
+                                  sc.theme_raw, extras, False)
+            self.pic = (key, device_image(p, self.bw, self.bh, draw))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 34 if self.hovered else 20))
+        p.drawPath(render.squircle(0, up + 2, self.bw, self.bh, 15))
+        p.setBrush(ui.resolve(sc, "btn_fill_strong"))
+        p.drawPath(render.squircle(0, up, self.bw, self.bh, 15))
+        put_image(p, self.pic[1], 0, up)
+        f = ui.font(12)
+        fm = ui.QFontMetricsF(f)
+        text = render.tr(kinds.KIND_LABELS[self.kind])
+        tw = ui.text_width(text, f)
+        p.setBrush(ui.resolve(sc, "ink1" if self.hovered else "ink2"))
+        p.drawPath(render.text_path(QPointF(0, 0), f, text, (self.w - tw) / 2,
+                                    self.bh + 6 + (14 - fm.height() / 10) / 2 + fm.ascent() / 10))
 
 
 class PaletteItem(View):
@@ -230,22 +310,36 @@ class MapBox(View):
 
 
 class Preview(View):
-    """The selected widget as it will look on the desktop; tiles drag to reorder, a cross removes one."""
+    """The selected widget as it will look on the desktop. A tile dragged follows the pointer and the others
+    make room for it where they will be (sliding there); a cross removes one. A weather, a camera or a chart is
+    one picture."""
 
     def __init__(self, editor, widget, zoom, form):
         self.editor, self.widget, self.form_override = editor, widget, form
         size = "2x4" if widget.get("panel") else widget["size"]
         self.size_key = size
+        self.kind = "tiles" if widget.get("panel") else (widget.get("kind") or "tiles")
         w, h = render.widget_size(size)
         self.zoom_k = zoom
         super().__init__(0, 0, round(w * zoom), round(h * zoom))
         self.interactive = True
         self.cw, self.ch = w, h
-        self.form, self.rects = render.tile_layout(size, len(widget["tiles"]), form)
+        n = len(widget["tiles"])
+        if self.kind == "tiles":
+            self.form, self.rects = render.tile_layout(size, n, form)
+        elif self.kind == "shortcuts":
+            self.form, self.rects = render.tile_layout(size, n, "small")
+        else:
+            self.form, self.rects = "small", []
+        # only the tiles in sight take the pointer and the drop
+        self.slots = [i for i, r in enumerate(self.rects) if r[1] + r[3] <= h - render.PAD + 1]
         self.press = None
-        self.drop = None
         self.hover = -1
-        self.cache = None
+        self.cache = None                    # the card (or the whole of a weather, a camera, a chart)
+        self.pics = {}                       # each tile's picture
+        # where each tile is drawn, sliding to its place: a drop leaves them where they were seen
+        self.pos = dict(getattr(editor, "preview_landing", None) or {})
+        editor.preview_landing = None
         self.on_press = self._press
         self.on_move = self._move
         self.on_release = self._release
@@ -253,11 +347,13 @@ class Preview(View):
 
     def invalidate(self):
         self.cache = None
+        self.pics.clear()
         self.changed()
 
     def tile_at(self, x, y):
         x, y = x / self.zoom_k, y / self.zoom_k
-        for i, (tx, ty, tw, th) in enumerate(self.rects):
+        for i in self.slots:
+            tx, ty, tw, th = self.rects[i]
             if tx <= x < tx + tw and ty <= y < ty + th:
                 return i
         return -1
@@ -276,6 +372,17 @@ class Preview(View):
     def hovered_move(self, x, y):
         self._set_hover(self.tile_at(x, y))
 
+    def dragging(self):
+        return bool(self.press and self.press["dragging"])
+
+    def order(self):
+        """The tiles as they will be: the one dragged where it would be dropped."""
+        tiles = list(self.widget["tiles"])
+        if self.dragging():
+            t = tiles.pop(self.press["i"])
+            tiles.insert(self.press["to"], t)
+        return tiles
+
     def _press(self, e):
         i = self.tile_at(e.x, e.y)
         if i < 0:
@@ -283,7 +390,9 @@ class Preview(View):
         if self.remove_hit(i, e.x, e.y):
             self.editor.remove_tile_at(i)
             return True
-        self.press = {"i": i, "start": (e.gx, e.gy), "dragging": False}
+        tx, ty, _, _ = self.rects[i]
+        self.press = {"i": i, "to": i, "start": (e.gx, e.gy), "dragging": False,
+                      "grab": (e.x / self.zoom_k - tx, e.y / self.zoom_k - ty), "at": (e.x, e.y)}
         return True
 
     def _move(self, e):
@@ -294,63 +403,121 @@ class Preview(View):
             if ((e.gx - pr["start"][0]) ** 2 + (e.gy - pr["start"][1]) ** 2) ** 0.5 < 6:
                 return True
             pr["dragging"] = True
-        j = self.tile_at(e.x, e.y)
-        if j >= 0:
-            tx, ty, tw, th = self.rects[j]
-            before = e.x / self.zoom_k < tx + tw / 2
-            self.drop = (j, before)
+            self.hover = -1
+        pr["at"] = (e.x, e.y)
+        # the place whose middle is nearest the middle of the tile carried
+        _, _, tw, th = self.rects[pr["i"]]
+        cx = e.x / self.zoom_k - pr["grab"][0] + tw / 2
+        cy = e.y / self.zoom_k - pr["grab"][1] + th / 2
+        pr["to"] = min(self.slots, key=lambda j: (self.rects[j][0] + self.rects[j][2] / 2 - cx) ** 2
+                       + (self.rects[j][1] + self.rects[j][3] / 2 - cy) ** 2)
         self.changed()
         return True
 
     def _release(self, e):
-        pr, drop = self.press, self.drop
-        self.press = self.drop = None
-        if pr and pr["dragging"] and drop:
-            j, before = drop
-            to = j + (0 if before else 1)
-            frm = pr["i"]
-            if frm < to:
-                to -= 1
-            if to != frm:
-                self.editor.move_tile(frm, to)
+        pr, self.press = self.press, None
+        if pr and pr["dragging"] and pr["to"] != pr["i"]:
+            self.editor.preview_landing = dict(self.pos)   # the next preview slides on from here
+            self.editor.move_tile(pr["i"], pr["to"])
+            return True
         self.changed()
         return True
 
-    def paint(self, p):
-        s = self.scene.scale / self.scene.dpi
-        key = (self.scene.theme, self.scene.style, repr(self.widget["tiles"]), self.widget.get("kind"), self.zoom_k,
-               repr({t["entity"]: self.editor.states.get(t["entity"]) for t in self.widget["tiles"]}), self.hover)
+    def _card(self, p):
+        sc = self.scene
+        tiles = self.widget["tiles"]
+        whole = self.kind not in ("tiles", "shortcuts")
+        key = (sc.theme, sc.style, self.kind, self.zoom_k, p.transform().m11(), render._language,
+               repr(tiles) if whole else None,
+               repr({t["entity"]: self.editor.states.get(t["entity"]) for t in tiles}) if whole else None)
         if self.cache is None or self.cache[0] != key:
-            img = QImage(round(self.w * s) + 2, round(self.h * s) + 2, QImage.Format_ARGB32_Premultiplied)
-            img.fill(Qt.transparent)
-            q = QPainter(img)
-            q.scale(s * self.zoom_k, s * self.zoom_k)
-            kind = self.widget.get("kind") or "tiles"
-            if kind == "tiles":
-                render.draw_widget(q, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme, None,
-                                   1.0, False, self.scene.style, None, self.scene.theme_raw, self.form_override, False)
-            else:
-                kinds.draw_widget(q, kind, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme,
-                                  1.0, False, self.scene.style, None, self.scene.theme_raw, None, False)
-            q.end()
-            pix = QPixmap.fromImage(img)
-            pix.setDevicePixelRatio(s)
-            self.cache = (key, pix)
-        p.drawPixmap(0, 0, self.cache[1])
+            z = self.zoom_k
+
+            def draw(q):
+                q.scale(z, z)
+                if self.kind == "tiles":
+                    render.draw_widget(q, self.size_key, [], {}, sc.theme, None, 1.0, False, sc.style, None,
+                                       sc.theme_raw, self.form_override, False)
+                else:
+                    kinds.draw_widget(q, self.kind, self.size_key, tiles if whole else [], self.editor.states,
+                                      sc.theme, 1.0, False, sc.style, None, sc.theme_raw, None, False)
+            self.cache = (key, device_image(p, self.w, self.h, draw))
+        return self.cache[1]
+
+    def _tile_pic(self, p, tile, slot, w, h):
+        sc = self.scene
+        st = self.editor.states.get(tile["entity"])
+        key = (repr(tile), repr(st), sc.theme, sc.style, self.form, self.zoom_k, p.transform().m11(),
+               slot % len(kinds.SHORTCUT_COLORS) if self.kind == "shortcuts" else 0)
+        pic = self.pics.get(key)
+        if pic is None:
+            z = self.zoom_k
+
+            def draw(q):
+                q.scale(z, z)
+                if self.kind == "shortcuts":
+                    kinds.draw_shortcuts(q, [tile], [(0, 0, w, h)], self.editor.states, None, first=slot)
+                else:
+                    render.draw_tile(q, tile, st, 0, 0, w, h, sc.theme, render.tokens(sc.theme, False, sc.style),
+                                     self.form)
+            if len(self.pics) > 64:
+                self.pics.clear()
+            pic = self.pics[key] = device_image(p, w * z, h * z, draw)
+        return pic
+
+    def paint(self, p):
         z = self.zoom_k
-        if self.press and self.press["dragging"]:
-            tx, ty, tw, th = self.rects[self.press["i"]]
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 90))
-            p.drawPath(render.squircle(tx * z, ty * z, tw * z, th * z, 62 * z))
-        if self.drop:
-            j, before = self.drop
+        put_image(p, self._card(p), 0, 0)
+        if self.kind not in ("tiles", "shortcuts"):
+            return
+        pr = self.press if self.dragging() else None
+        moving = False
+        p.save()
+        p.setClipRect(QRectF(render.PAD * z, render.PAD * z, (self.cw - 2 * render.PAD) * z,
+                             (self.ch - 2 * render.PAD) * z))
+        for j, tile in enumerate(self.order()):
+            if j >= len(self.rects):
+                break
             tx, ty, tw, th = self.rects[j]
+            if pr and j == pr["to"]:
+                # where the tile carried will land
+                col = ui.resolve(self.scene, "white" if self.scene.theme == "dark" else "ink2")
+                col.setAlphaF(0.6)
+                p.setPen(QPen(col, 1.5, Qt.DashLine))
+                fill = QColor(col)
+                fill.setAlphaF(0.10)
+                p.setBrush(fill)
+                p.drawPath(render.squircle(tx * z + 1, ty * z + 1, tw * z - 2, th * z - 2, 62 * z))
+                continue
+            at = self.pos.get(tile["id"])
+            if at is None or (abs(at[0] - tx) < 0.5 and abs(at[1] - ty) < 0.5):
+                at = [tx, ty]
+            else:
+                at = [at[0] + (tx - at[0]) * 0.3, at[1] + (ty - at[1]) * 0.3]
+                moving = True
+            self.pos[tile["id"]] = at
+            put_image(p, self._tile_pic(p, tile, j, tw, th), at[0] * z, at[1] * z)
+        p.restore()
+        if pr:
+            # the tile carried, a little larger, over the others
+            tile = self.widget["tiles"][pr["i"]]
+            _, _, tw, th = self.rects[pr["i"]]
+            x, y = pr["at"][0] / z - pr["grab"][0], pr["at"][1] / z - pr["grab"][1]
+            self.pos[tile["id"]] = [x, y]
+            pic, k = self._tile_pic(p, tile, pr["to"], tw, th), p.transform().m11() or 1.0
+            p.save()
+            p.translate((x + tw / 2) * z, (y + th / 2) * z)
+            p.scale(1.05, 1.05)
+            p.translate(-tw / 2 * z, -th / 2 * z)
             p.setPen(Qt.NoPen)
-            p.setBrush(ui.resolve(self.scene, "accent_blue"))
-            x = tx * z if before else (tx + tw) * z - 6
-            p.drawRoundedRect(QRectF(x, ty * z + 8 * z, 6, th * z - 16 * z), 3, 3)
-        if 0 <= self.hover < len(self.rects) and not (self.press and self.press["dragging"]):
+            for spread, a in ((12, 16), (6, 26)):
+                p.setBrush(QColor(0, 0, 0, a))
+                p.drawPath(render.squircle(-spread / 2, spread / 2, tw * z + spread, th * z + spread, 66 * z))
+            p.drawImage(QRectF(0, 0, pic.width() / k, pic.height() / k), pic)
+            p.restore()
+        if moving:
+            QTimer.singleShot(16, self.changed)
+        if self.hover in self.slots and not pr:
             tx, ty, tw, th = self.rects[self.hover]
             cx, cy = (tx + tw - 8 - 12) * z, (ty + 8 + 12) * z
             p.setPen(Qt.NoPen)
@@ -367,8 +534,9 @@ class TileRow(View):
     """One device of the list: a handle, its icon, its name and entity, the temperature step of a climate, a cross."""
 
     def __init__(self, editor, tile, index, w):
-        super().__init__(0, 0, w, 40)
+        super().__init__(0, index * ROW_STEP, w, 40)
         self.editor, self.tile, self.index = editor, tile, index
+        self.goal = self.y
         self.interactive = True
         self.cursor = Qt.OpenHandCursor
         self.press = None
@@ -415,34 +583,59 @@ class TileRow(View):
         self.editor.build()
 
     def _press(self, e):
-        self.press = {"start": (e.gx, e.gy), "dragging": False}
+        self.press = {"start": (e.gx, e.gy), "dragging": False, "grab": e.y, "to": self.index}
         return True
 
     def _move(self, e):
         pr = self.press
         if not pr:
             return True
+        host = self.parent
         if not pr["dragging"]:
             if abs(e.gy - pr["start"][1]) < 6:
                 return True
             pr["dragging"] = True
-        host = self.parent
+            self.lifted = True
+            host.children.remove(self)              # over the others
+            host.children.append(self)
+            self.cursor = Qt.ClosedHandCursor
+        rows = [c for c in host.children if isinstance(c, TileRow)]
         ly = host.to_local(e.gx, e.gy)[1]
-        self.editor.list_drop = max(0, min(len(host.children) - 1, int(ly // 46)))
+        self.stop_animation()
+        self.y = max(-8.0, min((len(rows) - 1) * ROW_STEP + 8.0, ly - pr["grab"]))
+        to = max(0, min(len(rows) - 1, round(self.y / ROW_STEP)))
+        pr["to"] = to
+        slot = 0
+        for r in sorted((r for r in rows if r is not self), key=lambda r: r.index):
+            if slot == to:
+                slot += 1
+            if r.goal != slot * ROW_STEP:
+                r.goal = slot * ROW_STEP
+                r.animate(160, "out", y=r.goal)
+            slot += 1
         host.changed()
         return True
 
     def _release(self, e):
         pr, self.press = self.press, None
-        drop = getattr(self.editor, "list_drop", None)
-        self.editor.list_drop = None
-        if pr and pr["dragging"] and drop is not None and drop != self.index:
-            self.editor.move_tile(self.index, drop)
+        if not pr or not pr["dragging"]:
+            return True
+        self.cursor = Qt.OpenHandCursor
+        if pr["to"] != self.index:
+            self.editor.move_tile(self.index, pr["to"])
+        else:
+            self.lifted = False
+            self.animate(160, "out", y=self.index * ROW_STEP)
         return True
 
     def paint(self, p):
-        p.setPen(QPen(ui.resolve(self.scene, "input_border"), 1))
-        p.setBrush(ui.resolve(self.scene, "input_bg"))
+        if self.lifted:
+            p.setPen(Qt.NoPen)
+            for spread, a in ((10, 14), (4, 22)):
+                p.setBrush(QColor(0, 0, 0, a))
+                p.drawRoundedRect(QRectF(-spread / 2, spread / 2 + 2, self.w + spread, self.h + spread / 2), 22, 22)
+        p.setPen(QPen(ui.resolve(self.scene, "accent_blue" if self.lifted else "input_border"), 1))
+        p.setBrush(ui.resolve(self.scene, "panel_solid" if self.lifted else "input_bg"))
         p.drawRoundedRect(QRectF(0.5, 0.5, self.w - 1, self.h - 1), 20, 20)
         ink2 = ui.resolve(self.scene, "ink2")
         f = ui.font(13)
@@ -461,16 +654,13 @@ class TileRow(View):
             p.setBrush(ink2)
             p.drawPath(render.text_path(QPointF(0, 0), f2, ui.ellipsize(self.tile["entity"], f2, self.text_w), 66,
                                         21 + (13 - m2.height() / 10) / 2 + m2.ascent() / 10))
-        d = getattr(self.editor, "list_drop", None)
-        if d is not None and self.press and self.press["dragging"] is False:
-            pass
 
 
 class EditorMixin:
     def editor_init(self):
         self.editor_dragging = False
         self.layout = None
-        self.list_drop = None
+        self.preview_landing = None
         self.layout_timer = QTimer(self)
         self.layout_timer.setInterval(900)
         self.layout_timer.timeout.connect(self._poll_layout)
@@ -502,21 +692,15 @@ class EditorMixin:
         w = self.settings_widget()
         return (w.get("kind") or "tiles") if w and not w.get("panel") else "tiles"
 
-    def set_kind(self, kind):
-        """What the widget shows. Its devices that the kind cannot show go (a weather keeps its weather)."""
-        w = self.settings_widget()
-        if not w or w.get("panel") or (w.get("kind") or "tiles") == kind:
-            return
-        w["kind"] = kind
-        if kind != "tiles":
-            keep = kinds.shown(kind, w["tiles"])
-            w["tiles"] = [t for t in w["tiles"] if t in keep]
-        self.persist()
-        self.build()
+    def room_left(self):
+        """How many more devices the widget takes (None: any number)."""
+        kind = self.current_kind()
+        return None if kind not in kinds.KIND_MAX else max(0, kinds.KIND_MAX[kind] - len(self.current_tiles()))
 
     def can_add(self):
-        kind = self.current_kind()
-        return kind not in kinds.KIND_MAX or len(self.current_tiles()) < kinds.KIND_MAX[kind]
+        """Whether its button adds (a weather or a camera full is changed instead: one in place of the other)."""
+        left = self.room_left()
+        return left is None or left > 0 or kinds.KIND_MAX.get(self.current_kind()) == 1
 
     def own_panel_tiles(self):
         panel = self.prefs.setdefault("panel", {"mode": "grid", "tiles": None, "home_tiles": []})
@@ -614,20 +798,28 @@ class EditorMixin:
             self.build()
 
     def add_entity(self, e):
-        tile = {"id": new_tile_id(), "entity": e["entity_id"], "domain": e["domain"], "room": e.get("name") or e["entity_id"],
-                "label": "", "icon": "", "on_mode": "cool", "temp_step": 1}
+        self.add_entities([e])
+
+    def add_entities(self, ents):
+        """The devices chosen in the picker, at the end of the widget's (a weather's or a camera's in place of
+        the one it had); back to the page the picker came from."""
         w = self.settings_widget()
-        if w is not None:
-            w["tiles"].append(tile)
-        if e.get("state") and e["entity_id"] not in self.states:
-            self.states[e["entity_id"]] = e["state"]
-        self.persist()
+        if w is not None and ents:
+            if kinds.KIND_MAX.get(self.current_kind()) == 1:
+                w["tiles"] = []
+            for e in ents:
+                w["tiles"].append({"id": new_tile_id(), "entity": e["entity_id"], "domain": e["domain"],
+                                   "room": e.get("name") or e["entity_id"], "label": "", "icon": "",
+                                   "on_mode": "cool", "temp_step": 1})
+                if e.get("state") and e["entity_id"] not in self.states:
+                    self.states[e["entity_id"]] = e["state"]
+            self.persist()
         self.page = self.return_page
         self.build()
 
     def set_size(self, size):
         w = self.settings_widget()
-        if not w or w.get("panel") or w["size"] == size:
+        if not w or w.get("panel") or w["size"] == size or (w.get("kind") or "tiles") != "tiles":
             return
         w["size"] = size
 
@@ -669,12 +861,15 @@ class EditorMixin:
         threading.Thread(target=go, daemon=True).start()
         self.build()
 
-    def drag_new_widget(self, size):
+    def drag_new_kind(self, kind):
+        self.drag_new_widget(kinds.KIND_SIZE[kind], kind)
+
+    def drag_new_widget(self, size, kind="tiles"):
         self.editor_dragging = True
 
         def go():
             try:
-                r = self.facade.api.begin_widget_drag(size)
+                r = self.facade.api.begin_widget_drag(size, kind)
                 if r and r.get("id"):
                     self.facade.run_on_ui_thread(lambda: setattr(self, "widget_id", r["id"]))
             except Exception:
@@ -701,7 +896,7 @@ class EditorMixin:
         y = 2
         body.add(Label("拖曳到桌面新增", 12, QFont.DemiBold, "ink2", x=LEFT_X, y=y))
         y += 14.4 + 8
-        pal = Palette(self, self.drag_new_widget)
+        pal = Palette(self, self.drag_new_widget, self.drag_new_kind)
         pal.x, pal.y = LEFT_X, y
         body.add(pal)
         y += pal.h
@@ -733,7 +928,9 @@ class EditorMixin:
         row_y = y
         chips = []
         for i, w in enumerate(self.widgets()):
-            chips.append(Chip("#%d · %s" % (i + 1, w["size"]), (widget and w["id"] == widget["id"]),
+            kind = w.get("kind") or "tiles"
+            what = w["size"] if kind == "tiles" else render.tr(kinds.KIND_LABELS[kind])
+            chips.append(Chip("#%d · %s" % (i + 1, what), (widget and w["id"] == widget["id"]),
                               lambda e, wid=w["id"]: self.select_widget(wid)))
         chips.append(Chip("系統匣面板", on_panel, lambda e: self.select_widget(PANEL_ID)))
         for c in chips:
@@ -743,7 +940,9 @@ class EditorMixin:
             body.add(c)
             x += c.w + 6
         y = row_y + 28
-        body.add(Label("預覽（拖曳配件調整順序）", 12, QFont.DemiBold, "ink2", x=RIGHT_X, y=y + 12))
+        kind = self.current_kind()
+        body.add(Label("預覽（拖曳配件調整順序）" if kind in ("tiles", "shortcuts") else "預覽", 12, QFont.DemiBold,
+                       "ink2", x=RIGHT_X, y=y + 12))
         y += 12 + 14.4 + 8
         if widget:
             w, h = render.widget_size("2x4" if on_panel else widget["size"])
@@ -755,19 +954,25 @@ class EditorMixin:
             body.add(prev)
             self.preview = prev
             if not widget["tiles"]:
-                body.add(Label("尚無配件，按下方「新增配件」", 15, QFont.Normal, "white", x=RIGHT_X + 20, y=y + box_h / 2 - 10,
-                               w=RIGHT_W - 40, align="c"))
+                body.add(Label("尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), 15, QFont.Normal,
+                               "white", x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
             y += box_h
         # the tools
         ty = y + 12
         tx = RIGHT_X
-        if not on_panel:
+        if not on_panel and kind == "tiles":
             for size in SIZES:
                 c = Chip(size, bool(widget and widget["size"] == size), lambda e, s=size: self.set_size(s))
                 c.x, c.y = tx, ty
                 body.add(c)
                 tx += c.w + 6
             tx += 6
+        elif not on_panel:
+            note = Label("%s Widget · %s" % (render.tr(kinds.KIND_LABELS[kind]), widget["size"]), 12, QFont.Normal,
+                         "ink2", x=tx, y=ty + 6)
+            body.add(note)
+            tx += note.w + 14
+        if not on_panel:
             rm = Button("刪除此 Widget", size=12, weight=QFont.DemiBold, h=28, pad=12, color="accent_red",
                         on_click=lambda e: self.remove_widget())
             if len(self.widgets()) <= 1:
@@ -776,18 +981,6 @@ class EditorMixin:
             rm.x, rm.y = tx, ty
             body.add(rm)
             tx += rm.w + 6
-        if not on_panel:
-            tx, ty = RIGHT_X, ty + 28 + 8
-            body.add(Label("類型", 12, QFont.DemiBold, "ink2", x=tx, y=ty + 6))
-            tx += 40
-            for k in kinds.KINDS:
-                c = Chip(kinds.KIND_LABELS[k], self.current_kind() == k, lambda e, k=k: self.set_kind(k))
-                if tx + c.w > EDITOR_W - 18:
-                    tx, ty = RIGHT_X + 40, ty + 28 + 6
-                c.x, c.y = tx, ty
-                body.add(c)
-                tx += c.w + 6
-            tx = EDITOR_W
         if on_panel or isinstance(panel.get("tiles"), list):
             fo = Button("改為顯示所有 Widget 的配件", size=12, weight=QFont.DemiBold, h=28, pad=12,
                         on_click=lambda e: self.follow_widgets())
@@ -798,20 +991,24 @@ class EditorMixin:
         y = ty + 28 + 10
         # the devices
         tiles = widget["tiles"] if widget else []
-        body.add(Label("%s (%d)" % (render.tr("配件"), len(tiles)), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5, spacing=0.36))
-        add = Button("+ 新增配件", size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue", hover_fill="accent_blue",
+        cap = kinds.KIND_MAX.get(kind)
+        count = ("%d/%d" % (len(tiles), cap)) if cap and cap > 1 else "%d" % len(tiles)
+        body.add(Label("%s (%s)" % (render.tr(LIST_TITLE[kind]), count), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5,
+                       spacing=0.36))
+        text = ADD_TEXT[kind]
+        if cap == 1 and tiles:
+            text = {"weather": "更換天氣", "camera": "更換攝影機"}[kind]
+        add = Button(text, size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue", hover_fill="accent_blue",
                      color="white", on_click=lambda e: self.open_picker())
-        if not self.can_add():                   # a weather, a camera: one; a chart: three
+        if not self.can_add():                   # a chart: two sensors
             add.alpha, add.interactive = 0.4, False
         add.x, add.y = EDITOR_W - 18 - add.w, y
         body.add(add)
         y += 28 + 8
-        lst = ScrollView(RIGHT_X, y, RIGHT_W, min(190, max(0, len(tiles) * 46 - 6)))
+        # every row shown (the page scrolls), so one can be dragged from the first place to the last
+        lst = View(RIGHT_X, y, RIGHT_W, max(0, len(tiles) * ROW_STEP - 6))
         for i, t in enumerate(tiles):
-            row = TileRow(self, t, i, RIGHT_W)
-            row.y = i * 46
-            lst.add(row)
-        lst.content.w, lst.content.h = RIGHT_W, max(0, len(tiles) * 46 - 6)
+            lst.add(TileRow(self, t, i, RIGHT_W))
         body.add(lst)
         y += lst.h
         body.h = max(left_h, y) + 18
