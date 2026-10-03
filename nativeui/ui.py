@@ -13,7 +13,7 @@ import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage,
-                           QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
+                           QLinearGradient, QPainter, QPainterPath, QPen)
 from PySide6.QtWidgets import QLineEdit, QWidget
 
 from . import render
@@ -103,6 +103,22 @@ def ellipsize(text, f, width):
     while text and text_width(text + "…", f) > width:
         text = text[:-1]
     return text + "…"
+
+
+def on_pixels(p, x, y):
+    """Where (x, y) of the painter's units is on the device, as whole pixels and what was rounded away.
+    A picture drawn between pixels is resampled, which blurs the text in it."""
+    o = p.transform().map(QPointF(x, y))
+    ox, oy = round(o.x()), round(o.y())
+    return ox, oy, o.x() - ox, o.y() - oy
+
+
+def draw_device_image(p, img, ox, oy):
+    """A picture made at the device's resolution, put on the device's pixels as it is."""
+    p.save()
+    p.resetTransform()
+    p.drawImage(ox, oy, img)
+    p.restore()
 
 
 def resolve(scene, color):
@@ -677,7 +693,9 @@ class TileView(View):
         self.invalidate()
 
     def paint(self, p):
-        s = self.scene.scale
+        # Drawn once, at the device's resolution where the tile rests (its zoom and the window's own
+        # entrance only scale that picture), and put on whole pixels there.
+        s = self.scene.scale * self.in_scene()[2]
         key = (self.scene.theme, self.scene.style, self.state and repr(self.state), self.form, self.dim, self.hovered,
                round(self.flash, 2), self.w, self.h, s, self.tile.get("icon"), self.tile.get("room"),
                self.tile.get("label"), render.tr("x"))
@@ -691,14 +709,18 @@ class TileView(View):
                              render.tokens(self.scene.theme, self.dim, self.scene.style), self.form, self.dim,
                              hover=self.hovered, flash=self.flash)
             q.end()
-            self._cache = QPixmap.fromImage(img)
-            self._cache.setDevicePixelRatio(s)
+            self._cache = img
             self._key = key
         if self.lifted:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 80))
             p.drawPath(render.squircle(0, 18, self.w, self.h, self.scene.t["radius_tile"]))
-        p.drawPixmap(0, 0, self._cache)
+        img = self._cache
+        if abs(p.transform().m11() - s) < 1e-4:
+            ox, oy, _, _ = on_pixels(p, 0, 0)
+            draw_device_image(p, img, ox, oy)
+        else:                                   # zoomed for the moment (pressed, coming in): the picture scaled
+            p.drawImage(QRectF(0, 0, img.width() / s, img.height() / s), img)
 
 
 class CheckRow(View):
@@ -1067,13 +1089,15 @@ class Scene(GlassMixin, QWidget):
     def paint_blurred(self, view, p):
         """A view drawn through a blur: the subtree goes to a picture, the picture is blurred."""
         from PIL import Image, ImageFilter
-        s = self.scale / self.dpi
+        s = p.transform().m11()                 # device px to one of the parent's: the picture is made at that
         pad = math.ceil(view.blur * 2)
-        w, h = round((view.w + 2 * pad) * s), round((view.h + 2 * pad) * s)
+        ox, oy, fx, fy = on_pixels(p, view.x + view.dx - pad, view.y + view.dy - pad)
+        w, h = math.ceil((view.w + 2 * pad) * s) + 1, math.ceil((view.h + 2 * pad) * s) + 1
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         q = QPainter(img)
         q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        q.translate(fx, fy)
         q.scale(s, s)
         q.translate(pad - view.x - view.dx, pad - view.y - view.dy)
         saved = view.blur
@@ -1084,19 +1108,19 @@ class Scene(GlassMixin, QWidget):
         pil = Image.frombuffer("RGBA", (w, h), bytes(img.constBits()), "raw", "BGRA", img.bytesPerLine(), 1)
         pil = pil.filter(ImageFilter.GaussianBlur(view.blur * s))
         out = QImage(pil.tobytes("raw", "BGRA"), w, h, QImage.Format_ARGB32_Premultiplied).copy()
-        p.save()
-        p.scale(1 / s, 1 / s)
-        p.drawImage(round((view.x + view.dx - pad) * s), round((view.y + view.dy - pad) * s), out)
-        p.restore()
+        draw_device_image(p, out, ox, oy)
 
     def paint_faded(self, view, p):
-        """A scrolling row whose ends fade out (the capsule rows)."""
-        s = self.scale / self.dpi
-        w, h = round(view.w * s), round(view.h * s)
+        """A scrolling row whose ends fade out (the capsule rows). Made at the device's resolution and put on
+        its pixels: made at the window's own (logical) size and stretched, its words were blurred."""
+        s = p.transform().m11()
+        ox, oy, fx, fy = on_pixels(p, view.x + view.dx, view.y + view.dy)
+        w, h = math.ceil(view.w * s) + 1, math.ceil(view.h * s) + 1
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         q = QPainter(img)
         q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        q.translate(fx, fy)
         q.scale(s, s)
         q.translate(-view.x - view.dx, -view.y - view.dy)
         saved = view.fade
@@ -1116,8 +1140,8 @@ class Scene(GlassMixin, QWidget):
         q.fillRect(0, 0, w, h, QBrush(grad))
         q.end()
         p.save()
-        p.scale(1 / s, 1 / s)
-        p.drawImage(round((view.x + view.dx) * s), round((view.y + view.dy) * s), img)
+        p.resetTransform()
+        p.drawImage(ox, oy, img)
         p.restore()
 
     # -- the pointer ----------------------------------------------------------------------------------

@@ -114,7 +114,9 @@ class Chip(View):
             shape = Rect(0, 0, self.w, self.h, fill, "full")
             shape.scene = self.scene
             shape.paint(p)
-        color = "panel_solid" if self.active else "ink1"
+        # On the chosen one (filled with the ink) the words are solid white, or near black in the dark theme:
+        # in the panel's own tint they looked cut out of the capsule.
+        color = ("#ffffff" if self.scene.theme == "light" else "#111216") if self.active else "ink1"
         f = ui.font(22, QFont.DemiBold)
         fm = QFontMetricsF(f)
         p.setPen(Qt.NoPen)
