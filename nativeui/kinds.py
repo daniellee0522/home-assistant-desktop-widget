@@ -12,7 +12,7 @@ import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontInfo, QLinearGradient, QPainter, QPainterPath, QPen
 
 from . import render
 
@@ -387,13 +387,18 @@ def _on_ring(points, cx, cy, angle):
     return cx + dx * best, cy + dy * best
 
 
+_has_sf = None
+
+
 def clock_font(px):
-    """The clock's digits: SF Compact Rounded where it is installed (Apple's, which may not be shipped with the
-    app), else Arial Rounded MT Bold (with Office), else Windows 11's own Segoe UI Variable Display; semibold."""
-    f = render.font(px, QFont.DemiBold)
-    f.setFamilies(["SF Compact Rounded", "SF Pro Rounded", "Arial Rounded MT Bold", "Segoe UI Variable Display"]
-                  + render.FAMILIES)
-    return f
+    """The clock's digits: SF Compact Rounded Regular where it is installed (Apple's, which may not be shipped
+    with the app), else the app's own face, black, as the clock first had."""
+    global _has_sf
+    f = render.font(px, QFont.Normal)
+    f.setFamilies(["SF Compact Rounded"])
+    if _has_sf is None:                                 # (asked once: installing it takes a restart to show)
+        _has_sf = QFontInfo(f).family().startswith("SF Compact Rounded")
+    return f if _has_sf else render.font(px, QFont.Black)
 
 
 def draw_clock(p, W, H, ink, ink2, now, radius=84):
