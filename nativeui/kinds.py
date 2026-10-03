@@ -9,10 +9,12 @@ What comes from elsewhere than the states (the forecast, the camera's picture, t
 """
 import datetime
 import math
+import os
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontInfo, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPainterPathStroker, QPen,
+                           QTransform)
 
 from . import render
 
@@ -397,59 +399,140 @@ def _on_ring(points, cx, cy, angle):
     return cx + dx * best, cy + dy * best
 
 
-# The clock's faces, best first: (family, weight). Apple's, so used only where installed (they may not be
-# shipped with the app); else the app's own face, black, as the clock first had.
-CLOCK_FACES = (("SF Pro Display", QFont.Medium), ("SF Compact Rounded", QFont.Normal))
+# The clock's digits: SF Pro Freeze (narrow, as iOS's clock widget has them; shipped in nativeui/fonts), made
+# heavier by an outline with round joins, which also rounds their ends. Without it, the app's own face, black.
+CLOCK_FONT_FILE = os.path.join(render.DATA, "fonts", "SFProFreeze-Regular.ttf")
+CLOCK_BOLD = 0.068                       # the outline added round the digits, as a share of their height
 _clock_face = False
 
 
-def clock_font(px):
-    """The clock's digits in the first of CLOCK_FACES that is installed."""
+def clock_face():
+    """(family, added outline) of the clock's digits."""
     global _clock_face
-    if _clock_face is False:                            # (asked once: installing one takes a restart to show)
+    if _clock_face is False:
         _clock_face = None
-        for family, weight in CLOCK_FACES:
-            f = render.font(px, weight)
-            f.setFamilies([family])
-            if QFontInfo(f).family() == family:
-                _clock_face = (family, weight)
-                break
-    if _clock_face is None:
+        if os.path.exists(CLOCK_FONT_FILE):
+            from PySide6.QtGui import QFontDatabase
+            fid = QFontDatabase.addApplicationFont(CLOCK_FONT_FILE)
+            fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+            if fams:
+                _clock_face = (fams[0], CLOCK_BOLD)
+    return _clock_face
+
+
+def clock_font(px):
+    face = clock_face()
+    if face is None:
         return render.font(px, QFont.Black)
-    f = render.font(px, _clock_face[1])
-    f.setFamilies([_clock_face[0]])
+    f = render.font(px, QFont.Normal)
+    f.setFamilies([face[0]])
     return f
 
 
-def draw_clock(p, W, H, ink, ink2, now, radius=84):
-    """The time, large, narrow and tall, inside a ring of minute ticks all alike: this minute's the darkest,
-    the next one's the lightest, and those between fading from one to the other around the ring; the day
-    above it."""
+_digit_paths = {}
+
+
+def clock_digits(W, H, hhmm):
+    """The time as one outline, in the card's coordinates: the hours and the minutes drawn from the font, as
+    tall as a third of the card and as wide as the ring leaves, and between them a colon of two round dots
+    (the font's own sits off the middle), placed as iOS places them: one a quarter down, one three quarters."""
+    key = (W, H, hhmm)
+    if key in _digit_paths:
+        return _digit_paths[key]
+    face = clock_face()
+    bold = face[1] if face else 0.0
+    f = clock_font(118)
+    hh, mm = hhmm.split(":")
+    parts = [render.text_path(QPointF(0, 0), f, t, 0, 0).simplified() for t in (hh, mm)]
+    boxes = [q.boundingRect() for q in parts]
+    top = min(b.top() for b in boxes)
+    src_h = max(b.bottom() for b in boxes) - top
+    h = H * 0.34                                    # the digits' height, outline included
+    e = bold * h                                    # the outline's width
+    k = (h - e) / max(1.0, src_h)                   # down the page
+    gap = 0.25 * h                                  # the colon's room
+    want_w = W - 2 * 54                             # across: inside the ring
+    natural = sum(b.width() for b in boxes) * k
+    kx = k * max(0.8, min(1.3, (want_w - gap - 2 * e) / max(1.0, natural)))
+    total = sum(b.width() for b in boxes) * kx + gap + 2 * e
+    x0, y0 = (W - total) / 2 + e / 2, H / 2 + 8 - (h - e) / 2
+    out = QPainterPath()
+    x = x0
+    for q, b in zip(parts, boxes):
+        t = QTransform()
+        t.translate(x, y0)
+        t.scale(kx, k)
+        t.translate(-b.left(), -top)
+        out.addPath(t.map(q))
+        x += b.width() * kx + gap + e
+    if e > 0:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(e)
+        stroker.setJoinStyle(Qt.RoundJoin)
+        stroker.setCapStyle(Qt.RoundCap)
+        out = out + stroker.createStroke(out)
+    cx = x0 + boxes[0].width() * kx + e / 2 + gap / 2
+    d = 0.16 * h                                    # a dot, about as wide as a stroke
+    y_top = H / 2 + 8 - h / 2
+    for frac in (0.25, 0.74):
+        out.addEllipse(QPointF(cx, y_top + h * frac), d / 2, d / 2)
+    out = out.simplified()
+    if len(_digit_paths) > 8:
+        _digit_paths.clear()
+    _digit_paths[key] = out
+    return out
+
+
+def tick_alpha(ago):
+    """How dark a tick is (0..1) when the hand is `ago` ticks (0..60, fractions too) past it: the hand's own
+    tick the darkest, the coming one the lightest, fading between them round the ring. Over the last tick
+    the coming one darkens into the hand's."""
+    if ago <= 59:
+        return 1.0 - 0.88 * ago / 59
+    return 0.12 + 0.88 * (ago - 59)
+
+
+def draw_clock_ticks(p, W, H, ink, hand, radius=84):
+    """The 60 ticks round the card with the hand at `hand` (see clock_hand)."""
     for i, ((x1, y1), (x2, y2)) in enumerate(_ticks(W, H, radius)):
-        ago = (now.minute - i) % 60                      # 0: this minute ... 59: the next one
         c = QColor(ink)
-        c.setAlphaF(ink.alphaF() * (1.0 - 0.88 * ago / 59))
+        c.setAlphaF(ink.alphaF() * tick_alpha((hand - i) % 60))
         p.setPen(QPen(c, 3.2, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+
+# The hand moves to each second's tick in this long at its start, eased, and rests there for the rest of it:
+# smooth where it moves, and nothing to draw while it rests.
+HAND_MOVE_S = 0.3
+
+
+def clock_hand(now, smooth=True):
+    """Where the hand is, in ticks: on this second's tick, or on its way there from the last one."""
+    if not smooth:
+        return float(now.second)
+    t = min(1.0, (now.microsecond / 1e6) / HAND_MOVE_S)
+    return now.second - 1 + t * t * (3 - 2 * t)
+
+
+def draw_clock(p, W, H, ink, ink2, now, radius=84, ticks=True):
+    """The time, large, narrow and tall, inside a ring of 60 ticks that follow the seconds; the day above it.
+    Without `ticks` the ring is left out: a widget on the desktop draws it itself, many times a second, over
+    the rest drawn once a minute."""
+    if ticks:
+        draw_clock_ticks(p, W, H, ink, clock_hand(now), radius)
     day = (now.strftime("%a %m/%d") if render._language == "en" else
            "週%s %d/%d" % ("一二三四五六日"[now.weekday()], now.month, now.day))
     _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 58, "c", W)
-    # The digits fill what the ring leaves under the day: as wide as it, and stretched to its height.
-    # The digits, by their drawn outline (its overlapping strokes merged into one shape, or where they cross
-    # would be left hollow), centred under the day, a little taller than they are.
-    path = render.text_path(QPointF(0, 0), clock_font(118), now.strftime("%H:%M"), 0, 0).simplified()
-    br = path.boundingRect()
-    cx, cy, box_w, box_h = W / 2, H / 2 + 6, W - 2 * 56, 140      # in the middle of the face
-    sx = box_w / max(1.0, br.width())
-    sy = min(box_h / max(1.0, br.height()), sx * 1.45)
-    p.save()
-    p.translate(cx, cy)
-    p.scale(sx, sy)
-    p.translate(-br.center().x(), -br.center().y())
     p.setPen(Qt.NoPen)
     p.setBrush(ink)
-    p.drawPath(path)
-    p.restore()
+    p.drawPath(clock_digits(W, H, now.strftime("%H:%M")))
+
+
+def clock_ink(theme, dim):
+    """The ink a clock's ticks are drawn in (as _face gives it)."""
+    if dim:
+        return QColor(255, 255, 255, 235)
+    return QColor(245, 245, 247) if theme == "dark" else QColor(17, 17, 19)
 
 
 def draw_calendar(p, W, H, ink, ink2, today, accent):
@@ -739,7 +822,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
         ink, ink2 = _face(p, W, H, card, theme, dim, tcol, style)
         now = extras.get("now") or datetime.datetime.now()      # (a picture of it may give its own time)
         if kind == "clock":
-            draw_clock(p, W, H, ink, ink2, now, tcol["radius_panel"])
+            draw_clock(p, W, H, ink, ink2, now, tcol["radius_panel"], not extras.get("live_ticks"))
         else:
             draw_calendar(p, W, H, ink, ink2, now.date(), QColor(255, 255, 255) if dim else QColor("#ff3b30"))
         p.restore()

@@ -79,6 +79,7 @@ def main():
         '--add-data', f'{ROOT / "nativeui" / "mdi_paths.json"}{os.pathsep}nativeui',
         '--add-data', f'{ROOT / "nativeui" / "i18n_en.json"}{os.pathsep}nativeui',
         '--add-data', f'{ROOT / "nativeui" / "icon_paths.json"}{os.pathsep}nativeui',
+        '--add-data', f'{ROOT / "nativeui" / "fonts"}{os.pathsep}nativeui/fonts',
         # numpy is optional for Qt and Pillow; loading it costs memory.
         '--exclude-module', 'numpy', '--exclude-module', 'tkinter',
         # ...and the browser engine (some 200 MB), which nothing uses, stays out of the bundle.

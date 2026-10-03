@@ -37,6 +37,8 @@ HOLD_MS = 420                 # how long a press is held to open the detail card
 # How often what a widget of another kind shows besides states is fetched again (seconds).
 EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300, "media": 3}
 # the kinds whose detail a tap opens (a player has its controls on itself)
+# The pace of a clock's ring while its hand moves (kinds.HAND_MOVE_S at the start of each second).
+SECOND_FRAME_MS = 33
 DETAIL_KINDS = ("weather", "camera", "chart")
 HOLD_SLOP_PX = 8              # moving further than this cancels the hold
 DRAG_PX = 5                   # moving further than this drags the widget
@@ -103,6 +105,12 @@ class _Surface(GlassMixin, QWidget):
         self.tick_timer = QTimer(self)
         self.tick_timer.setSingleShot(True)
         self.tick_timer.timeout.connect(self._tick)
+        # a clock's ring of ticks follows the seconds: turned smoothly while it can be seen, a step a second
+        # while dimmed, not at all while hidden. Only the ring is drawn each time (over the face, kept).
+        self.second_timer = QTimer(self)
+        self.second_timer.setSingleShot(True)
+        self.second_timer.timeout.connect(self._second)
+        self._drawn_minute = None
         self.scroll, self.scroll_max = 0.0, 0.0
         self.tcol = render.tokens("light")
         # What is drawn.
@@ -150,6 +158,11 @@ class _Surface(GlassMixin, QWidget):
             self._shown_once = True
             QTimer.singleShot(0, self._first_shown)
         self.sample_now.set()
+        self._schedule_tick()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.second_timer.stop()
 
     def _first_shown(self):
         self.facade.events.shown.fire()
@@ -271,8 +284,13 @@ class _Surface(GlassMixin, QWidget):
             self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
                                                    self.scale, dim, self.style, self._ui(), self.theme_raw)
         else:
+            extras = self.extras
+            if self.wkind == "clock":                     # its ring is drawn live, in paintEvent
+                now = datetime.datetime.now()
+                self._drawn_minute = now.replace(second=0, microsecond=0)
+                extras = dict(extras, live_ticks=True, now=now)
             got = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
-                                    self.scale, dim, self.style, self._ui(), self.theme_raw, self.extras)
+                                    self.scale, dim, self.style, self._ui(), self.theme_raw, extras)
             self.kind_buttons = got if isinstance(got, list) else []
             self.empty_button = None if isinstance(got, list) else got
         p.end()
@@ -320,7 +338,42 @@ class _Surface(GlassMixin, QWidget):
             m.drawPixmap(0, 0, self.overlay_dim)
             m.end()
             p.drawImage(0, 0, self.mix)
+        if self.wkind == "clock":
+            self._paint_ticks(p)
         p.end()
+
+    def _paint_ticks(self, p):
+        now = datetime.datetime.now()
+        hand = kinds.clock_hand(now, not self.dim_target)
+        W, H = render.widget_size(self.size_key)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.scale(self.scale / self.dpi, self.scale / self.dpi)
+        for dim, weight in ((False, 1 - self.dim_t), (True, self.dim_t)):
+            if weight > 0.001:
+                p.setOpacity(weight)
+                kinds.draw_clock_ticks(p, W, H, kinds.clock_ink(self.theme, dim), hand,
+                                       self.tcol["radius_panel"])
+        p.restore()
+
+    def _second(self):
+        if not self.isVisible() or self.wkind != "clock":
+            self.second_timer.stop()
+            return
+        now = datetime.datetime.now()
+        if self._drawn_minute is not None and now.replace(second=0, microsecond=0) != self._drawn_minute:
+            self.overlay = self.overlay_dim = None          # a new minute: the digits again
+        self.update()
+        self._next_second(now)
+
+    def _next_second(self, now=None):
+        """The next frame of the ring: soon while the hand moves (not while dimmed: it steps then), else at the
+        next second."""
+        now = now or datetime.datetime.now()
+        ms = now.microsecond / 1000
+        moving = not self.dim_target and ms < kinds.HAND_MOVE_S * 1000
+        self.second_timer.start(int(min(SECOND_FRAME_MS, kinds.HAND_MOVE_S * 1000 - ms) + 1) if moving
+                                else int(1000 - ms) + 2)
 
     def widget_moved(self):
         """Moved (Api._on_widget_moved): a still glass takes its picture again."""
@@ -354,7 +407,12 @@ class _Surface(GlassMixin, QWidget):
         return self.wkind not in kinds.NO_DEVICES and not kinds.shown(self.wkind, self.tiles)
 
     def _schedule_tick(self):
-        if self.wkind in ("clock", "calendar"):
+        if self.wkind == "clock":
+            self.tick_timer.stop()
+            if self.isVisible():
+                self._next_second()
+            return
+        if self.wkind == "calendar":
             ms = (60 - time.time() % 60) * 1000 + 30
         elif self.wkind == "media" and self.tiles and not self.dim_target and \
                 (self.states.get(self.tiles[0]["entity"]) or {}).get("state") == "playing":
@@ -388,6 +446,8 @@ class _Surface(GlassMixin, QWidget):
             self.sample_now.set()                 # a solid face turning to glass: a picture of the desktop now
         if on and self.wkind == "media":
             self.tick_timer.stop()                # dimmed, a song's place is not drawn again each second
+        elif on and self.wkind == "clock":
+            self._schedule_tick()                 # dimmed, the clock's ring steps once a second
         elif not on:
             self._schedule_tick()
             QTimer.singleShot(0, self.refresh_extras)

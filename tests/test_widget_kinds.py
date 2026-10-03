@@ -185,6 +185,43 @@ class ClockCalendarPlayer(unittest.TestCase):
             self.assertIsNone(button, kind)                     # not an empty widget asking for devices
             self.assertGreater(img.pixelColor(30, h // 2).alpha(), 200, kind)   # its solid face
 
+    def test_the_clocks_ring_turns_without_a_jump(self):
+        import datetime
+        def ring(now):
+            hand = kinds.clock_hand(now)
+            return [kinds.tick_alpha((hand - i) % 60) for i in range(60)]
+        base = datetime.datetime(2026, 10, 4, 9, 41, 20)
+        end_of_last = ring(base - datetime.timedelta(microseconds=1))
+        start = ring(base)
+        self.assertLess(max(abs(a - b) for a, b in zip(end_of_last, start)), 0.01)   # a second begins: no jump
+        settled = ring(base + datetime.timedelta(seconds=kinds.HAND_MOVE_S + 0.05))
+        self.assertAlmostEqual(settled[20], 1.0)                 # this second's tick the darkest
+        self.assertAlmostEqual(settled[21], 0.12)                # the coming one the lightest
+        steps = [ring(base + datetime.timedelta(seconds=kinds.HAND_MOVE_S * k / 10))[20] for k in range(11)]
+        self.assertTrue(all(b >= a for a, b in zip(steps, steps[1:])))              # it darkens smoothly
+        self.assertLess(max(b - a for a, b in zip(steps, steps[1:])), 0.2)
+
+    def test_the_clock_has_its_own_digits_with_a_colon_of_round_dots(self):
+        self.assertIsNotNone(kinds.clock_face())                 # shipped in nativeui/fonts
+        W, H = render.widget_size("2x2")
+        box = kinds.clock_digits(W, H, "10:29").boundingRect()
+        self.assertAlmostEqual(box.center().x(), W / 2, delta=2)
+        self.assertLess(box.width(), W - 100)                   # inside the ring
+
+    def test_a_clock_on_the_desktop_draws_only_its_ring_each_second(self):
+        api, win, surf = make([], "clock", "2x2")
+        TW.pump(300)
+        drawn = []
+        real = surf._draw
+        surf._draw = lambda dim: drawn.append(dim) or real(dim)
+        TW.pump(2200)
+        self.assertTrue(surf.second_timer.isActive())
+        self.assertLessEqual(len(drawn), 1)                      # the face and digits: once a minute at most
+        surf.hide()
+        TW.pump(100)
+        self.assertFalse(surf.second_timer.isActive())           # hidden: no more frames
+        TW.done(win)
+
     def test_the_player_plays_and_skips_from_the_desktop(self):
         st = {"media_player.s": {"state": "paused", "attributes": {"media_title": "T", "media_duration": 100,
                                                                    "media_position": 10}}}
