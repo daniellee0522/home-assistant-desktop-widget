@@ -19,6 +19,34 @@ calling UI work done.
 - **No modal dialogs** in the panel or the detail. They take focus and leave the panel waiting. Use a
   floating pane instead.
 
+## Layout (`nativeui/style.py`, checked by `tests/test_layout.py`)
+
+- **Centre by what is drawn, never by a guessed baseline.** Text in a shape or cell goes through
+  `style.center_text` / `style.text_path`:
+  - `align="ink"` for one mark alone in a shape, such as a number in a circle;
+  - `align="cap"` (the default) for words or numbers in a row of cells, so they share one baseline;
+  - `align="line"` for a line of words, as in a field or a button.
+
+  Icons go through `style.center_icon`. Don't write `(h - fm.height()/10)/2 + fm.ascent()/10` in new code.
+- **Repeated things sit on one grid.** Rows and columns of cells (a calendar, a picker, a palette) come
+  from `style.grid`, so every row has the same height and every gap is the same. Never accumulate `y +=`
+  with different numbers per row.
+- **One remove badge.** Anything removable shows `style.remove_badge` (a cross icon in a red disc or
+  capsule). Never draw a cross character; buttons that close use `icon="mdi:close"`.
+- **Sizes line up.** Widget sizes come from `render.widget_size` (two of a size and `WIDGET_GAP` make the
+  next). Tiles share a size's inside through `render.cell_size`. Never hard-code a widget's pixels.
+- **Words don't run under controls.** Where buttons sit on a tile or card, the text width stops before
+  them. Take their rectangles from the same function that places them (for example `render.mini_buttons`).
+- **Words mean one thing per language.** When a Chinese word has two English meanings (開啟: on or open),
+  give each meaning its own words (for example `appearance.WORDS`, or `已關閉` for a closed cover).
+
+## Checking the look
+
+Run `python tools/visual_check.py`. It writes `visual/` (git-ignored), which contains every widget kind
+in light, dark and dimmed, the tiles in every size, the editor with a remove badge, each device's
+detail, and the Home panel in edit mode. Look at the pictures for anything you changed before calling
+it done. Add a new screen or widget kind to the script when you make it.
+
 ## What a tile is shown as (`nativeui/appearance.py`)
 
 - A tile's icon decides its family; the family decides the icon's colour, the words under its name, and the

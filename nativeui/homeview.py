@@ -124,13 +124,7 @@ class Chip(View):
         base = (self.h - fm.height() / 10) / 2 + fm.ascent() / 10
         p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.text), 22, base))
         if self.x_button:
-            p.setBrush(QColor(255, 91, 74, round(255 * 0.9)))
-            p.drawRoundedRect(QRectF(self.w - 22 - 40, 8, 40, 30), 15, 15)
-            xf = ui.font(16)
-            xm = QFontMetricsF(xf)
-            p.setBrush(QColor(255, 255, 255))
-            p.drawPath(render.text_path(QPointF(0, 0), xf, "✕", self.w - 22 - 40 + (40 - ui.text_width("✕", xf)) / 2,
-                                        8 + (30 - xm.height() / 10) / 2 + xm.ascent() / 10))
+            style.remove_badge(p, QRectF(self.w - 22 - 40, 8, 40, 30), shadow=False)
 
     def hit_x(self, x, y):
         return self.x_button and self.w - 62 <= x <= self.w - 22 and 8 <= y <= 38

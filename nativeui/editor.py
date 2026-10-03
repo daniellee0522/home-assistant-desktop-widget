@@ -533,14 +533,7 @@ class Preview(View):
         if self.hover in self.slots and not pr:
             tx, ty, tw, th = self.rects[self.hover]
             cx, cy = (tx + tw - 8 - 12) * z, (ty + 8 + 12) * z
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, round(255 * 0.45)))
-            p.drawEllipse(QPointF(cx, cy), 12 * z, 12 * z)
-            f = ui.font(13 * z)
-            fm = ui.QFontMetricsF(f)
-            tw2 = ui.text_width("✕", f)
-            p.setBrush(QColor(255, 255, 255))
-            p.drawPath(render.text_path(QPointF(0, 0), f, "✕", cx - tw2 / 2, cy - fm.height() / 20 + fm.ascent() / 10 - fm.height() / 20))
+            style.remove_badge(p, QRectF(cx - 12 * z, cy - 12 * z, 24 * z, 24 * z))
 
 
 class TileRow(View):
@@ -559,7 +552,8 @@ class TileRow(View):
         self.on_dblclick = self._rename
         self.step = None
         right = w - 8 - 24
-        self.add(Button("✕", x=right, y=8, w=24, h=24, size=12, on_click=lambda e: editor.delete_tile(index)))
+        self.add(Button(x=right, y=8, w=24, h=24, icon="mdi:close", icon_size=15,
+                        on_click=lambda e: editor.delete_tile(index)))
         right -= 6
         if tile["domain"] == "climate":
             self.step = TextField(right - 40, 8, 40, 24, str(float(tile.get("temp_step") or 1)).rstrip("0").rstrip("."),

@@ -1,12 +1,15 @@
 """The house style of every screen, in one place: what a piece of text is (its role, and so its size, weight
-and colour), how a scrolling box fades at its ends, how deep a shadow is, how a floating pane looks, and
-the backing that keeps words readable over glass.
+and colour), how a scrolling box fades at its ends, how deep a shadow is, how a floating pane looks, the
+backing that keeps words readable over glass, and how things are placed: centred in a box by what is
+actually drawn, laid on an even grid, and the one remove badge.
 
 Screens ask for a role, never for a size: `style.label("title", text)`. A new screen or control uses these
 and, when it needs something new, adds it here first. (CLAUDE.md lists the rules.)
 """
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen
+
+from . import render
 
 
 
@@ -100,3 +103,69 @@ def popup_pane(p, scene, w, h, radius=POPUP_RADIUS):
 def readable_backing(theme):
     r, g, b, a = READABLE["dark" if theme == "dark" else "light"]
     return QColor(r, g, b, round(255 * a))
+
+
+# ---------------------------------------------------------------------------------- placing things
+# Nothing is centred by hand-tuned baselines: these place text and icons by what is drawn.
+
+def text_path(text, f, rect, align="cap"):
+    """The outline of `text` in font `f` centred in `rect`:
+    align="cap"  across by its ink, down by the font's capital height: words or numbers in a row of cells
+                 (a calendar's days, a weekday row) keep one baseline and sit in the middle of their cells;
+    align="ink"  by its ink both ways: one mark alone in a shape (a number in a circle, a badge);
+    align="line" by its line box, as a text field or a button's words are."""
+    path = render.text_path(QPointF(0, 0), f, text, 0, 0)
+    ink = path.boundingRect()
+    fm = QFontMetricsF(f)
+    if align == "line":
+        dx = rect.left() + (rect.width() - fm.horizontalAdvance(text) / 10 * render.HSCALE) / 2
+        dy = rect.top() + (rect.height() - fm.height() / 10) / 2 + fm.ascent() / 10
+    else:
+        dx = rect.center().x() - ink.center().x()
+        dy = rect.center().y() - ink.center().y() if align == "ink" else rect.center().y() + fm.capHeight() / 20
+    path.translate(dx, dy)
+    return path
+
+
+def center_text(p, text, f, color, rect, align="cap"):
+    """Draw `text` centred in `rect` (see text_path); returns the box of its ink."""
+    path = text_path(text, f, rect, align)
+    p.save()
+    p.setPen(Qt.NoPen)
+    p.setBrush(color if isinstance(color, QColor) else render.parse_color(color))
+    p.drawPath(path)
+    p.restore()
+    return path.boundingRect()
+
+
+def center_icon(p, name, color, rect, size=None):
+    """An icon in the middle of `rect`, `size` across (the smaller side of rect by default)."""
+    size = size or min(rect.width(), rect.height())
+    render.draw_icon(p, name, color, QRectF(rect.center().x() - size / 2, rect.center().y() - size / 2,
+                                            size, size))
+
+
+def grid(rect, cols, rows, gap_x=0.0, gap_y=0.0):
+    """`rect` cut into rows x cols cells of one size, gap_x / gap_y between them: [[QRectF] per row]."""
+    cw = (rect.width() - gap_x * (cols - 1)) / cols
+    ch = (rect.height() - gap_y * (rows - 1)) / rows
+    return [[QRectF(rect.left() + c * (cw + gap_x), rect.top() + r * (ch + gap_y), cw, ch) for c in range(cols)]
+            for r in range(rows)]
+
+
+REMOVE_FILL = QColor(255, 91, 74, 245)               # a remove badge's red
+
+
+def remove_badge(p, rect, fill=REMOVE_FILL, shadow=True):
+    """The one remove badge (a cross in a disc, or in a capsule when rect is wider than tall), its cross an
+    icon centred by its own box, never a cross character placed by a baseline."""
+    p.save()
+    p.setPen(Qt.NoPen)
+    r = min(rect.width(), rect.height()) / 2
+    if shadow:
+        p.setBrush(QColor(0, 0, 0, 50))
+        p.drawRoundedRect(rect.translated(0, r * 0.12), r, r)
+    p.setBrush(fill)
+    p.drawRoundedRect(rect, r, r)
+    center_icon(p, "mdi:close", "#ffffff", rect, r * 1.2)
+    p.restore()

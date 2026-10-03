@@ -2,9 +2,9 @@
 goes), pulled by a corner to another shape, removed; rooms are pulled into a new order. The page's
 attachHomeDrag, attachHomeResize and attachRoomReorder."""
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPen
+from PySide6.QtGui import QColor, QPen
 
-from . import render, ui
+from . import render, style
 from .homemodel import OTHER_ROOM, home_layout
 from .ui import Rect, View
 
@@ -61,17 +61,7 @@ class RemoveButton(View):
         self.z = z
 
     def paint(self, p):
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 0, 0, 60))
-        p.drawEllipse(QRectF(0, 2 * self.z, self.w, self.h))
-        p.setBrush(QColor(255, 91, 74, round(255 * 0.96)))
-        p.drawEllipse(QRectF(0, 0, self.w, self.h))
-        f = ui.font(17 * self.z, QFont.Bold)
-        fm = ui.QFontMetricsF(f)
-        tw = ui.text_width("✕", f)
-        p.setBrush(QColor(255, 255, 255))
-        p.drawPath(render.text_path(QPointF(0, 0), f, "✕", (self.w - tw) / 2,
-                                    (self.h - fm.height() / 10) / 2 + fm.ascent() / 10))
+        style.remove_badge(p, QRectF(0, 0, self.w, self.h))
 
 
 class EditMixin:

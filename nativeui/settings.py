@@ -315,7 +315,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             sx = x + 13
         self.root.add(style.label("hint", sub, x=sx, y=14 + 18))
         if back is None or self.page == "editor":
-            self.root.add(Button("✕", x=width - 14 - 30, y=14, w=30, h=30, size=15,
+            self.root.add(Button(x=width - 14 - 30, y=14, w=30, h=30, icon="mdi:close", icon_size=18,
                                  on_click=lambda e: self.close_settings()))
         return 14 + 18 + 13.8 + 10
 

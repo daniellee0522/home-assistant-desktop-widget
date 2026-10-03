@@ -16,3 +16,6 @@ dist/
 reference/
 *.bak
 native/out/
+
+# Pictures made by tools/visual_check.py for looking at the screens.
+visual/

@@ -443,7 +443,10 @@ def draw_clock(p, W, H, ink, ink2, now, radius=84):
 
 
 def draw_calendar(p, W, H, ink, ink2, today, accent):
-    """The month: its name, the days of the week, and its days with today in a filled circle."""
+    """The month: its name, then one even grid (style.grid) of the days of the week and the weeks, every row
+    the same height and every number centred in its cell by the same rule; today in a filled circle round
+    the middle of its cell."""
+    from . import style
     pad = 26
     month = today.strftime("%B") if render._language == "en" else "%d月" % today.month
     _text(p, month, _font(22, QFont.Bold), accent, pad + 4, pad - 2)
@@ -451,27 +454,24 @@ def draw_calendar(p, W, H, ink, ink2, today, accent):
     first = today.replace(day=1)
     lead = (first.weekday() + 1) % 7                  # Sunday first
     days = (first.replace(month=first.month % 12 + 1, year=first.year + first.month // 12) - first).days
-    rows = (lead + days + 6) // 7
-    cw = (W - 2 * pad) / 7
-    top = pad + 40
-    _f = _font(15, QFont.DemiBold)
-    for i, n in enumerate(names):
-        _text(p, n, _f, ink2, pad + i * cw, top, "c", cw)
-    top += 30
-    rh = (H - pad - 8 - top) / rows
+    weeks = (lead + days + 6) // 7
+    cells = style.grid(QRectF(pad, pad + 34, W - 2 * pad, H - 2 * pad - 34 + 6), 7, 1 + weeks)
+    head = _font(15, QFont.DemiBold)
+    for c, n in enumerate(names):
+        style.center_text(p, n, head, ink2, cells[0][c])
     df = _font(17, QFont.DemiBold)
+    r_today = min(cells[1][0].width(), cells[1][0].height()) * 0.46
     for d in range(1, days + 1):
-        cell = lead + d - 1
-        r, c = divmod(cell, 7)
-        x, y = pad + c * cw, top + r * rh
+        r, c = divmod(lead + d - 1, 7)
+        cell = cells[1 + r][c]
         if d == today.day:
             p.setPen(Qt.NoPen)
             p.setBrush(ink)
-            p.drawEllipse(QPointF(x + cw / 2, y + 11), 15, 15)
+            p.drawEllipse(cell.center(), r_today, r_today)
             col = QColor(255, 255, 255) if ink.lightness() < 128 else QColor(17, 17, 19)
+            style.center_text(p, str(d), df, col, cell, align="ink")
         else:
-            col = ink2 if c in (0, 6) else ink
-        _text(p, str(d), df, col, x, y, "c", cw)
+            style.center_text(p, str(d), df, ink2 if c in (0, 6) else ink, cell)
 
 
 # ---------------------------------------------------------------------------------- a player

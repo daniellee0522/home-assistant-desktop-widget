@@ -50,9 +50,10 @@ DOMAINS = {
 COLORS = {"switch": "blue", "outlet": "blue", "light": "yellow", "fan": "blue", "lock": "teal", "climate": "cyan",
           "media": "green", "appliance": "blue", "cover": "blue", "vacuum": "blue", "detector": "green",
           "scene": "blue"}
-# what an on/off thing of a family says it is
-WORDS = {"lock": ("已解鎖", "已上鎖")}
-DEFAULT_WORDS = ("開啟", "關閉")
+# what an on/off thing of a family says it is: (on, off) in Chinese and in English. (Given here in both: the
+# Chinese words for "on" and "open" are the same, and one translation table cannot tell them apart.)
+WORDS = {"lock": (("已解鎖", "已上鎖"), ("Unlocked", "Locked"))}
+DEFAULT_WORDS = (("開啟", "關閉"), ("On", "Off"))
 # an icon's other shape for a thing that is open (or unlocked)
 OPEN_SHAPE = {"lock": "lock-open", "mdi:lock-smart": "mdi:lock-open-variant", "mdi:door-closed-lock": "mdi:door-open",
               "door": "mdi:door-open", "mdi:garage-variant": "mdi:garage-open-variant", "mdi:blinds": "mdi:blinds-open",
@@ -88,8 +89,10 @@ def own_icon(tile):
 
 
 def words(tile):
-    """(on, off): what an on/off tile of this family says it is."""
-    return WORDS.get(family(tile), DEFAULT_WORDS)
+    """(on, off): what an on/off tile of this family says it is, in the language shown."""
+    from . import render
+    zh, en = WORDS.get(family(tile), DEFAULT_WORDS)
+    return en if render._language == "en" else zh
 
 
 def open_shape(icon):

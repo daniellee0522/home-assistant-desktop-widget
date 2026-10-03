@@ -341,7 +341,7 @@ def media_label(st):
 
 
 STATE_WORDS = {"locked": "已上鎖", "locking": "上鎖中", "unlocked": "未上鎖", "unlocking": "解鎖中",
-               "open": "已開啟", "opening": "開啟中", "jammed": "卡住了", "closed": "關閉", "closing": "關閉中",
+               "open": "已開啟", "opening": "開啟中", "jammed": "卡住了", "closed": "已關閉", "closing": "關閉中",
                "unavailable": "無法連線", "unknown": "狀態不明"}
 HVAC_WORDS = {"off": "關閉", "cool": "冷氣", "heat": "暖氣", "heat_cool": "自動", "auto": "自動", "dry": "除濕",
               "fan_only": "送風"}
@@ -656,6 +656,8 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     # -- the text ------------------------------------------------------
     if form == "bar":
         tx, tw = 139, cw - 23 - 139
+        if domain == "climate" and on:            # the words stop short of the - and + (mini_buttons)
+            tw = mini_buttons("bar", cw, ch)[0][0].left() - 12 - tx
         items = []
         if value:
             items.append((value, font(32, QFont.Bold), c1, 35.2, 0))
