@@ -356,6 +356,8 @@ def value_text(domain, st):
         return ""
     if domain == "sensor":
         unit = attrs.get("unit_of_measurement") or ""
+        if not unit and attrs.get("device_class") == "temperature":
+            unit = "°"                        # a temperature that does not say °C or °F
         return st["state"] + (unit if unit.startswith("°") else (" " + unit if unit else ""))
     if domain == "binary_sensor":
         return "偵測到" if st.get("state") == "on" else "正常"
@@ -611,7 +613,7 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     if form == "bar":
         dx, dy = 23, (ch - 100) / 2
         if reading:
-            text = reading["text"].replace("°", "") + " °C"
+            text = reading["text"]               # "24°": a thermostat does not say whether it is °C or °F
             f = font(34, QFont.Bold, -0.5)
             fm = QFontMetricsF(f)
             p.setPen(Qt.NoPen)
@@ -638,7 +640,7 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
             fm = QFontMetricsF(f)
             p.setPen(Qt.NoPen)
             p.setBrush(parse_color(c1))
-            p.drawPath(text_path(QPointF(0, 0), f, reading["text"].replace("°", "") + " °C", ix,
+            p.drawPath(text_path(QPointF(0, 0), f, reading["text"], ix,
                                  iy + (60 - fm.height() / 10) / 2 + fm.ascent() / 10))
         elif badge:
             box = QRectF(ix, iy, size, size)
