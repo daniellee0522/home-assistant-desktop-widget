@@ -205,6 +205,40 @@ class ClockCalendarPlayer(unittest.TestCase):
         TW.done(win)
 
 
+class PlayerOnTheDesktop(unittest.TestCase):
+    def test_play_takes_the_place_now_so_the_bar_does_not_jump(self):
+        import datetime
+        long_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)).isoformat()
+        st = {"state": "paused", "attributes": {"media_duration": 300, "media_position": 40,
+                                                "media_position_updated_at": long_ago}}
+        patch = kinds.play_pause_patch(st)
+        now = dict(st, **patch)
+        self.assertEqual(now["state"], "playing")
+        self.assertAlmostEqual(kinds.media_position(now)[0], 40, delta=1)      # not 40 s + half an hour
+
+    def test_the_bar_is_dragged_to_a_place_and_a_tap_opens_nothing(self):
+        st = {"state": "playing", "attributes": {"media_title": "T", "media_duration": 200, "media_position": 0,
+                                                 "supported_features": 2}}
+        api, win, surf = make([T("media_player.s", "media_player")], "media")
+        surf.push_states([("media_player.s", st)])
+        TW.pump(200)
+        bar = next(r for r, a in surf.kind_buttons if a == "seek")
+        s = surf.scale / surf.devicePixelRatioF()
+        y = round(bar.center().y() * s)
+        QTest.mousePress(surf, Qt.LeftButton, pos=QPoint(round((bar.x() + 4) * s), y))
+        QTest.mouseMove(surf, QPoint(round((bar.x() + bar.width() * 0.75) * s), y))
+        TW.pump(50)
+        self.assertAlmostEqual(surf.extras["seek_to"], 150, delta=6)         # shown while dragged
+        QTest.mouseRelease(surf, Qt.LeftButton, pos=QPoint(round((bar.x() + bar.width() * 0.75) * s), y))
+        TW.pump(150)
+        seek = [c for c in api.calls if c[0] == "service" and c[2] == "media_seek"]
+        self.assertAlmostEqual(seek[-1][4]["seek_position"], 150, delta=6)
+        QTest.mouseClick(surf, Qt.LeftButton, pos=QPoint(round(60 * s), round(60 * s)))   # on the cover
+        TW.pump(150)
+        self.assertFalse([c for c in api.calls if c[0] == "popover"])
+        TW.done(win)
+
+
 class InTheEditor(unittest.TestCase):
     def setUp(self):
         import test_native_settings as TS

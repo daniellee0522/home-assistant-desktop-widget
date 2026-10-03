@@ -9,6 +9,7 @@ Threads: the Qt widget lives on the GUI thread; the glass is made on its own thr
 what `Api.get_desktop_backdrop` answers, and only the newest picture ever reaches the GUI.
 """
 import ctypes
+import datetime
 import os
 import threading
 import time
@@ -35,8 +36,8 @@ _user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
 HOLD_MS = 420                 # how long a press is held to open the detail card
 # How often what a widget of another kind shows besides states is fetched again (seconds).
 EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300, "media": 3}
-# the kinds whose detail a tap opens
-DETAIL_KINDS = ("weather", "camera", "chart", "media")
+# the kinds whose detail a tap opens (a player has its controls on itself)
+DETAIL_KINDS = ("weather", "camera", "chart")
 HOLD_SLOP_PX = 8              # moving further than this cancels the hold
 DRAG_PX = 5                   # moving further than this drags the widget
 SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
@@ -375,6 +376,11 @@ class _Surface(GlassMixin, QWidget):
         self.dim_from = self.dim_t
         self.dim_clock.start()
         self.dim_timer.start()
+        if on and self.wkind == "media":
+            self.tick_timer.stop()                # dimmed, a song's place is not drawn again each second
+        elif not on:
+            self._schedule_tick()
+            QTimer.singleShot(0, self.refresh_extras)
 
     def _step_dim(self):
         dur = EASE_DIM_MS if self.dim_target else EASE_WAKE_MS
@@ -463,6 +469,17 @@ class _Surface(GlassMixin, QWidget):
         r = self.empty_button
         return bool(r and not self.tiles and r.contains(QPointF(x, y)))
 
+    def _seek_to(self, x):
+        """Where the song would be with the bar let go at x (shown at once)."""
+        bar = next((r for r, a in self.kind_buttons if a == "seek"), None)
+        st = self.states.get(self.tiles[0]["entity"]) if self.tiles else None
+        if bar is None or not st:
+            return None
+        _, dur = kinds.media_position(st)
+        self.extras["seek_to"] = max(0.0, min(1.0, (x - bar.x()) / max(1.0, bar.width()))) * dur
+        self._redraw_tiles()
+        return self.extras["seek_to"]
+
     def _action_at(self, x, y):
         """A player's button under (x, y): its action, or None."""
         for rect, action in self.kind_buttons:
@@ -489,6 +506,9 @@ class _Surface(GlassMixin, QWidget):
             return
         press = self._press
         if not press:
+            return
+        if press.get("action") == "seek":
+            self._seek_to(x)
             return
         cx, cy = _cursor()
         dx, dy = cx - press["cursor"][0], cy - press["cursor"][1]
@@ -527,6 +547,11 @@ class _Surface(GlassMixin, QWidget):
             if press.get("button") and self._button_at(x, y) and not moved:
                 wid = self.widget_id              # an empty widget: the editor, on it
                 threading.Thread(target=lambda: self.api.open_widget_editor(wid), daemon=True).start()
+            elif press.get("action") == "seek" and self.tiles:
+                at = self._seek_to(x)
+                self.extras.pop("seek_to", None)
+                if at is not None:
+                    self._seek(at)
             elif press.get("action") and self.tiles and not moved:
                 self._play(press["action"])
             elif self.wkind in DETAIL_KINDS and self.tiles and not moved:
@@ -579,7 +604,7 @@ class _Surface(GlassMixin, QWidget):
         kind = self.wkind
         if kind not in EXTRAS_EVERY or not self.tiles or not self.isVisible() or kind in self._fetching:
             return
-        if kind == "camera" and self.dim_target:
+        if kind in ("camera", "media") and self.dim_target:     # the desktop is out of sight
             return
         art_url = None
         if kind == "media":                      # its cover, when the song changed
@@ -624,12 +649,27 @@ class _Surface(GlassMixin, QWidget):
             self.facade.run_on_ui_thread(done)
         threading.Thread(target=go, daemon=True).start()
 
+    def _seek(self, at):
+        entity = self.tiles[0]["entity"]
+        st = self.states.get(entity) or {}
+        self.optimistic(entity, {"attributes": dict(st.get("attributes") or {}, media_position=at,
+                                                    media_position_updated_at=datetime.datetime.now(
+                                                        datetime.timezone.utc).isoformat())})
+        api = self.api
+
+        def go():
+            try:
+                api.call_service("media_player", "media_seek", entity, {"seek_position": round(at, 1)})
+            except Exception:
+                traceback.print_exc()
+        threading.Thread(target=go, daemon=True).start()
+
     def _play(self, action):
         """A player's button: previous, play or pause, next (shown at once, then asked of Home Assistant)."""
         entity = self.tiles[0]["entity"]
         st = self.states.get(entity) or {}
         if action == "play_pause" and st:
-            self.optimistic(entity, {"state": "paused" if st.get("state") == "playing" else "playing"})
+            self.optimistic(entity, kinds.play_pause_patch(st))
         service = {"previous": "media_previous_track", "play_pause": "media_play_pause",
                    "next": "media_next_track"}[action]
         api = self.api

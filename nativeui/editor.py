@@ -111,15 +111,25 @@ class Palette(View):
         if on_press_kind is not None:
             self.add(style.label("hint", "時鐘、日曆、天氣、攝影機、圖表與播放器", x=0, y=y - 4))
             y += 14 + 8
-            gap = 12
-            kw = (LEFT_W - gap) / 2
-            others = kinds.KINDS[1:]
-            for i in range(0, len(others), 2):      # two to a row, each row as tall as its tallest
-                row = [KindItem(kind, kw, on_press_kind) for kind in others[i:i + 2]]
-                for j, item in enumerate(row):
-                    item.x, item.y = j * (kw + gap), y
+            # drawn at the sizes' own scale, so a 2x2 clock is as large as the 2x2 of tiles; in rows, bottoms aligned
+            line, lines, line_w = [], [], 0
+            for kind in kinds.KINDS[1:]:
+                cw, _ = render.widget_size(kinds.KIND_SIZE[kind])
+                item = KindItem(kind, round(cw * PALETTE_SCALE), on_press_kind)
+                if line and line_w + item.w > LEFT_W:
+                    lines.append(line)
+                    line, line_w = [], 0
+                line.append(item)
+                line_w += item.w + 16
+            lines.append(line)
+            for ln in lines:
+                lh = max(it.h for it in ln)
+                x = 0
+                for item in ln:
+                    item.x, item.y = x, y + lh - item.h
                     self.add(item)
-                y += max(item.h for item in row) + 14
+                    x += item.w + 16
+                y += lh + 14
         self.h = y - 14
 
 
@@ -152,9 +162,9 @@ class KindItem(View):
             self.pic = (key, device_image(p, self.bw, self.bh, draw))
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0, 0, 0, 34 if self.hovered else 20))
-        p.drawPath(render.squircle(0, up + 2, self.bw, self.bh, 15))
+        p.drawPath(render.squircle(0, up + 2, self.bw, self.bh, 14))
         p.setBrush(ui.resolve(sc, "btn_fill_strong"))
-        p.drawPath(render.squircle(0, up, self.bw, self.bh, 15))
+        p.drawPath(render.squircle(0, up, self.bw, self.bh, 14))
         put_image(p, self.pic[1], 0, up)
         f = ui.font(12)
         fm = ui.QFontMetricsF(f)

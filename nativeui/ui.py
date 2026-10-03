@@ -1059,13 +1059,19 @@ class Scene(GlassMixin, QWidget):
             p.translate(ox, oy)
             p.scale(self.anim_zoom, self.anim_zoom)
             p.translate(-ox, -oy)
+        # The pictures are made in the window's physical pixels and put on exactly those, whatever Qt
+        # believes the window's scale to be: just moved to a monitor of another DPI, Qt may not know yet,
+        # and a picture placed by its own ratio was drawn shifted and too large or small (and the pointer,
+        # which Qt maps by its ratio, missed what it pointed at).
+        q = self.devicePixelRatioF() or 1.0
         if self.glass is not None and not self.system_glass:
-            p.drawImage(0, 0, self.glass)
+            p.drawImage(QRectF(0, 0, self.glass.width() / q, self.glass.height() / q), self.glass)
         # What is on the card is drawn once into a picture and that picture is what is painted: the glass
         # behind it changes up to sixty times a second while the views do not, and drawing them again for
         # each new glass costs a few ms where the picture costs a tenth of one. Coming in or going away
         # also only scales and fades that picture.
-        p.drawImage(0, 0, self.content_image())
+        img = self.content_image()
+        p.drawImage(QRectF(0, 0, img.width() / q, img.height() / q), img)
         p.end()
 
     def glass_changed(self):

@@ -12,7 +12,7 @@ import traceback
 from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainterPath, QPen
 
-from . import controls, render, style, ui
+from . import appearance, controls, kinds, render, style, ui
 from .overlay import OverlayScene, create_overlay
 from .ui import Button, ScrollView, Slider, TextField, View
 
@@ -22,9 +22,6 @@ BODY_MAX = 560
 CARD_MAX_H = 760                     # the tallest the detail card beside a widget is made
 HISTORY_HOURS = 24
 
-ICON_CHOICES = ["light", "switch", "mdi:air-conditioner", "fan", "mdi:blinds", "mdi:curtains", "media", "monitor",
-                "lock", "door", "mdi:robot-vacuum", "mdi:palette", "script", "mdi:robot",
-                "thermometer", "humidity", "sensor"]
 HVAC_LABELS = {"off": "關閉", "cool": "冷氣", "heat": "暖氣", "heat_cool": "自動", "auto": "自動",
                "dry": "除濕", "fan_only": "送風"}
 
@@ -196,7 +193,7 @@ class DetailContent:
         """The content, CARD_W wide and as tall as it needs up to max_h: the rest scrolls, or, with `fit`, the
         tall controls are made shorter until it all fits (and it is as tall as it needs: the tray panel scales
         it to its room). Built again for the same tile, it keeps where it was scrolled to."""
-        if not fit:
+        if not fit or self.edit:                # (the edit panel scrolls: it has every icon)
             self.tall = TALL_H
             return self._build(max_h)
         self.tall = getattr(self, "tall_fit", TALL_H)
@@ -256,38 +253,62 @@ class DetailContent:
         self.rebuilt()
 
     def build_edit(self, stack):
+        """The edit panel: every icon, those that also change what the tile is shown as (its colours, its words,
+        this screen) apart from those that only change its picture; an MDI name for any other; its name (and
+        room); a reset."""
         tile = self.tile
-        stack.place(style.label("section", "圖示", w=BODY_W, spacing=0.4), 0, 8)
-        # the swatches
-        picker = View(0, 0, BODY_W, 0)
-        current = tile.get("icon") or render.DEFAULT_ICON.get(tile["domain"], "sensor")
-        x = y = 0
-        for name in ICON_CHOICES:
-            if x + 34 > BODY_W:
-                x, y = 0, y + 34 + 8
-            b = Button(x=x, y=y, w=34, h=34, icon=name, icon_size=18, ring="accent_blue" if name == current else None,
-                       fill="btn_fill_strong" if name == current else "btn_fill",
-                       on_click=lambda e, n=name: self.set_icon(n))
-            b.ring_width = 2
-            picker.add(b)
-            x += 34 + 8
-        picker.h = y + 34
-        stack.place(picker, 8, 14)
+        own, can = appearance.domain_families(tile["domain"])
+        current = tile.get("icon") or appearance.own_icon(tile)
+        onoff = len(can) > 1
+        stack.place(style.label("section", "外觀" if onoff else "圖示", w=BODY_W, spacing=0.4), 0, 2)
+        stack.place(style.label("caption", "選這些會一併改變顏色、狀態文字與控制畫面" if onoff else
+                                "同類型的不同造型", w=BODY_W, wrap=True), 2, 8)
+        for fam in can:
+            if onoff:
+                stack.place(style.label("label", appearance.FAMILIES[fam][0], w=BODY_W), 4, 4)
+            stack.place(self.icon_grid(appearance.FAMILIES[fam][1], current, 36), 2, 8)
+        others = [i for fam, (_, icons) in appearance.FAMILIES.items() if fam not in can for i in icons]
+        stack.place(style.label("section", "其他圖示", w=BODY_W, spacing=0.4), 12, 2)
+        stack.place(style.label("caption", "只換圖示，不改變樣式；更多圖示請在下方輸入 MDI 名稱", w=BODY_W, wrap=True), 2, 8)
+        stack.place(self.icon_grid(others, current, 30), 2, 8)
         panel = self.prefs.get("panel") or {}
         home = tile["id"].startswith("home:")
-        self.field(stack, "MDI 圖示名稱", tile.get("icon") if (tile.get("icon") or "").startswith("mdi:") else "",
-                   "例如 mdi:air-conditioner", self.set_mdi, 80)
+        mdi = current if current.startswith("mdi:") and not appearance.family_of_icon(current) else ""
+        self.field(stack, "MDI 圖示名稱", mdi, "例如 mdi:air-conditioner", self.set_mdi, 80)
         self.field(stack, "名稱", tile.get("room") or "", "", self.set_room)
         if home:
             overrides = panel.get("room_overrides") or {}
             self.field(stack, "房間", overrides.get(tile["entity"], ""), "沿用 Home Assistant 的區域", self.set_area)
-        self.field(stack, "類別名稱", tile.get("label") or "", "", self.set_label)
+        row = View(0, 0, BODY_W, 34)
+        reset = Button("重置", size=15, pad=18, h=34, on_click=lambda e: self.reset(), color="accent_red")
         done = Button("完成", size=15, pad=18, h=34, on_click=lambda e: self.set_edit(False), fill="accent_blue",
                       hover_fill="accent_blue", color="white")
-        row = View(0, 0, BODY_W, 34)
-        row.add(done)
+        row.add(reset, done)
         done.x = BODY_W - done.w
-        stack.place(row, 8, 0)
+        stack.place(row, 10, 0)
+
+    def icon_grid(self, icons, current, size):
+        grid = View(0, 0, BODY_W, 0)
+        gap = 8
+        per = max(1, int((BODY_W + gap) // (size + gap)))
+        for i, name in enumerate(icons):
+            r, c = divmod(i, per)
+            chosen = name == current
+            b = Button(x=c * (size + gap), y=r * (size + gap), w=size, h=size, icon=name, icon_size=size * 0.52,
+                       ring="accent_blue" if chosen else None, fill="btn_fill_strong" if chosen else "btn_fill",
+                       on_click=lambda e, n=name: self.set_icon(n))
+            b.ring_width = 2
+            grid.add(b)
+        grid.h = ((len(icons) + per - 1) // per) * (size + gap) - gap if icons else 0
+        return grid
+
+    def reset(self):
+        """Back to what Home Assistant says: the family's own icon and the device's own name."""
+        st = self.states.get(self.tile["entity"])
+        self.tile["icon"] = ""
+        self.tile["room"] = ((st or {}).get("attributes") or {}).get("friendly_name") or self.tile["entity"]
+        self.persist()
+        self.rebuilt()
 
     def field(self, stack, label, value, placeholder, on_done, max_length=40):
         block = View(0, 0, BODY_W, 20 + 4 + 38)
@@ -338,9 +359,6 @@ class DetailContent:
         panel["room_overrides"] = overrides
         self.persist()
 
-    def set_label(self, text):
-        self.tile["label"] = text.strip()
-        self.persist()
 
 
 class DetailCard(OverlayScene):
@@ -592,14 +610,17 @@ def cards(card, stack, items):
         stack.place(row, 8, 8)
 
 
-def _toggle(domain):
-    def build(card, stack, tile, state):
-        on = bool(state) and state.get("state") == "on"
-        big_value(stack, "開啟" if on else "關閉", state)
-        centered(stack, controls.TallSwitch(TALL_W, card.tall, on, "accent_yellow", render.icon_name(tile, state),
-                                            lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
-                                                     card.call(domain, "toggle", tile["entity"]))), 4, 16)
-    return build
+def build_onoff(card, stack, tile, state):
+    """A thing switched on and off, shown as its family (appearance.py): its words, its colour, its icon."""
+    on = bool(state) and state.get("state") == "on"
+    on_words, off_words = appearance.words(tile)
+    big_value(stack, on_words if on else off_words, state)
+    color = "accent_" + appearance.COLORS.get(appearance.family(tile), "blue")
+    if appearance.family(tile) == "light":
+        color = render.light_color(state if tile["domain"] == "light" else None, "dark")
+    centered(stack, controls.TallSwitch(TALL_W, card.tall, on, color, render.icon_name(tile, state),
+                                        lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
+                                                 card.call(tile["domain"], "toggle", tile["entity"]))), 4, 16)
 
 
 def build_light(card, stack, tile, state):
@@ -678,7 +699,7 @@ def build_fan(card, stack, tile, state):
     on = bool(state) and state.get("state") == "on"
     entity = tile["entity"]
     if attrs.get("percentage") is None:
-        return _toggle("fan")(card, stack, tile, state)
+        return build_onoff(card, stack, tile, state)
     pct = attrs["percentage"] if on else 0
     label = big_value(stack, ("%d%%" % pct) if on else "關閉", state)
 
@@ -706,7 +727,7 @@ def build_lock(card, stack, tile, state):
     locked = s == "locked"
     big_value(stack, STATE_TEXT["lock"].get(s, s or "無法連線"), state)
     centered(stack, controls.TallSwitch(TALL_W, card.tall, locked, "accent_green",
-                                        "mdi:lock" if locked else "mdi:lock-open-variant",
+                                        render.icon_name(tile, state),
                                         lambda: (card.optimistic(tile["entity"], {"state": "unlocked" if locked else "locked"}),
                                                  card.call("lock", "unlock" if locked else "lock", tile["entity"]))), 4, 16)
 
@@ -811,7 +832,7 @@ def build_media(card, stack, tile, state):
                         lambda: card.call("media_player", "shuffle_set", entity, {"shuffle": not attrs.get("shuffle")})))
     buttons.append((44, "mdi:skip-previous", lambda: card.call("media_player", "media_previous_track", entity)))
     buttons.append((64, "mdi:pause" if playing else "mdi:play",
-                    lambda: (card.optimistic(entity, {"state": "paused" if playing else "playing"}),
+                    lambda: (card.optimistic(entity, kinds.play_pause_patch(state)),
                              card.call("media_player", "media_play_pause", entity))))
     buttons.append((44, "mdi:skip-next", lambda: card.call("media_player", "media_next_track", entity)))
     if "repeat" in attrs:
@@ -960,7 +981,7 @@ def build_camera(card, stack, tile, state):
                       w=BODY_W, align="c"), 0, 10)
 
 
-DETAIL = {"light": build_light, "fan": build_fan, "switch": _toggle("switch"), "input_boolean": _toggle("input_boolean"),
+DETAIL = {"light": build_light, "fan": build_fan, "switch": build_onoff, "input_boolean": build_onoff,
           "lock": build_lock, "climate": build_climate, "cover": build_cover, "media_player": build_media,
           "vacuum": build_vacuum, "weather": build_weather, "camera": build_camera}
 

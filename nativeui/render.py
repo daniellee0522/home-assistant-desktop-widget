@@ -16,7 +16,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient
                            QPainter, QPainterPath, QPen, QPolygonF, QTransform)
 from PySide6.QtSvg import QSvgRenderer
 
-from . import i18n
+from . import appearance, i18n
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Frozen, this package's data files live under PyInstaller's _MEIPASS.
@@ -256,7 +256,7 @@ def is_readonly(domain):
 def has_detail_on_hold(domain):
     """Tapped it acts; held it opens the detail card (a lock and the momentary kinds do not)."""
     return domain in ("light", "switch", "input_boolean", "climate", "fan", "cover", "media_player", "vacuum")
-DEFAULT_ICON = {"light": "light", "switch": "switch", "input_boolean": "switch",
+DEFAULT_ICON = {"light": "light", "switch": "mdi:toggle-switch-variant", "input_boolean": "mdi:toggle-switch-variant",
                 "climate": "mdi:air-conditioner", "fan": "fan", "cover": "mdi:blinds",
                 "media_player": "media", "lock": "lock", "vacuum": "mdi:robot-vacuum",
                 "scene": "mdi:palette", "script": "script", "automation": "mdi:robot",
@@ -264,87 +264,51 @@ DEFAULT_ICON = {"light": "light", "switch": "switch", "input_boolean": "switch",
                 "camera": "mdi:cctv"}
 
 
+def is_open(tile, st):
+    """Whether the tile's thing is open: an unlocked lock (or a switch shown as one), an open cover."""
+    fam = appearance.family(tile)
+    if fam == "lock":
+        return is_unlocked(st) if tile["domain"] == "lock" else bool(st) and st.get("state") == "on"
+    return fam == "cover" and bool(st) and st.get("state") in ("open", "opening")
+
+
 def icon_name(tile, st):
-    if tile.get("icon"):
-        return tile["icon"]
-    attrs = (st or {}).get("attributes") or {}
-    ha = attrs.get("icon")
-    if isinstance(ha, str) and ha.startswith("mdi:") and mdi_path(ha[4:]):
-        return ha
-    domain = tile["domain"]
-    if domain == "lock" and is_unlocked(st):
-        return "lock-open"
-    if domain == "sensor":
-        unit = attrs.get("unit_of_measurement") or ""
-        if attrs.get("device_class") == "temperature" or unit.startswith("°"):
-            return "thermometer"
-        if attrs.get("device_class") == "humidity" or unit == "%":
-            return "humidity"
-    return DEFAULT_ICON.get(domain, "sensor")
-
-
-def icon_kind(icon):
-    """What an icon stands for, so a tile is coloured by its icon and not only by the kind
-    of device it controls: a plug given a bulb is yellow when it is on."""
+    """The tile's icon (appearance.py): its own, or Home Assistant's, or its family's; in its open shape
+    when it is open."""
+    icon = tile.get("icon")
     if not icon:
-        return ""
-    name = icon[4:] if icon.startswith("mdi:") else icon
-    if name == "light" or re.search(r"lightbulb|lamp|ceiling-light|light-switch", name):
-        return "light"
-    if name == "switch" or re.search(r"outlet|power-plug|toggle", name):
-        return "switch"
-    if name == "fan" or name.startswith("fan"):
-        return "fan"
-    if re.search(r"air-conditioner|snowflake|thermostat|radiator|heat", name):
-        return "climate"
-    if re.search(r"blinds|curtains|window-shutter|garage", name):
-        return "cover"
-    if name in ("media", "monitor") or re.search(r"speaker|television|music|cast|play", name):
-        return "media_player"
-    if name in ("lock", "door") or re.search(r"^lock|door|shield", name):
-        return "lock"
-    if re.search(r"robot-vacuum|vacuum", name):
-        return "vacuum"
-    if name == "script" or re.search(r"palette|robot$", name):
-        return "scene"
-    return ""
+        attrs = (st or {}).get("attributes") or {}
+        ha = attrs.get("icon")
+        if isinstance(ha, str) and ha.startswith("mdi:") and mdi_path(ha[4:]):
+            icon = ha
+        elif tile["domain"] == "sensor":
+            unit = attrs.get("unit_of_measurement") or ""
+            if attrs.get("device_class") == "temperature" or unit.startswith("°"):
+                icon = "thermometer"
+            elif attrs.get("device_class") == "humidity" or unit == "%":
+                icon = "humidity"
+        icon = icon or appearance.own_icon(tile)
+    return appearance.open_shape(icon) if is_open(tile, st) else icon
+
+
+def light_color(st, theme):
+    attrs = (st or {}).get("attributes") or {}
+    if isinstance(attrs.get("rgb_color"), list) and attrs.get("color_mode") in ("hs", "rgb", "rgbw", "rgbww", "xy"):
+        return "rgb(%d,%d,%d)" % tuple(attrs["rgb_color"][:3])
+    return ACCENT["yellow"] if theme == "dark" else LIGHT_THEME_BULB
 
 
 def icon_color(tile, st, on, theme, tcol):
-    domain = tile["domain"]
-    attrs = (st or {}).get("attributes") or {}
+    """The icon's colour, by what the tile is shown as (appearance.family): its family's colour when on."""
+    fam = appearance.family(tile)
     off = tcol["off_text1"]
-    kind = icon_kind(tile.get("icon"))
-    if kind and kind != domain:
-        # An icon chosen by hand for a device of another kind: coloured as that kind is when
-        # it is on, plain when it is off.
-        if not on:
-            return off
-        if kind == "light":
-            if isinstance(attrs.get("rgb_color"), list) and attrs.get("color_mode") in ("hs", "rgb", "rgbw", "rgbww", "xy"):
-                return "rgb(%d,%d,%d)" % tuple(attrs["rgb_color"][:3])
-            return ACCENT["yellow"] if theme == "dark" else LIGHT_THEME_BULB
-        return {"climate": ACCENT["cyan"], "media_player": ACCENT["green"], "lock": ACCENT["teal"]}.get(
-            kind, ACCENT["blue"])
-    if domain == "light":
-        if not on:
-            return off
-        if isinstance(attrs.get("rgb_color"), list) and attrs.get("color_mode") in ("hs", "rgb", "rgbw", "rgbww", "xy"):
-            return "rgb(%d,%d,%d)" % tuple(attrs["rgb_color"][:3])
-        return ACCENT["yellow"] if theme == "dark" else LIGHT_THEME_BULB
-    if domain in ("switch", "input_boolean", "fan", "cover", "vacuum"):
-        return ACCENT["blue"] if on else off
-    if domain == "climate":
-        return ACCENT["cyan"] if on else off
-    if domain == "media_player":
-        return ACCENT["green"] if on else off
-    if domain == "lock":
-        return ACCENT["teal"] if is_unlocked(st) else off
-    if domain in MOMENTARY:
+    if fam == "scene":
         return ACCENT["blue"]
-    if domain == "binary_sensor":
-        return ACCENT["green"] if st and st.get("state") == "on" else off
-    return off
+    if not on or fam not in appearance.COLORS:
+        return off
+    if fam == "light":
+        return light_color(st if tile["domain"] == "light" else None, theme)
+    return ACCENT[appearance.COLORS[fam]]
 
 
 def value_text(domain, st):
@@ -376,18 +340,48 @@ def media_label(st):
     return {"off": "關閉", "idle": "待機", "standby": "待機", "unavailable": "無法連線"}.get(s, s)
 
 
-def default_label(domain, st):
+STATE_WORDS = {"locked": "已上鎖", "locking": "上鎖中", "unlocked": "未上鎖", "unlocking": "解鎖中",
+               "open": "已開啟", "opening": "開啟中", "jammed": "卡住了", "closed": "關閉", "closing": "關閉中",
+               "unavailable": "無法連線", "unknown": "狀態不明"}
+HVAC_WORDS = {"off": "關閉", "cool": "冷氣", "heat": "暖氣", "heat_cool": "自動", "auto": "自動", "dry": "除濕",
+              "fan_only": "送風"}
+VACUUM_WORDS = {"cleaning": "清掃中", "docked": "已回充", "returning": "回充中", "paused": "已暫停", "idle": "待命",
+                "error": "錯誤"}
+
+
+def state_text(tile, st):
+    """The words under a tile's name: what it is doing now (an on/off thing in its family's words: a switch
+    shown as a lock is unlocked or locked). Sensors show their reading instead (draw_content)."""
+    domain = tile["domain"]
     s = st.get("state", "") if st else ""
-    words = {"locked": "已上鎖", "locking": "上鎖中", "unlocked": "未上鎖", "unlocking": "解鎖中",
-             "open": "已開啟", "opening": "開啟中", "jammed": "卡住了",
-             "unavailable": "無法連線", "unknown": "狀態不明"}
-    return {
-        "light": "燈光", "switch": "插座", "input_boolean": "虛擬開關", "climate": s, "fan": "風扇",
-        "cover": "開啟" if s == "open" else "關閉" if s == "closed" else s,
-        "media_player": media_label(st or {}), "lock": words.get(s, "未上鎖"),
-        "vacuum": s, "scene": "場景", "script": "腳本", "automation": "自動化",
-        "binary_sensor": "偵測到" if s == "on" else "正常",
-    }.get(domain, s)
+    attrs = (st or {}).get("attributes") or {}
+    if s in ("unavailable", "unknown"):
+        return STATE_WORDS[s]
+    if domain in MOMENTARY:
+        return {"scene": "場景", "script": "腳本", "automation": "自動化"}[domain]
+    if domain == "media_player":
+        return media_label(st or {})
+    if domain == "climate":
+        return HVAC_WORDS.get(s, s)
+    if domain == "lock":
+        return STATE_WORDS.get(s, "未上鎖")
+    if domain == "cover":
+        pos = attrs.get("current_position")
+        return "%d%%" % pos if s == "open" and isinstance(pos, (int, float)) and 0 < pos < 100 else STATE_WORDS.get(s, s)
+    if domain == "vacuum":
+        return VACUUM_WORDS.get(s, s)
+    if domain == "binary_sensor":
+        return "偵測到" if s == "on" else "正常"
+    if domain not in ("switch", "input_boolean", "light", "fan"):
+        return s
+    on_words, off_words = appearance.words(tile)
+    if s != "on":
+        return off_words
+    if domain == "light" and attrs.get("brightness") is not None:
+        return "%d%%" % round(attrs["brightness"] / 255 * 100)
+    if domain == "fan" and attrs.get("percentage"):
+        return "%d%%" % attrs["percentage"]
+    return on_words
 
 
 def climate_badge(st, on):
@@ -604,7 +598,7 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     readout = readonly and bool(value)
     c1 = tcol["on_text1"] if on else tcol["off_text1"]
     c2 = tcol["on_text2"] if on else tcol["off_text2"]
-    label = tr((tile.get("label") or default_label(domain, st)) if ok else "無法連線")
+    label = tr(state_text(tile, st) if ok else "無法連線")
     name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
     icolor = icon_color(tile, st, on, theme, tcol) if ok else tcol["off_text1"]
     if dim:

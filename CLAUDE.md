@@ -19,6 +19,16 @@ calling UI work done.
 - **No modal dialogs** in the panel or the detail. They take focus and leave the panel waiting. Use a
   floating pane instead.
 
+## What a tile is shown as (`nativeui/appearance.py`)
+
+- A tile's icon decides its family; the family decides the icon's colour, the words under its name, and the
+  look of its detail. `render.icon_name` / `icon_color` / `state_text` and the detail builders all read
+  `appearance.family(tile)`. Never special-case a domain or an icon elsewhere.
+- Switches and input booleans can take any on/off family. Other devices take only other shapes of their own.
+  Any other icon only changes the picture. New icons go into `appearance.FAMILIES`, not into scattered
+  lists.
+- Under a tile's name is its state, never a free label. Sensors show their reading.
+
 ## Behaviour that must survive a rebuild
 
 Screens are rebuilt from scratch when a state arrives. A rebuild must keep:

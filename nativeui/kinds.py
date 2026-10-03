@@ -364,32 +364,46 @@ def _squircle_at(W, H, inset, angle, n=5.0):
     return W / 2 + r * c, H / 2 + r * s
 
 
+def clock_font(px):
+    """The clock's digits: Bahnschrift Condensed (DIN-like, narrow, on every Windows 10 and 11), bold; the app's
+    own face where it is missing."""
+    f = render.font(px, QFont.Bold)
+    f.setFamilies(["Bahnschrift Condensed", "Bahnschrift"] + render.FAMILIES)
+    f.setVariableAxis(QFont.Tag("wght"), 700)
+    f.setVariableAxis(QFont.Tag("wdth"), 75)
+    return f
+
+
 def draw_clock(p, W, H, ink, ink2, now):
-    """The time, large and narrow, inside a ring of minute ticks (longer and bolder at the hours); the day
+    """The time, large, narrow and tall, inside a ring of minute ticks all alike: this minute's the darkest,
+    the next one's the lightest, and those between fading from one to the other around the ring; the day
     above it."""
     for i in range(60):
-        hour = i % 5 == 0
         ang = -math.pi / 2 + i / 60 * 2 * math.pi
-        x1, y1 = _squircle_at(W, H, 18, ang)
-        x2, y2 = _squircle_at(W, H, 18 + (22 if hour else 12), ang)
-        p.setPen(QPen(ink if hour else ink2, 4.5 if hour else 2.5, Qt.SolidLine, Qt.RoundCap))
+        x1, y1 = _squircle_at(W, H, 20, ang)
+        x2, y2 = _squircle_at(W, H, 20 + 16, ang)
+        ago = (now.minute - i) % 60                      # 0: this minute ... 59: the next one
+        c = QColor(ink)
+        c.setAlphaF(ink.alphaF() * (1.0 - 0.88 * ago / 59))
+        p.setPen(QPen(c, 3.2, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
     day = (now.strftime("%a %m/%d") if render._language == "en" else
            "週%s %d/%d" % ("一二三四五六日"[now.weekday()], now.month, now.day))
-    _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 76, "c", W)
+    _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 72, "c", W)
     text = now.strftime("%H:%M")
-    f = _font(124, QFont.Black)
-    narrow = 0.74                                      # a condensed face, as iOS's clock
-    tw = render.QFontMetricsF(f).horizontalAdvance(text) / 10 * render.HSCALE * narrow
-    k = min(1.0, (W - 110) / max(1.0, tw))
-    p.save()
-    p.translate(W / 2, H / 2 + 16)
-    p.scale(narrow * k, k)
+    f = clock_font(118)
+    tall = 1.22                                        # drawn taller than it is wide, as iOS's clock
     fm = render.QFontMetricsF(f)
+    full = fm.horizontalAdvance(text) / 10 * render.HSCALE
+    k = min(1.0, (W - 104) / max(1.0, full))
+    p.save()
+    p.translate(W / 2, H / 2 + 18)
+    p.scale(k, k * tall)
     p.setPen(Qt.NoPen)
     p.setBrush(ink)
-    full = fm.horizontalAdvance(text) / 10 * render.HSCALE
-    p.drawPath(render.text_path(QPointF(0, 0), f, text, -full / 2, -fm.height() / 20 + fm.ascent() / 10))
+    # (the digits' own height, not the line's: centred on the cap height)
+    cap = fm.capHeight() / 10
+    p.drawPath(render.text_path(QPointF(0, 0), f, text, -full / 2, cap / 2))
     p.restore()
 
 
@@ -444,10 +458,22 @@ def media_position(state):
     return max(0.0, min(dur or pos, pos)), dur
 
 
-def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme):
+def play_pause_patch(state):
+    """What a player is at once when play/pause is pressed (before Home Assistant says so): playing or
+    paused, and its place taken now, so the bar neither jumps on (the time since it was last told counted
+    as played) nor back."""
+    pos, _ = media_position(state)
+    playing = (state or {}).get("state") == "playing"
+    return {"state": "paused" if playing else "playing",
+            "attributes": dict((state or {}).get("attributes") or {}, media_position=pos,
+                               media_position_updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat())}
+
+
+def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to=None):
     """Now playing, as iOS's Music widget: the cover on the left, the song, its artist and where it is on the
     right, and previous / play-pause / next. The card takes the cover's colour. Returns the buttons as
-    [(rect, action)] (action: "previous", "play_pause", "next")."""
+    [(rect, action)] (action: "previous", "play_pause", "next", and "seek": the bar, where the player can
+    seek; seek_to is where it is being dragged to, in seconds)."""
     attrs = (state or {}).get("attributes") or {}
     s = (state or {}).get("state") or ""
     playing = s == "playing"
@@ -492,15 +518,21 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme):
     if artist:
         _text(p, _fit(artist, _font(20, QFont.Medium), tw), _font(20, QFont.Medium), soft, x, pad + 78)
     pos, dur = media_position(state)
+    buttons = []
     if dur:
+        if seek_to is not None:
+            pos = max(0.0, min(dur, seek_to))
         y = pad + 124
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 70))
         p.drawRoundedRect(QRectF(x, y, tw, 6), 3, 3)
         p.setBrush(white)
         p.drawRoundedRect(QRectF(x, y, max(6.0, tw * pos / dur), 6), 3, 3)
+        if int(attrs.get("supported_features") or 0) & 2:            # MediaPlayerEntityFeature.SEEK
+            r = 11 if seek_to is not None else 8
+            p.drawEllipse(QPointF(x + tw * pos / dur, y + 3), r, r)
+            buttons.append((QRectF(x, y - 16, tw, 38), "seek"))
     # the buttons, along the bottom
-    buttons = []
     big, small = 76, 58
     cy = H - pad - big / 2
     cx = x + tw / 2
@@ -603,7 +635,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
         draw_chart(p, W, H, cols, rows, mine, states, extras.get("history"), tcol)
     elif kind == "media":
         button = draw_media(p, W, H, mine[0], states.get(mine[0]["entity"]), extras.get("art"), card, tcol, dim,
-                            style, theme)
+                            style, theme, extras.get("seek_to"))
     if kind in ("weather", "camera", "media") and mine and not dim:
         render.inner_shadow(p, card, QColor(255, 255, 255, 40))
     p.restore()
