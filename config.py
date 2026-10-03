@@ -72,6 +72,11 @@ DEFAULT_CONFIG = {
     # widget is clicked.
     "dim_when_idle": True,
     "dim_after_sec": 120,
+    # The shortcut that opens and closes the tray panel from anywhere ("" for none; see hotkey.py).
+    "hotkey": "ctrl+alt+h",
+    # Notifications when a safety sensor or a lock on a tile changes (see alerts.py).
+    "alert_sensors": False,
+    "alert_locks": False,
     "fixed_size": False,      # skip auto-fit-to-content; use fixed_width/height
     "fixed_width": 400,
     "fixed_height": 300,

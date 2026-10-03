@@ -69,7 +69,9 @@ from nativeui import panel as native_panel  # noqa: E402
 from nativeui import settings as native_settings  # noqa: E402
 from nativeui import widget as native_widget  # noqa: E402
 
+import alerts  # noqa: E402
 import config as cfgmod  # noqa: E402
+import hotkey as hotkeymod  # noqa: E402
 import home  # noqa: E402
 from ha_client import HAClient  # noqa: E402
 from tray import build_tray_icon, restore_tray_icon  # noqa: E402
@@ -185,6 +187,12 @@ class Api:
         self._settings_lock = threading.Lock()
         self._settings_resize_lock = threading.Lock()
         self._settings_last_resize_seq = -1
+
+        # Notifications about locks and safety sensors (off unless chosen), and the
+        # shortcut that opens the panel (registered once the tray is up).
+        self._alerts = alerts.Alerts(self._notify)
+        self._hotkey = None
+        self._hotkey_ok = True
 
         self._client = HAClient(
             on_event=self._on_ha_event, on_status=self._on_ha_status)
@@ -341,6 +349,10 @@ class Api:
             "panel_theme": self._cfg.get("panel_theme", "follow"),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
             "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
+            "hotkey": self._cfg.get("hotkey", ""),
+            "hotkey_ok": bool(self._hotkey_ok),
+            "alert_sensors": bool(self._cfg.get("alert_sensors", False)),
+            "alert_locks": bool(self._cfg.get("alert_locks", False)),
             # Positions stay on this side; the windows only need what to draw.
             "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"]}
                         for w in self._cfg.get("widgets", [])],
@@ -748,6 +760,9 @@ class Api:
         "liquid_blur": lambda v: max(0, min(100, int(v))),
         "dim_when_idle": bool,
         "dim_after_sec": lambda v: max(10, min(3600, int(v))),
+        "hotkey": lambda v: _valid_hotkey(v),
+        "alert_sensors": bool,
+        "alert_locks": bool,
     }
 
     def save_prefs(self, changes):
@@ -770,6 +785,8 @@ class Api:
         if "dim_when_idle" in touched and not self._cfg["dim_when_idle"] and self._dimmed:
             self._dimmed = False
             self._push_dim()
+        if "hotkey" in touched:
+            self._apply_hotkey()
         cfgmod.save_config(self._cfg)
         self._push_prefs()
         return True
@@ -923,11 +940,11 @@ class Api:
         time.sleep(0.04)
         self._arming_kind = None
 
-    def toggle_flyout(self):
+    def toggle_flyout(self, from_key=False):
         if self._flyout_open:
             self.hide_flyout()
         else:
-            self.show_flyout()
+            self.show_flyout(from_key)
 
     def _place_flyout(self, window, hwnd, size):
         at = self._flyout_origin(size[0], size[1])
@@ -937,7 +954,8 @@ class Api:
                     _get_hwnd(window), at[0], at[1], size[0], size[1]),
             )
 
-    def show_flyout(self):
+    def show_flyout(self, from_key=False):
+        """`from_key`: opened by the shortcut, so the pointer says nothing about where the tray is."""
         if not self._all_tiles() and not self._home_mode():
             self.open_settings_window()
             return
@@ -949,7 +967,7 @@ class Api:
             return
         self._flyout_open = True
         self._sync_client_entities()
-        self._flyout_anchor = self._tray_corner()
+        self._flyout_anchor = self._tray_corner(_tray_point() if from_key else None)
         size = self._flyout_size
         if not size:
             rect = _window_rect(hwnd) or (0, 0, 0, 0)
@@ -1066,13 +1084,16 @@ class Api:
 
         threading.Thread(target=watch, daemon=True).start()
 
-    def _tray_corner(self):
+    def _tray_corner(self, at=None):
         """The work area under the pointer (which is over the tray icon at
-        the moment of the click), and whether the notification area is on
-        its right-hand side."""
+        the moment of the click), or under the point `at`, and whether the
+        notification area is on its right-hand side."""
         try:
             pt = _POINT(0, 0)
-            _user32.GetCursorPos(ctypes.byref(pt))
+            if at:
+                pt.x, pt.y = at
+            else:
+                _user32.GetCursorPos(ctypes.byref(pt))
             work = _work_area_at(pt.x, pt.y)
             if not work:
                 return None
@@ -1679,7 +1700,15 @@ class Api:
 
     def _on_ha_events(self, items):
         """New states, [[entity_id, state], ...], to the windows that show them, in one push each."""
+        sensors, locks = self._cfg.get("alert_sensors"), self._cfg.get("alert_locks")
+        watched = set(self._watched_entities())
         for entity_id, new_state in items:
+            if (sensors or locks) and entity_id in watched:
+                try:
+                    self._alerts.check(entity_id, self._known_states.get(entity_id), new_state,
+                                       bool(sensors), bool(locks), self._cfg.get("language", "zh-TW"))
+                except Exception:
+                    pass
             self._known_states[entity_id] = new_state
         if not self._ui_ready or not (self._widgets or self._window):
             with self._pending_lock:
@@ -1687,7 +1716,6 @@ class Api:
                 if len(self._pending) > 500:
                     self._pending = self._pending[-500:]
             return
-        watched = set(self._watched_entities())
         on_tiles, home_only = [], []
         for entity_id, new_state in items:
             if entity_id in self._home_states:
@@ -1736,6 +1764,29 @@ class Api:
             return
         window.send("widget_moved")
 
+    # ---- the shortcut and the notifications ----------------------------------
+
+    def _apply_hotkey(self):
+        """Register the shortcut in the config (or none), and tell Settings whether it took."""
+        if self._hotkey is None:
+            self._hotkey = hotkeymod.GlobalHotkey(self._hotkey_pressed)
+        wanted = self._cfg.get("hotkey", "")
+        ok = self._hotkey.set(wanted)
+        if not ok:
+            qtshell.log("Shortcut %r could not be registered (another program may have it)" % wanted)
+        if ok != self._hotkey_ok:
+            self._hotkey_ok = ok
+            self._push_prefs()
+
+    def _hotkey_pressed(self):
+        threading.Thread(target=self.toggle_flyout, args=(True,), daemon=True).start()
+
+    def _notify(self, title, message):
+        icon = self._tray_icon
+        if icon is None:
+            return
+        threading.Thread(target=lambda: icon.notify(message, title), daemon=True).start()
+
     def _refresh_now(self):
         def go():
             wanted = set(self._watched_entities())
@@ -1769,6 +1820,24 @@ class Api:
                 pass
         _compat_capture.close()
         os._exit(0)
+
+
+def _valid_hotkey(text):
+    """A shortcut as hotkey.py writes it, "" for none; anything else is refused (ValueError)."""
+    value = hotkeymod.normalise(text)
+    if value is None:
+        raise ValueError("not a shortcut: %r" % (text,))
+    return value
+
+
+def _tray_point():
+    """The middle of the notification area on the main taskbar, physical pixels, or None."""
+    tray = _user32.FindWindowW("Shell_TrayWnd", None)
+    notify = _user32.FindWindowExW(tray, None, "TrayNotifyWnd", None) if tray else None
+    rect = _window_rect(notify or tray) if (notify or tray) else None
+    if not rect:
+        return None
+    return ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
 
 
 def _startup_command():
@@ -1829,6 +1898,8 @@ _user32.GetDC.restype = ctypes.c_void_p
 _user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 _user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
 _user32.FindWindowW.restype = ctypes.c_void_p
+_user32.FindWindowExW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p]
+_user32.FindWindowExW.restype = ctypes.c_void_p
 _user32.PrintWindow.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
 _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
@@ -3084,6 +3155,7 @@ def main():
                                 toggle_theme, refresh_now, quit_action)
     api._tray_icon = tray_icon
     tray_icon.run_detached()
+    api._apply_hotkey()
 
     qtshell.start()
 

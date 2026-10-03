@@ -10,6 +10,8 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 
+import hotkey as hotkeymod
+
 from . import render, ui
 from .detail import Stack
 from .editor import EditorMixin
@@ -28,6 +30,21 @@ def dim_text(sec):
     return ("%d 秒" % sec) if sec < 60 else ("%s 分鐘" % (round(sec / 6) / 10)).replace(".0 ", " ")
 
 
+_QT_KEY_NAMES = {Qt.Key_Space: "space", Qt.Key_Return: "enter", Qt.Key_Enter: "enter", Qt.Key_Tab: "tab",
+                 Qt.Key_Home: "home", Qt.Key_End: "end", Qt.Key_Insert: "insert", Qt.Key_Delete: "delete",
+                 Qt.Key_PageUp: "pageup", Qt.Key_PageDown: "pagedown", Qt.Key_Up: "up", Qt.Key_Down: "down",
+                 Qt.Key_Left: "left", Qt.Key_Right: "right", Qt.Key_Pause: "pause"}
+
+
+def _key_name(key):
+    """hotkey.py's name for a Qt key, or None for a modifier or a key a shortcut cannot use."""
+    if Qt.Key_A <= key <= Qt.Key_Z or Qt.Key_0 <= key <= Qt.Key_9:
+        return chr(key).lower()
+    if Qt.Key_F1 <= key <= Qt.Key_F24:
+        return "f%d" % (key - Qt.Key_F1 + 1)
+    return _QT_KEY_NAMES.get(key)
+
+
 class Hint(Label):
     def __init__(self, text, w, color="ink2", size=11.5):
         super().__init__(text, size, QFont.Normal, color, w=w, wrap=True, lh=1.4)
@@ -37,6 +54,8 @@ class SettingsScene(EditorMixin, OverlayScene):
     def __init__(self, facade, api):
         super().__init__(facade, api, "settings")
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)      # it has fields to type in
+        self.capturing = False                                     # waiting for a new shortcut's keys
+        self.shortcut_error = None
         self.prefs = api._prefs()
         self.cfg = api.bootstrap().get("config", {})
         self.connected = bool(api.bootstrap().get("connected"))
@@ -66,6 +85,7 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.language = self.prefs.get("language", "zh-TW")
 
     def apply_prefs(self, prefs):
+        shortcut = (self.prefs.get("hotkey"), self.prefs.get("hotkey_ok"))
         before = (self.theme_raw, self.style, self.language, repr(self.prefs.get("panel")),
                   repr(self.prefs.get("widgets")), self.prefs.get("glass_mode"))
         self.prefs = prefs
@@ -76,6 +96,9 @@ class SettingsScene(EditorMixin, OverlayScene):
             self.retheme()
             if self.page != "settings" or before[:3] != after[:3] or before[3] != after[3] or before[5] != after[5]:
                 self.build(keep=True)
+                return
+        if self.page == "settings" and shortcut != (prefs.get("hotkey"), prefs.get("hotkey_ok")):
+            self.build(keep=True)
 
     def themed(self):
         self.build(keep=True)
@@ -393,6 +416,16 @@ class SettingsScene(EditorMixin, OverlayScene):
                             fmt=dim_text)
         boot = CheckRow("開機時自動啟動", bool(self.cfg.get("start_on_boot")), BODY_W, self.set_boot)
         stack.place(boot, 0, 8)
+        self.shortcut_row(stack)
+
+        # notifications
+        self.section_title(stack, "通知", 14)
+        stack.place(CheckRow("感測器警示 (門窗打開、漏水、煙霧、瓦斯等)", bool(prefs.get("alert_sensors")), BODY_W,
+                             lambda on: self.save_pref({"alert_sensors": on})), 0, 8)
+        stack.place(CheckRow("門鎖警示 (解鎖、打開或卡住)", bool(prefs.get("alert_locks")), BODY_W,
+                             lambda on: self.save_pref({"alert_locks": on})), 0, 8)
+        stack.place(Hint("顯示在 widget 或系統匣面板上的配件狀態改變時，以 Windows 通知提醒；同一件事一分鐘內只提醒一次。", BODY_W),
+                    0, 14)
 
         # the widgets
         self.section_title(stack, "桌面 Widget", 6)
@@ -410,6 +443,73 @@ class SettingsScene(EditorMixin, OverlayScene):
         stack.place(foot, 8, 0)
         body.h = stack.end() + 16
         return body
+
+    # -- the shortcut -------------------------------------------------------------------------------------------------
+    def shortcut_row(self, stack):
+        """The shortcut that opens the panel: press the button, then the keys (Esc cancels, Backspace clears)."""
+        block = View(0, 0, BODY_W, 0)
+        block.add(Label("開關系統匣面板的快捷鍵", 12, QFont.Normal, "ink2", w=BODY_W))
+        current = self.prefs.get("hotkey", "")
+        if self.capturing:
+            text = "請按下按鍵組合…"
+        else:
+            text = hotkeymod.label(current) or self.t_("未設定")
+        key = Button(text, size=12.5, weight=QFont.DemiBold, h=33, pad=16, x=0, y=20,
+                     fill="accent_blue" if self.capturing else "btn_fill",
+                     hover_fill="accent_blue" if self.capturing else "btn_fill_strong",
+                     color="white" if self.capturing else "btn_text", on_click=lambda e: self.capture_shortcut())
+        block.add(key)
+        if current and not self.capturing:
+            block.add(Button("清除", size=12.5, weight=QFont.DemiBold, h=33, pad=14, x=key.w + 10, y=20,
+                             on_click=lambda e: self.set_shortcut("")))
+        y = 20 + 33 + 5
+        if self.capturing:
+            note, color = "按 Esc 取消，Backspace 清除。需要包含 Ctrl、Alt 或 Win。", "ink2"
+        elif self.shortcut_error:
+            note, color = self.shortcut_error, "accent_red"
+        elif current and self.prefs.get("hotkey_ok") is False:
+            note, color = "這組快捷鍵已被其他程式使用，請換一組。", "accent_red"
+        else:
+            note, color = "在任何地方按下即可開啟或關閉系統匣面板。", "ink2"
+        hint = Hint(note, BODY_W, color)
+        hint.y = y
+        block.add(hint)
+        block.h = y + hint.h
+        stack.place(block, 10, 8)
+
+    def capture_shortcut(self):
+        self.capturing = not self.capturing
+        self.shortcut_error = None
+        self.setFocus()
+        self.build(keep=True)
+
+    def set_shortcut(self, text):
+        self.capturing = False
+        value = hotkeymod.normalise(text)
+        if value is None:
+            self.shortcut_error = self.t_("需要包含 Ctrl、Alt 或 Win，再加一個按鍵。")
+        else:
+            self.shortcut_error = None
+            self.save_pref({"hotkey": value})
+        self.build(keep=True)
+
+    def keyPressEvent(self, e):
+        if not self.capturing:
+            return super().keyPressEvent(e)
+        k, mods = e.key(), e.modifiers()
+        if k == Qt.Key_Escape:
+            self.capturing = False
+            self.build(keep=True)
+            return
+        if k in (Qt.Key_Backspace, Qt.Key_Delete) and not mods & (Qt.ControlModifier | Qt.AltModifier):
+            self.set_shortcut("")
+            return
+        name = _key_name(k)
+        if name is None:
+            return                                   # a modifier on its own: wait for the key
+        parts = [m for flag, m in ((Qt.ControlModifier, "ctrl"), (Qt.AltModifier, "alt"),
+                                   (Qt.ShiftModifier, "shift"), (Qt.MetaModifier, "win")) if mods & flag]
+        self.set_shortcut("+".join(parts + [name]))
 
     def select_block(self, label, options, value, change, w=BODY_W):
         block = View(0, 0, w, 16 + 4 + 36)

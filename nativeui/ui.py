@@ -69,6 +69,9 @@ def text_width(text, f):
     return QFontMetricsF(f).horizontalAdvance(text) / 10 * render.HSCALE
 
 
+_NO_LINE_START = set("。，、；：！？）」』〉》】,.;:!?)")
+
+
 def wrap_lines(text, f, width, any_break=False):
     """`text` broken into lines no wider than `width`: at spaces (or anywhere, for a long unbroken
     string), and between CJK characters."""
@@ -80,6 +83,12 @@ def wrap_lines(text, f, width, any_break=False):
         for token in tokens:
             trial = cur + token
             if cur and fm.horizontalAdvance(trial.rstrip()) / 10 * render.HSCALE > width:
+                if token in _NO_LINE_START and len(cur.rstrip()) > 1:
+                    # A line never starts with a closing mark: the character before it goes down with it.
+                    cur = cur.rstrip()
+                    lines.append(cur[:-1])
+                    cur = cur[-1] + token
+                    continue
                 lines.append(cur.rstrip())
                 cur = token.lstrip()
             else:

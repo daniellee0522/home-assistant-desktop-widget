@@ -197,5 +197,17 @@
  "未知錯誤": "Unknown error",
  "秒": "sec",
  "分鐘": "min",
- "小時": "hours"
+ "小時": "hours",
+ "通知": "Notifications",
+ "感測器警示 (門窗打開、漏水、煙霧、瓦斯等)": "Sensor alerts (doors and windows opened, leaks, smoke, gas...)",
+ "門鎖警示 (解鎖、打開或卡住)": "Lock alerts (unlocked, opened or jammed)",
+ "顯示在 widget 或系統匣面板上的配件狀態改變時，以 Windows 通知提醒；同一件事一分鐘內只提醒一次。": "A Windows notification when a device shown on a widget or the tray panel changes; the same news at most once a minute.",
+ "開關系統匣面板的快捷鍵": "Shortcut to open and close the tray panel",
+ "請按下按鍵組合…": "Press the keys…",
+ "未設定": "None",
+ "清除": "Clear",
+ "按 Esc 取消，Backspace 清除。需要包含 Ctrl、Alt 或 Win。": "Esc cancels, Backspace clears. Use Ctrl, Alt or Win with a key.",
+ "這組快捷鍵已被其他程式使用，請換一組。": "Another program already uses this shortcut; choose another.",
+ "在任何地方按下即可開啟或關閉系統匣面板。": "Press it anywhere to open or close the tray panel.",
+ "需要包含 Ctrl、Alt 或 Win，再加一個按鍵。": "Use Ctrl, Alt or Win together with a key."
 }
