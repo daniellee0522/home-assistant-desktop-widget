@@ -422,7 +422,7 @@ def draw_clock(p, W, H, ink, ink2, now, radius=84):
     # would be left hollow), centred under the day, a little taller than they are.
     path = render.text_path(QPointF(0, 0), clock_font(118), now.strftime("%H:%M"), 0, 0).simplified()
     br = path.boundingRect()
-    cx, cy, box_w, box_h = W / 2, H / 2 + 22, W - 2 * 66, 122
+    cx, cy, box_w, box_h = W / 2, H / 2 + 6, W - 2 * 56, 140      # in the middle of the face
     sx = box_w / max(1.0, br.width())
     sy = min(box_h / max(1.0, br.height()), sx * 1.45)
     p.save()
