@@ -137,7 +137,15 @@ class GlassMixin:
                 # At most 30 looks a second, as the page's glass was: an animated wallpaper behind the
                 # window otherwise keeps the program busy for pictures nobody can tell apart. The pace
                 # is kept before the look, not after it, so the picture is as fresh as can be.
-                wait = 1 / 30 - (time.monotonic() - last)
+                # The tray panel is the thing being looked at while it is open, so it gets as many looks as
+                # it can take (the cost of one, about 25 ms, sets the pace); the widgets beside it rest.
+                if kind == "flyout":
+                    pace = 1 / 60
+                elif "flyout" in getattr(api, "_overlays_open", ()):
+                    pace = 1 / 10
+                else:
+                    pace = 1 / 30
+                wait = pace - (time.monotonic() - last)
                 if wait > 0:
                     time.sleep(wait)
                 last = time.monotonic()

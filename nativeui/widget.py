@@ -498,7 +498,9 @@ class _Surface(GlassMixin, QWidget):
             self._invalidate_overlay()
 
     def _invalidate_overlay(self):
-        self.overlay = self.overlay_dim = None
+        # The pointer, a scroll, a flash: what is dimmed does not show them, so the dimmed picture stays
+        # (it is the one fading out when a touch wakes the widget, which must not stall to draw twice).
+        self.overlay = None
         self.update()
 
     # ---- flashes of the momentary tiles -------------------------------------------

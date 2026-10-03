@@ -444,12 +444,21 @@ def font(px, weight, spacing=0.0):
 HSCALE = float(os.environ.get("NATIVE_HSCALE", "1.0"))
 
 
+_text_paths = {}
+
+
 def text_path(origin, f, text, x, y):
     """The text as an outline at (x, y) on its baseline, from a font ten times
     the size and scaled back (and narrowed by HSCALE: Chrome sets this font a
     little tighter than Qt does)."""
-    path = QPainterPath()
-    path.addText(origin, f, text)
+    key = (f.key(), text, origin.x(), origin.y())
+    path = _text_paths.get(key)
+    if path is None:
+        path = QPainterPath()
+        path.addText(origin, f, text)             # the costly part (shaping and outlining): kept
+        if len(_text_paths) > 4000:
+            _text_paths.clear()
+        _text_paths[key] = path
     t = QTransform()
     t.translate(x, y)
     t.scale(0.1 * HSCALE, 0.1)

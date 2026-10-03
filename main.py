@@ -3322,8 +3322,26 @@ def main():
             os.makedirs(folder, exist_ok=True)
             time.sleep(6)
             api.dismiss_flyout = lambda: None
+            if os.environ.get("HA_WIDGET_PROBE_DIM"):
+                for n in range(2):
+                    api._dimmed = True
+                    api._push_dim()
+                    time.sleep(2.0)
+                    api.wake()
+                    time.sleep(2.0)
+                os._exit(0)
             t0 = time.time()
             api.toggle_flyout()
+            if os.environ.get("HA_WIDGET_PROBE_FPS"):
+                time.sleep(1.0)
+                sc = api._flyout_window.native
+                count = [0]
+                inner = sc._on_glass
+                sc.glass_signals.glass.disconnect()
+                sc.glass_signals.glass.connect(lambda: (count.__setitem__(0, count[0] + 1), inner()))
+                time.sleep(5.0)
+                webview.log("probe: panel glass %.1f pictures/s" % (count[0] / 5.0))
+                os._exit(0)
             webview.log("probe: toggle returned after %.2fs" % (time.time() - t0))
             if os.environ.get("HA_WIDGET_PROBE_CYCLES"):
                 # opens and closes it again and again, timing each (no pictures)

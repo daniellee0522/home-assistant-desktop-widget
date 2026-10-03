@@ -80,7 +80,24 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.build(keep=True)
 
     def set_connected(self, on):
-        self.connected = bool(on)
+        """A drop shows only once it has lasted a few seconds: short ones heal within the client's backoff."""
+        on = bool(on)
+        timer = getattr(self, "_drop_timer", None)
+        if on:
+            if timer is not None:
+                timer.stop()
+            self._apply_connected(True)
+        elif timer is None or not timer.isActive():
+            if timer is None:
+                timer = self._drop_timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda: self._apply_connected(False))
+            timer.start(8000)
+
+    def _apply_connected(self, on):
+        if on == self.connected:
+            return
+        self.connected = on
         if self.page == "settings":
             self.build(keep=True)
 

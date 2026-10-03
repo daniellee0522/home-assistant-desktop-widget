@@ -210,9 +210,22 @@ class HAClient:
                     ws.recv()  # result ack for id 1
                     self._set_status(True, "connected")
                     backoff = 2
+                    # A quiet Home Assistant sends nothing for minutes, which is not a dead line: wait
+                    # 25 s, then ask it something; only when that goes unanswered too is the line given up.
+                    ws.settimeout(25)
+                    pings, quiet = 1, 0
 
                     while not self._stop.is_set():
-                        raw = ws.recv()
+                        try:
+                            raw = ws.recv()
+                        except websocket.WebSocketTimeoutException:
+                            quiet += 1
+                            if quiet >= 2:
+                                raise RuntimeError("no answer to a ping")
+                            pings += 1
+                            ws.send(json.dumps({"id": 1000 + pings, "type": "ping"}))
+                            continue
+                        quiet = 0
                         if raw is None or raw == "":
                             self._set_status(False, "disconnected")
                             break
