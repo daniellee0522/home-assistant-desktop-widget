@@ -8,6 +8,7 @@ Only what the two screens need: labels, capsule and round buttons, icons, slider
 tiles, a chart, and a text field (a real line editor laid over the scene).
 """
 import math
+import os
 import re
 import threading
 import time
@@ -806,7 +807,23 @@ class Select(View):
 # animation
 # ---------------------------------------------------------------------------------------
 
+def _bezier(x1, y1, x2, y2, t):
+    """CSS cubic-bezier(x1, y1, x2, y2) at time t."""
+    def at(a, b, u):
+        return 3 * a * u * (1 - u) ** 2 + 3 * b * u * u * (1 - u) + u ** 3
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        mid = (lo + hi) / 2
+        if at(x1, x2, mid) < t:
+            lo = mid
+        else:
+            hi = mid
+    return at(y1, y2, (lo + hi) / 2)
+
+
 def _ease(name, t):
+    if isinstance(name, tuple):
+        return _bezier(*name, t)
     if name == "linear":
         return t
     if name == "in":
@@ -867,7 +884,8 @@ class Tweens:
                 t["done"]()
         if not self.running:
             self.timer.stop()
-        self.scene.request_paint()
+        # only the window's own fade and scale moved: what is drawn in it did not
+        self.scene.request_paint(content=any(t["view"] is not self.scene for t in self.running + finished))
 
 
 # ---------------------------------------------------------------------------------------
@@ -909,6 +927,7 @@ class Scene(GlassMixin, QWidget):
         self.init_glass()
         self._hwnd = 0
         self._paint_pending = False
+        self._content, self._content_dirty = None, True
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_: self._system_theme_changed())
 
     # -- theme and size ----------------------------------------------------------------------
@@ -968,7 +987,10 @@ class Scene(GlassMixin, QWidget):
         return self.t["radius_panel"]
 
     # -- painting ---------------------------------------------------------------------------------
-    def request_paint(self):
+    def request_paint(self, content=True):
+        """`content`: what is drawn changed (not only the window's own fade or scale)."""
+        if content:
+            self._content_dirty = True
         if not self._paint_pending:
             self._paint_pending = True
             QTimer.singleShot(0, self._paint_now)
@@ -991,11 +1013,32 @@ class Scene(GlassMixin, QWidget):
             p.translate(-ox, -oy)
         if self.glass is not None and not self.system_glass:
             p.drawImage(0, 0, self.glass)
-        p.scale(self.scale / self.dpi, self.scale / self.dpi)
-        self.paint_card(p)
-        self.root.paint_tree(p)
-        self.layer.paint_tree(p)
+        if self.anim_zoom != 1.0 or self.anim_alpha < 1:
+            # Coming in or going away only scales and fades what is already drawn: it is drawn once, and
+            # that picture is what moves, which takes a frame a fraction of the time the views would.
+            p.drawImage(0, 0, self.content_image())
+        else:
+            p.scale(self.scale / self.dpi, self.scale / self.dpi)
+            self.paint_card(p)
+            self.root.paint_tree(p)
+            self.layer.paint_tree(p)
         p.end()
+
+    def content_image(self):
+        img = self._content
+        if img is None or self._content_dirty or img.width() != self.pw or img.height() != self.ph:
+            img = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            q = QPainter(img)
+            q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+            q.scale(self.scale, self.scale)
+            self.paint_card(q)
+            self.root.paint_tree(q)
+            self.layer.paint_tree(q)
+            q.end()
+            img.setDevicePixelRatio(self.dpi)
+            self._content, self._content_dirty = img, False
+        return img
 
     def paint_card(self, p):
         """The card's own tint and rims, under everything."""

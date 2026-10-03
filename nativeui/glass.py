@@ -130,6 +130,9 @@ class GlassMixin:
                 if still and taken and not self.sample_now.is_set():
                     self.sample_now.wait(0.5)
                     continue
+                if getattr(self, "moving", False):
+                    time.sleep(0.02)             # the window is coming in or going away: not now
+                    continue
                 self.sample_now.clear()
                 # At most 30 looks a second, as the page's glass was: an animated wallpaper behind the
                 # window otherwise keeps the program busy for pictures nobody can tell apart. The pace

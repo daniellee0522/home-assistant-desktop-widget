@@ -21,6 +21,7 @@ from .ui import Label, ScrollView, TileView, View
 PAD, CELL_W, CELL_H, GAP = 14, 152, 146, 14
 HOLD_MS, HOLD_SLOP = 420, 8
 FLYOUT_ZOOM = 0.5
+ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)       # the page's own
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
 
 
@@ -356,6 +357,7 @@ class PanelScene(OverlayScene):
         self.anim_alpha, self.anim_zoom = 0.0, 0.86
         self.anim_origin = self.origin()
         self.tweens.cancel(self)
+        self.moving = False
         if self.mode == "home":
             if self.home is None:
                 self.rebuild()
@@ -392,14 +394,21 @@ class PanelScene(OverlayScene):
     def flyout_enter(self):
         self.anim_origin = self.origin()
         self.anim_alpha, self.anim_zoom = 0.0, 0.86
-        self.tweens.animate(self, {"anim_zoom": 1.0}, 220, "out", None)
+        self.moving = True                   # the glass sampler leaves the processor to the animation
+        self.tweens.animate(self, {"anim_zoom": 1.0}, 220, ENTER_CURVE, self._settled)
         # opacity is full by 55% of the way in
-        self.tweens.animate(self, {"anim_alpha": 1.0}, 121, "out", None)
+        self.tweens.animate(self, {"anim_alpha": 1.0}, 121, ENTER_CURVE, None)
 
     def flyout_leave(self):
-        self.tweens.animate(self, {"anim_alpha": 0.0, "anim_zoom": 0.92}, 130, "in", self._left)
+        self.moving = True
+        self.tweens.animate(self, {"anim_alpha": 0.0, "anim_zoom": 0.92}, 130, LEAVE_CURVE, self._left)
+
+    def _settled(self):
+        self.moving = False
+        self.sample_now.set()
 
     def _left(self):
+        self.moving = False
         if self.home is not None:
             self.model.reset()
 
