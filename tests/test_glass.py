@@ -128,7 +128,7 @@ class GlassTests(unittest.TestCase):
         dwm.DwmSetWindowAttribute.return_value = -1
         scope = definitions('_MARGINS', '_set_system_glass',
                             _SYSTEM_GLASS_SUPPORTED=True, _get_hwnd=lambda w: 123,
-                            _hwnd_lock=threading.Lock(), _dwmapi=dwm, webview=Mock(),
+                            _hwnd_lock=threading.Lock(), _dwmapi=dwm, qtshell=Mock(),
                             DWMSBT_TRANSIENTWINDOW=3, DWMSBT_NONE=1,
                             DWMWA_SYSTEMBACKDROP_TYPE=38, DWMWA_BORDER_COLOR=34,
                             DWMWA_COLOR_NONE=0xfffffffe)

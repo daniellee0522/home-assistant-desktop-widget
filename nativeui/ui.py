@@ -8,14 +8,12 @@ Only what the two screens need: labels, capsule and round buttons, icons, slider
 tiles, a chart, and a text field (a real line editor laid over the scene).
 """
 import math
-import os
 import re
-import threading
 import time
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage,
-                           QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRegion)
+                           QLinearGradient, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QLineEdit, QWidget
 
 from . import render
@@ -37,7 +35,7 @@ LIQUID_INK = {"light": {"ink1": "#16222e", "ink2": "#405566"}, "dark": {"ink1": 
 
 
 def ui_tokens(theme, style="classic", dim=False):
-    """Every colour a screen uses, by name: the widget's tile tokens (render.tokens) and the page's own."""
+    """Every colour a screen uses, by name: the widget's tile tokens (render.tokens) and the screens' own."""
     t = render.tokens(theme, dim, style)
     t.update(INK[theme])
     if style == "liquid":
@@ -78,7 +76,7 @@ def wrap_lines(text, f, width, any_break=False):
     lines = []
     for para in str(text).split("\n"):
         cur = ""
-        tokens = re.findall(r"\s+|[A-Za-z0-9_.,'\-:/]+|.", para) if not any_break else list(para)
+        tokens = re.findall(r"\s+|[(\[]*[A-Za-z0-9_.,'\-:/]+[)\]!?;%]*|.", para) if not any_break else list(para)
         for token in tokens:
             trial = cur + token
             if cur and fm.horizontalAdvance(trial.rstrip()) / 10 * render.HSCALE > width:
@@ -401,7 +399,7 @@ class Button(View):
         self.pad = pad
         self.label = None
         if text and w == 0:
-            self.w = text_width(text, font(size, weight)) + 2 * pad
+            self.w = text_width(render.tr(text), font(size, weight)) + 2 * pad
         self.on_enter = lambda e: self._hover(True)
         self.on_leave = lambda e: self._hover(False)
         self.on_press = lambda e: self._press(True)
@@ -496,7 +494,7 @@ class Slider(View):
 
 
 class ScrollView(View):
-    """A clipped box whose content scrolls: the wheel, and scroll_to; no scroll bars (as the page's)."""
+    """A clipped box whose content scrolls: the wheel, and scroll_to; no scroll bars."""
 
     def __init__(self, x, y, w, h, horizontal=False, fade=0):
         super().__init__(x, y, w, h)
@@ -559,7 +557,6 @@ class TextField(View):
         if scene is not None and self.edit is None:
             self.edit = QLineEdit(scene)
             self.edit.setMaxLength(self.max_length)
-            self.edit.setPlaceholderText(self.placeholder)
             self.edit.setText(self.text)
             self.edit.setFrame(False)
             self.edit.editingFinished.connect(self._finished)
@@ -584,6 +581,7 @@ class TextField(View):
         qf.setPixelSize(max(6, round(self.size * s)))
         qf.setStyleStrategy(QFont.PreferAntialias)
         self.edit.setFont(qf)
+        self.edit.setPlaceholderText(render.tr(self.placeholder))
         self.edit.setStyleSheet("QLineEdit { background: transparent; border: none; color: %s; "
                                 "selection-background-color: #409cff; selection-color: white; }" % ink)
 
@@ -830,11 +828,11 @@ def _ease(name, t):
         return t * t * t
     if name == "inout":
         return t * t * (3 - 2 * t)
-    if name == "back":                      # the page's pop: a little overshoot
+    if name == "back":                      # a pop: a little overshoot
         c1 = 1.70158
         t -= 1
         return 1 + t * t * ((c1 + 1) * t + c1)
-    return 1 - (1 - t) ** 3                 # "out" (and the page's "ease")
+    return 1 - (1 - t) ** 3                 # "out" (and "ease")
 
 
 class Tweens:
@@ -917,7 +915,7 @@ class Scene(GlassMixin, QWidget):
         self.theme_raw, self.theme, self.style = "auto", "light", "classic"
         self.language, self.liquid_level, self.sampling = "zh-TW", 0, "live"
         self.system_glass = False
-        self.zoom_css = 1.0              # the page's own zoom for this window (the card scale)
+        self.zoom_css = 1.0              # this window's own zoom (the card scale)
         self.dpi, self.scale = 1.0, 1.0
         self.pw = self.ph = 1
         self.css_w = self.css_h = 1.0
@@ -927,7 +925,7 @@ class Scene(GlassMixin, QWidget):
         self.init_glass()
         self._hwnd = 0
         self._paint_pending = False
-        self._content, self._content_dirty = None, True
+        self._content, self._content_dirty, self._content_at = None, True, 0.0
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_: self._system_theme_changed())
 
     # -- theme and size ----------------------------------------------------------------------
@@ -1013,16 +1011,19 @@ class Scene(GlassMixin, QWidget):
             p.translate(-ox, -oy)
         if self.glass is not None and not self.system_glass:
             p.drawImage(0, 0, self.glass)
-        if self.anim_zoom != 1.0 or self.anim_alpha < 1:
-            # Coming in or going away only scales and fades what is already drawn: it is drawn once, and
-            # that picture is what moves, which takes a frame a fraction of the time the views would.
-            p.drawImage(0, 0, self.content_image())
-        else:
-            p.scale(self.scale / self.dpi, self.scale / self.dpi)
-            self.paint_card(p)
-            self.root.paint_tree(p)
-            self.layer.paint_tree(p)
+        # What is on the card is drawn once into a picture and that picture is what is painted: the glass
+        # behind it changes up to sixty times a second while the views do not, and drawing them again for
+        # each new glass costs a few ms where the picture costs a tenth of one. Coming in or going away
+        # also only scales and fades that picture.
+        p.drawImage(0, 0, self.content_image())
         p.end()
+
+    def glass_changed(self):
+        # A view changed without asking to be drawn again shows at the latest within a quarter second,
+        # as it did when every new glass drew the views again.
+        if time.monotonic() - self._content_at > 0.25:
+            self._content_dirty = True
+        super().glass_changed()
 
     def content_image(self):
         img = self._content
@@ -1037,7 +1038,7 @@ class Scene(GlassMixin, QWidget):
             self.layer.paint_tree(q)
             q.end()
             img.setDevicePixelRatio(self.dpi)
-            self._content, self._content_dirty = img, False
+            self._content, self._content_dirty, self._content_at = img, False, time.monotonic()
         return img
 
     def paint_card(self, p):
@@ -1083,7 +1084,6 @@ class Scene(GlassMixin, QWidget):
         view.paint_tree(q)
         view.fade = saved
         q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-        g = QLinearGradient(0, 0, view.w if view.horizontal else 0, 0 if view.horizontal else view.h)
         edge = min(0.45, view.fade / max(1.0, view.w if view.horizontal else view.h))
         left = view.offset > 0.5
         right = view.offset < view.max_offset() - 0.5
@@ -1167,6 +1167,7 @@ class Scene(GlassMixin, QWidget):
             return
         for v in self._chain(target):
             v.pressed = True
+        self.request_paint()
         handled = self._bubble(target, "on_press", lambda v, fn: fn(self._ev(v, gx, gy, e)))
         if handled is not None and self.capture is None and handled is not target:
             self.press_view = handled
@@ -1206,6 +1207,7 @@ class Scene(GlassMixin, QWidget):
                     cursor = v.cursor
                     break
             self.setCursor(QCursor(cursor) if cursor is not None else QCursor(Qt.ArrowCursor))
+            self.request_paint()
         self.hovered_over(target, gx, gy, e)
 
     def hovered_over(self, target, gx, gy, e):

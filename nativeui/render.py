@@ -1,10 +1,8 @@
-"""Native drawing of a desktop widget: the same card and tiles as web/ draws,
-painted with QPainter instead of a browser page.
+"""Drawing a desktop widget with QPainter: its card and tiles, and what the other windows share
+(the colours, the icons, the text, what a tile shows for each kind of device).
 
-Everything here is in CSS pixels (the widget is 678 x 334 for 2x4) and is
-scaled to the screen by one factor, as the page's zoom does. The numbers are
-the stylesheet's (web/style.css), the logic is app.js's (iconColorFor,
-valueTextFor, defaultLabel...).
+Everything here is in CSS pixels (the widget is 678 x 334 for 2x4) and is scaled to the screen
+by one factor (the zoom times the monitor's DPI).
 """
 import json
 import math
@@ -21,8 +19,8 @@ from PySide6.QtSvg import QSvgRenderer
 from . import i18n
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Frozen, the web files live under PyInstaller's _MEIPASS.
-WEB = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(HERE)), "web")
+# Frozen, this package's data files live under PyInstaller's _MEIPASS.
+DATA = os.path.join(sys._MEIPASS, "nativeui") if hasattr(sys, "_MEIPASS") else HERE
 
 CELL_W, CELL_H, PAD, GAP = 152, 146, 14, 14
 RADIUS_TILE = 70
@@ -137,7 +135,7 @@ def rgba(c, alpha=None):
 # ---------------------------------------------------------------- shapes
 
 def squircle(x, y, w, h, r, steps=16):
-    """The fourth-power superellipse corner every radius in the page uses
+    """The fourth-power superellipse corner every rounded shape uses
     (corner-shape: superellipse(2)); same points as traceSuperellipse."""
     r = min(r, w / 2, h / 2)
     pts = []
@@ -183,8 +181,7 @@ _svg_cache = {}
 def _icon_table():
     global _icons
     if _icons is None:
-        base = os.path.join(sys._MEIPASS, "nativeui") if hasattr(sys, "_MEIPASS") else HERE
-        with open(os.path.join(base, "icon_paths.json"), encoding="utf-8") as f:
+        with open(os.path.join(DATA, "icon_paths.json"), encoding="utf-8") as f:
             _icons = json.load(f)
     return _icons
 
@@ -193,8 +190,8 @@ def mdi_path(name):
     """One icon's path from the 2.7 MB file, without reading it all in."""
     global _mdi_file
     if _mdi_file is None:
-        f = open(os.path.join(WEB, "mdi-paths.js"), "rb")
-        _mdi_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        with open(os.path.join(DATA, "mdi_paths.json"), "rb") as f:     # the map keeps its own handle
+            _mdi_file = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
     key = b'"' + name.encode() + b'":"'
     i = _mdi_file.find(key)
     if i < 0:
@@ -287,7 +284,7 @@ def icon_name(tile, st):
 
 def icon_kind(icon):
     """What an icon stands for, so a tile is coloured by its icon and not only by the kind
-    of device it controls: a plug given a bulb is yellow when it is on (iconKind in app.js)."""
+    of device it controls: a plug given a bulb is yellow when it is on."""
     if not icon:
         return ""
     name = icon[4:] if icon.startswith("mdi:") else icon
@@ -472,8 +469,7 @@ def draw_text_fade(p, text, f, color, rect, shadow):
     p.save()
     p.setClipRect(rect)
     fm = QFontMetricsF(f)
-    width = fm.horizontalAdvance(text) / 10 * HSCALE
-    base = QPointF(0, (fm.height() / 10 * 0 + 0))
+    base = QPointF(0, 0)
     # position of the text's baseline inside its line box (centred)
     base_y = rect.top() + (rect.height() - fm.height() / 10) / 2 + fm.ascent() / 10
     if shadow:
@@ -758,7 +754,6 @@ def _fade_gradient(h, stops):
 def draw_liquid_rim(p, W, H, radius, dark):
     """The light that runs along the rim of the liquid card (its ::before and
     ::after) and the wash over the pane."""
-    clear = (255, 255, 255, 0)
     ring = squircle(0, 0, W, H, radius).subtracted(squircle(2, 2, W - 4, H - 4, radius - 2))
     p.save()
     p.setOpacity(0.72 if dark else 1.0)

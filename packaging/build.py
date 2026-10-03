@@ -75,13 +75,13 @@ def main():
         '--workpath', str(work / 'pyinstaller'), '--specpath', str(work),
         '--distpath', str(
             output),
-        # Every window is drawn natively: of web/ only the icon paths and the English texts are read.
-        '--add-data', f'{ROOT / "web" / "mdi-paths.js"}{os.pathsep}web',
-        '--add-data', f'{ROOT / "web" / "i18n.js"}{os.pathsep}web',
+        # The icons and the English texts the windows draw with.
+        '--add-data', f'{ROOT / "nativeui" / "mdi_paths.json"}{os.pathsep}nativeui',
+        '--add-data', f'{ROOT / "nativeui" / "i18n_en.json"}{os.pathsep}nativeui',
         '--add-data', f'{ROOT / "nativeui" / "icon_paths.json"}{os.pathsep}nativeui',
         # numpy is optional for Qt and Pillow; loading it costs memory.
         '--exclude-module', 'numpy', '--exclude-module', 'tkinter',
-        # ...and with no page to show, the browser engine (some 200 MB) stays out of the bundle.
+        # ...and the browser engine (some 200 MB), which nothing uses, stays out of the bundle.
         '--exclude-module', f'{qt_package}.QtWebEngineCore', '--exclude-module', f'{qt_package}.QtWebEngineWidgets',
         '--exclude-module', f'{qt_package}.QtWebChannel', '--exclude-module', f'{qt_package}.QtWebEngineQuick',
         '--hidden-import', 'PIL._imagingft',
@@ -103,8 +103,7 @@ def main():
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'nativeui/widget.py', ROOT / 'nativeui/render.py', ROOT / 'nativeui/liquid.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
-                                    ROOT / 'web/app.js', ROOT / 'web/bridge.js',
-                                    ROOT / 'web/i18n.js', ROOT / 'web/mdi-paths.js']},
+                                    ROOT / 'nativeui/i18n_en.json', ROOT / 'nativeui/mdi_paths.json']},
     }, indent=2), encoding='utf-8')
 
     if compiler:

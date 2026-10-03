@@ -1,5 +1,5 @@
 """The Home view of the tray panel: capsules for the kinds of device, the rooms as capsules, and the
-accessories under each room in the widget's own shapes (the page's renderHome and its helpers).
+accessories under each room in the widget's own shapes.
 
 The rules are homemodel.py's; the editing (moving, resizing, removing, reordering) is homeedit.py's.
 Sizes are in the panel's own pre-zoom CSS pixels, as the stylesheet's are.
@@ -12,8 +12,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF
 
 from . import render, ui
 from .homeedit import EditMixin
-from .homemodel import HOME_PREFIX, OTHER_ROOM, CATEGORIES
-from .ui import Button, IconView, Label, Rect, ScrollView, TextField, TileView, View
+from .homemodel import OTHER_ROOM, CATEGORIES
+from .ui import Button, Label, Rect, ScrollView, TextField, TileView, View
 
 W, H = 678, 604
 PAD = 14
@@ -441,8 +441,6 @@ class HomeView(EditMixin, View):
                     grid.h = rows * (TILE_H + GAP) - GAP
                 else:
                     grid.h = TILE_H * 0.7
-                    box = Rect(0, 0, HOME_SPAN, grid.h, None, self.scene.t["radius_tile"] * 0.6 if self.scene else 40,
-                               "card_edge", 2) if False else None
                     grid.empty = True
                     lab = Label("把配件拖曳到這裡", 22, QFont.Normal, "ink2", w=HOME_SPAN, align="c", lh=1.3)
                     lab.y = (grid.h - lab.h) / 2

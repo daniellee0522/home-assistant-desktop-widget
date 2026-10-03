@@ -4,7 +4,6 @@ window is real (a Qt widget), the pointer is Qt's own test input.
 """
 import os
 import sys
-import threading
 import time
 import unittest
 
@@ -238,14 +237,14 @@ class Dimming(unittest.TestCase):
     def test_dim_eases_in_and_the_first_touch_only_wakes(self):
         t = tile(0, "light", "light.desk")
         api, win, surf = make([t, tile(1, "light")], states={"light.desk": {"state": "off", "attributes": {}}})
-        win.evaluate_js("window.__setDimmed && window.__setDimmed(true)")
+        win.send("set_dim", True)
         pump(900)
         self.assertEqual(surf.dim_t, 1.0)
         QTest.mouseClick(surf, Qt.LeftButton, pos=centre(surf, 0))
         pump(100)
         self.assertIn(("wake",), api.calls)
         self.assertFalse([c for c in api.calls if c[0] == "service"])
-        win.evaluate_js("window.__setDimmed && window.__setDimmed(false)")
+        win.send("set_dim", False)
         pump(500)
         self.assertEqual(surf.dim_t, 0.0)
         done(win)
@@ -266,12 +265,11 @@ class Wheel(unittest.TestCase):
 
 
 class Preferences(unittest.TestCase):
-    def test_script_push_of_prefs_changes_size_theme_and_tiles(self):
+    def test_pushed_prefs_change_size_theme_and_tiles(self):
         api, win, surf = make([tile(i, "light") for i in range(8)])
-        import json
         prefs = dict(api._prefs(), theme="dark", glass_style="liquid", zoom=150)
         prefs["widgets"] = [{"id": "w1", "size": "4x4", "tiles": [tile(i, "light") for i in range(3)]}]
-        win.evaluate_js("if (window.__applyPrefs) window.__applyPrefs(%s)" % json.dumps(prefs))
+        win.send("apply_prefs", prefs)
         pump(100)
         self.assertEqual((surf.size_key, surf.zoom, surf.theme, surf.style), ("4x4", 150, "dark", "liquid"))
         self.assertEqual(surf.form, "big")                     # three tiles in sixteen cells
@@ -281,8 +279,8 @@ class Preferences(unittest.TestCase):
 
     def test_push_batch_updates_the_states(self):
         api, win, surf = make([tile(0, "light", "light.desk")])
-        win.evaluate_js('if (typeof window.__haPushBatch === "function") window.__haPushBatch('
-                        '[["light.desk",{"state":"on","attributes":{}}]])')
+        win.send("push_states", [["light.desk", {"state": "on", "attributes": {}}]])
+        win.send("no_such_thing", 1)                  # what a window has no use for is ignored
         pump(100)
         self.assertEqual(surf.states["light.desk"]["state"], "on")
         done(win)

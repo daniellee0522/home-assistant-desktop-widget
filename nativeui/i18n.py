@@ -1,34 +1,25 @@
-"""The English text of the desktop widget, from the page's own dictionary (web/i18n.js).
+"""The English text of the interface (i18n_en.json: Traditional Chinese text -> English).
 
-The widget's texts are written in Traditional Chinese; with the language set to English the page
-swaps every whole text it has an entry for. Names the user gave their devices are left alone.
+The interface is written in Traditional Chinese; with the language set to English every whole
+text that has an entry is swapped. Names the user gave their devices are left alone.
 """
+import json
 import os
-import re
 import sys
 
 _table = None
-_PAIR = re.compile(r"'((?:\\.|[^'\\])*)'\s*:\s*'((?:\\.|[^'\\])*)'")
-
-
-def _unescape(text):
-    return re.sub(r"\\(.)", r"\1", text)
 
 
 def _load():
     global _table
     if _table is None:
-        _table = {}
-        base = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "web")
+        base = os.path.join(sys._MEIPASS, "nativeui") if hasattr(sys, "_MEIPASS") else os.path.dirname(
+            os.path.abspath(__file__))
         try:
-            with open(os.path.join(base, "i18n.js"), encoding="utf-8") as f:
-                source = f.read()
-            block = source[source.index("const EN_TEXT = {"):]
-            block = block[:block.index("\n};")]
-            for key, value in _PAIR.findall(block):
-                _table[_unescape(key)] = _unescape(value)
+            with open(os.path.join(base, "i18n_en.json"), encoding="utf-8") as f:
+                _table = json.load(f)
         except (OSError, ValueError):
-            pass
+            _table = {}
     return _table
 
 

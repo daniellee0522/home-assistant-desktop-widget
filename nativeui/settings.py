@@ -1,13 +1,14 @@
-"""Settings, the widget editor and the entity picker: the page's #settings window, drawn natively.
+"""Settings, the widget editor and the entity picker.
 
 A nearly solid card (it is read, not glanced at) with three screens in one window. main.py makes it when
-asked for and releases it when closed, as it did the page.
+asked for and releases it when closed.
 """
 import threading
+import time
 import traceback
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainterPath
+from PySide6.QtGui import QColor, QFont
 
 from . import render, ui
 from .detail import Stack
@@ -102,7 +103,17 @@ class SettingsScene(EditorMixin, OverlayScene):
             self.build(keep=True)
 
     def _load_states(self):
-        pass
+        """The states of the widgets' devices, for the editor's preview (later changes are pushed)."""
+        try:
+            for _ in range(200):                    # the facade is still being made
+                if getattr(self.facade, "_native", None) is not None:
+                    break
+                time.sleep(0.01)
+            states = self.facade.api.fetch_initial_states()
+            if states:
+                self.facade.run_on_ui_thread(lambda: self.push_states(list(states.items())))
+        except Exception:
+            traceback.print_exc()
 
     def push_states(self, items):
         for entity, state in items:
@@ -233,7 +244,7 @@ class SettingsScene(EditorMixin, OverlayScene):
     def mousePressEvent(self, e):
         gx, gy = self._css(e)
         if self.popup is None and isinstance(self.view_at(gx, gy), ui.ScrollView):
-            self.pressed_nothing(gx, gy, e)            # the page's own background, between its controls
+            self.pressed_nothing(gx, gy, e)            # the window's own background, between its controls
             return
         super().mousePressEvent(e)
 

@@ -1,20 +1,19 @@
-"""The detail card: what a hold or a right-click on a tile opens (the page's #popover window).
+"""The detail card: what a hold or a right-click on a tile opens.
 
 The controls of each kind of device, the readout and history of a sensor, and the small edit panel
-(icon, name, room, label). main.py drives it the way it drove the page (see overlay.py): it is told
+(icon, name, room, label). main.py drives it (see overlay.py): it is told
 which tile to show, taken to its place by Api.open_popover, and closed again when focus leaves it.
 """
-import json
 import threading
 import time
 import traceback
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
 from . import render, ui
 from .overlay import OverlayScene, create_overlay
-from .ui import Button, IconView, Label, Rect, ScrollView, Slider, TextField, View
+from .ui import Button, Label, ScrollView, Slider, TextField, View
 
 CARD_W = 288
 BODY_X, BODY_W = 14, 260

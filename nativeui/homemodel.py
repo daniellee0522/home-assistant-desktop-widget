@@ -1,5 +1,5 @@
 """The Home-style panel's rules, with no window: which devices are shown, in which room and order, what
-the capsules say, and where tiles stand on a room's grid (the page's homeLayout and its helpers)."""
+the capsules say, and where tiles stand on a room's grid."""
 import math
 
 HOME_COLS = 4

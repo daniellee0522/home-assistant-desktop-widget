@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def run():
     import main
     import qtshell
-    from PySide6.QtCore import QEventLoop, QTimer, Qt
+    from PySide6.QtCore import QEventLoop, QTimer
     from PySide6.QtWidgets import QApplication, QWidget
     from PIL import Image
     import pystray
@@ -78,9 +78,6 @@ def run():
 
     app = QApplication.instance() or QApplication([])
     qtshell._marshal = qtshell._Marshal()
-    window = qtshell.Window('Load test', hidden=True, transparent=True)
-    window.native.setAttribute(Qt.WA_DontShowOnScreen, True)
-    window.native.show()
     power_filter = qtshell._PowerFilter()
     app.installNativeEventFilter(power_filter)
     # WA_DontShowOnScreen is a render-only window; use a hidden native
@@ -99,44 +96,6 @@ def run():
     app.removeNativeEventFilter(power_filter)
     receiver.close()
     print('Native Windows resume notification reached the Qt power filter')
-    received = []
-    pixels = []
-    last_pixels = []
-
-    def check_pixels():
-        image = window.native.grab().toImage()
-        center = image.pixelColor(image.width() // 2, image.height() // 2)
-        corner = image.pixelColor(0, 0)
-        last_pixels[:] = [center.getRgb(), corner.getRgb()]
-        if center.getRgb() == (18, 52, 86, 255) and corner.alpha() == 0:
-            pixels.append(True)
-            app.quit()
-        else:
-            QTimer.singleShot(100, check_pixels)
-
-    def loaded():
-        def result(value):
-            received.append(value)
-            geometry = window.native.geometry()
-            window.refresh_display()
-            assert window.native.geometry() == geometry, 'Display recovery moved/resized the widget'
-            QTimer.singleShot(100, check_pixels)
-        window.native.view.page().runJavaScript('JSON.stringify(window.received)', result)
-
-    window.events.loaded += loaded
-    window.native.view.setHtml(
-        '<style>html,body{margin:0;background:transparent}'
-        '#card{height:100vh;background:#123456;border-radius:24px}</style>'
-        '<div id="card"></div>'
-        '<script>window.received=[];'
-        'window.__haPushBatch = items => window.received.push(...items);</script>')
-    window.evaluate_js('window.__haPushBatch(["queued"])')
-    QTimer.singleShot(10000, app.quit)
-    app.exec()
-    assert received == ['["queued"]'], received
-    assert pixels, ('Qt must render the card color and preserve transparent corners', last_pixels)
-    window.native.close()
-    print('Hidden Qt page delivered queued push and rendered transparent corners correctly')
 
 
 if __name__ == '__main__':

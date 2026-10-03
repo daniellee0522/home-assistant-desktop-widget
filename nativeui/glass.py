@@ -1,7 +1,7 @@
 """The frosted glass behind a natively drawn window: the picture of the desktop, on its own thread.
 
 A window that has glass (the desktop widgets, the detail card, the tray panel) mixes this in. It
-asks `Api.get_desktop_backdrop` for the picture the way the pages did (so hidden or covered windows,
+asks `Api.get_desktop_backdrop` for the picture (so hidden or covered windows,
 the capture exclusion, the compatibility capture and the 'still' sampling all behave as before),
 makes the glass from it (the picture stretched over the card, or the liquid lens round its edge) and
 hands the newest one to the GUI thread.
@@ -134,7 +134,7 @@ class GlassMixin:
                     time.sleep(0.02)             # the window is coming in or going away: not now
                     continue
                 self.sample_now.clear()
-                # At most 30 looks a second, as the page's glass was: an animated wallpaper behind the
+                # At most 30 looks a second: an animated wallpaper behind the
                 # window otherwise keeps the program busy for pictures nobody can tell apart. The pace
                 # is kept before the look, not after it, so the picture is as fresh as can be.
                 # The tray panel, while it is open, gets as many looks as it can take (the cost of one, about
@@ -146,7 +146,7 @@ class GlassMixin:
                 last = time.monotonic()
                 pw, ph = self.pw, self.ph
                 shot = api.get_desktop_backdrop(kind, last_hash, pw, ph, None, None,
-                                                0 if still else None, binary=True)
+                                                0 if still else None)
                 if not shot:
                     last_hash = None
                     time.sleep(0.25)

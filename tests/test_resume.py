@@ -17,25 +17,6 @@ def extract(path, name, scope):
 
 
 class ResumeTests(unittest.TestCase):
-    def test_hidden_surface_defers_recovery_until_shown(self):
-        refresh = extract("qtshell.py", "_refresh_display", {})
-        native = Mock()
-        native.size.return_value.width.return_value = 300
-        native.size.return_value.height.return_value = 200
-        native.isVisible.return_value = False
-        refresh(native)
-        self.assertTrue(native._display_dirty)
-        native.resize.assert_not_called()
-        native.view.show.assert_not_called()
-        native.isVisible.return_value = True
-        refresh(native)
-        self.assertFalse(native._display_dirty)
-        self.assertEqual(native.resize.call_count, 2)
-        native.view.hide.assert_called_once()
-        native.view.show.assert_called_once()
-        native._window.evaluate_js.assert_called_once_with(
-            "window.__recoverDisplay && window.__recoverDisplay()")
-
     def test_flyout_origin_uses_current_monitor_work_area(self):
         work_area = Mock(return_value=(0, 0, 1920, 1040))
         origin = extract("main.py", "_flyout_origin", {"_work_area_at": work_area})
@@ -76,7 +57,7 @@ class ResumeTests(unittest.TestCase):
         api = Mock(_desktop_visible=False)
         restore_icon = Mock(return_value=True)
         restore = extract("main.py", "restore_tray", {
-            "api": api, "restore_tray_icon": restore_icon, "webview": Mock()})
+            "api": api, "restore_tray_icon": restore_icon, "qtshell": Mock()})
         restore()
         restore_icon.assert_called_once_with(api._tray_icon)
 
@@ -101,7 +82,7 @@ class ResumeTests(unittest.TestCase):
         window, api = Mock(), Mock()
         api._all_windows.return_value = [window]
         api._widgets = {"w": window}
-        scope = {"window": window, "api": api, "webview": Mock()}
+        scope = {"window": window, "api": api, "qtshell": Mock()}
         for name in ("_set_noactivate", "_apply_window_shape", "_send_to_bottom"):
             scope[name] = Mock()
         restore = extract("main.py", "restore_window", scope)

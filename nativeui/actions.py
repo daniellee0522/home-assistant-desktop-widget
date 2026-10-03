@@ -1,4 +1,4 @@
-"""What a tap on a tile does (quickAction in app.js), shared by the widgets and the tray panel.
+"""What a tap on a tile does , shared by the widgets and the tray panel.
 
 The guess is shown at once (`optimistic`), the service call goes out on its own thread, and the answer
 arrives as the state's own push.

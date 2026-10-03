@@ -1,17 +1,16 @@
 """The liquid glass lens, without a GPU and without numpy.
 
-web/app.js refracts the blurred picture of the desktop around the card's edge
-with a fragment shader (paintLiquidLensGpu). Where each pixel of that ring
+The lens refracts the blurred picture of the desktop around the card's edge. Where each pixel of that ring
 samples the picture from depends only on the card's shape, never on the
 picture, so it is worked out once here and kept as a mesh of small quads; for
 every new picture Pillow's C code warps the ring through the mesh. The rest of
-the shader (the white line along the rim, the fading opacity) is two more
+the lens (the white line along the rim, the fading opacity) is two more
 masks, also made once.
 
-The widget's own tiles blur what is behind them (backdrop-filter: blur(12px));
+The widget's own tiles blur what is behind them (12 px);
 that is done here too, on a quarter-size copy: the picture is smooth already.
 
-All coordinates are device pixels, as the shader's are.
+All coordinates are device pixels.
 """
 import math
 
@@ -19,7 +18,7 @@ from PIL import Image, ImageFilter
 
 WHITE_LINE = 0.16
 LENS_OPACITY = 0.78
-EXPONENT = 4.0                         # the page's corners are fourth-power superellipses
+EXPONENT = 4.0                         # the corners are fourth-power superellipses
 
 
 def _smoothstep(a, b, x):

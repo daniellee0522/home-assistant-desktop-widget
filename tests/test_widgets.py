@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import config
 
@@ -95,22 +95,6 @@ class WidgetWindows(unittest.TestCase):
         self.assertEqual(api._window_for('main'), 'primary')
         self.assertEqual(api._window_for('popover'), 'popover')
         self.assertIsNone(api._window_for('nonsense'))
-
-    def test_each_widget_has_its_own_resize_sequence(self):
-        applied = []
-        Api = api_class('_resize_native', 'resize_window',
-                        _get_hwnd=lambda w: 1, MIN_WINDOW_W=80, MIN_WINDOW_H=60,
-                        _set_window_size=lambda hwnd, w, h: applied.append((hwnd, w, h)),
-                        _run_on_ui_thread=lambda window, fn: fn())
-        api = Api()
-        api._widgets = {'a': object(), 'b': object()}
-        api._widget_locks = {'a': threading.Lock(), 'b': threading.Lock()}
-        api._wseq_a = -1
-        api._wseq_b = -1
-        api.resize_window(300, 200, 1, 'a')
-        api.resize_window(400, 100, 1, 'b')         # same number, other widget
-        api.resize_window(300, 200, 1, 'a')         # a stale repeat is dropped
-        self.assertEqual(applied, [(1, 300, 200), (1, 400, 100)])
 
     def test_widget_kinds(self):
         scope = {}

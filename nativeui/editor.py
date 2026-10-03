@@ -55,7 +55,6 @@ class Palette(View):
     def __init__(self, scene_ref, on_press_size):
         super().__init__(0, 0, LEFT_W, 0)
         x = y = 0
-        row_h = 0
         items = []
         for size in SIZES:
             cols, rows = render.SIZES[size]
@@ -762,7 +761,7 @@ class EditorMixin:
         y = ty + 28 + 10
         # the devices
         tiles = widget["tiles"] if widget else []
-        body.add(Label("配件 (%d)" % len(tiles), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5, spacing=0.36))
+        body.add(Label("%s (%d)" % (render.tr("配件"), len(tiles)), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5, spacing=0.36))
         add = Button("+ 新增配件", size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue", hover_fill="accent_blue",
                      color="white", on_click=lambda e: self.open_picker())
         add.x, add.y = EDITOR_W - 18 - add.w, y
@@ -789,7 +788,7 @@ class EditorMixin:
         mm = Minimap(self, self.layout, LEFT_W)
         host.add(mm)
         host.h = mm.h
-        # the rest of the left column follows it: when the layout arrives after the page was built, build again
+        # the rest of the left column follows it: when the layout arrives after the editor was built, build again
         if self.mm_built is not None and self.mm_built != mm.h:
             QTimer.singleShot(0, self.build)
         self.request_paint()

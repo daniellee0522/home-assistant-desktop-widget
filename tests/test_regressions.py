@@ -14,8 +14,8 @@ def api_type():
     tree = ast.parse(Path('main.py').read_text(encoding='utf-8'))
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
     names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
-             '_eval_all', '_all_windows', '_all_tiles', '_watched_entities',
-             '_home_mode', '_on_ha_event', '_clean_tiles'}
+             '_broadcast', '_all_windows', '_all_tiles', '_watched_entities',
+             '_home_mode', '_on_ha_event', '_on_ha_events', '_clean_tiles'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
     scope = {'json': json, 'threading': threading, 'cfgmod': config}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
@@ -29,6 +29,7 @@ class Regressions(unittest.TestCase):
             setattr(self.api, attr, Mock())
         self.api._ui_ready = True
         self.api._connected = True
+        self.api._known_states = {}
         self.api._widgets = {}
 
     def test_push_reaches_all_windows_even_if_main_is_missing(self):
@@ -36,7 +37,7 @@ class Regressions(unittest.TestCase):
         self.api._widgets = {}
         self.api._push_batch([['switch.test', {'state': 'on'}]])
         for attr in ('_popover_window', '_flyout_window', '_settings_window'):
-            getattr(self.api, attr).evaluate_js.assert_called_once()
+            getattr(self.api, attr).send.assert_called_once_with('push_states', [['switch.test', {'state': 'on'}]])
 
     def test_home_only_events_reach_only_the_panel_and_its_card(self):
         self.api._cfg = {'widgets': [{'id': 'w', 'tiles': [{'entity': 'light.on_a_tile'}]}]}
@@ -44,16 +45,16 @@ class Regressions(unittest.TestCase):
         self.api._pending = []
         self.api._pending_lock = threading.Lock()
         self.api._on_ha_event('sensor.only_in_home', {'state': '1'})
-        self.api._flyout_window.evaluate_js.assert_called_once()
-        self.api._popover_window.evaluate_js.assert_called_once()
-        self.api._window.evaluate_js.assert_not_called()
-        self.api._settings_window.evaluate_js.assert_not_called()
+        self.api._flyout_window.send.assert_called_once()
+        self.api._popover_window.send.assert_called_once()
+        self.api._window.send.assert_not_called()
+        self.api._settings_window.send.assert_not_called()
         self.assertEqual(self.api._home_states['sensor.only_in_home'], {'state': '1'})
         # A device on a tile still reaches every window.
-        self.api._flyout_window.evaluate_js.reset_mock()
-        self.api._window.evaluate_js.reset_mock()
+        self.api._flyout_window.send.reset_mock()
+        self.api._window.send.reset_mock()
         self.api._on_ha_event('light.on_a_tile', {'state': 'on'})
-        self.api._flyout_window.evaluate_js.assert_called_once()
+        self.api._flyout_window.send.assert_called_once()
 
     def test_home_tile_layout_fields_survive_cleaning(self):
         tiles = self.api._clean_tiles([
@@ -68,8 +69,8 @@ class Regressions(unittest.TestCase):
 
     def test_status_reaches_panel_and_settings(self):
         self.api._on_ha_status(False)
-        self.api._flyout_window.evaluate_js.assert_called_once_with('if (typeof window.__haStatus === "function") window.__haStatus(false)')
-        self.api._settings_window.evaluate_js.assert_called_once_with('if (typeof window.__haStatus === "function") window.__haStatus(false)')
+        self.api._flyout_window.send.assert_called_once_with('set_connected', False)
+        self.api._settings_window.send.assert_called_once_with('set_connected', False)
 
     def test_refresh_marks_missing_or_failed_entities_unavailable(self):
         for failure in (False, True):
@@ -82,7 +83,7 @@ class Regressions(unittest.TestCase):
                     self.api._client.get_states.side_effect = RuntimeError('offline')
                 done = threading.Event()
                 received = []
-                self.api._on_ha_event = lambda *args: (received.append(args), done.set())
+                self.api._on_ha_events = lambda items: (received.extend(items), done.set())
                 self.api._refresh_now()
                 self.assertTrue(done.wait(2))
                 self.assertEqual(received[0][1]['state'], 'unavailable')

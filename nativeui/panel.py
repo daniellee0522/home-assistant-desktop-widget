@@ -1,27 +1,32 @@
-"""The tray panel (the page's #flyout window): the widget's tiles beside the taskbar, or the Home view.
+"""The tray panel: the widget's tiles beside the taskbar, or the Home view.
 
-main.py drives it as it drove the page (overlay.py): `arm()` while it is placed but hidden (size, data, the
+main.py drives it (overlay.py): `arm()` while it is placed but hidden (size, data, the
 backdrop), `flyout_enter()` to bring it in, `flyout_leave()` to send it away. It scales out of its tray
 corner and back, never past its resting size, the glass and the card as one.
 """
-import os
 import threading
 import time
 import traceback
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtCore import QPointF, Qt, QTimer
+from PySide6.QtGui import QCursor, QImage
 
-from . import render, ui
+from . import render, screens
 from .actions import TileActions
 from .homemodel import HomeModel
 from .overlay import OverlayScene, create_overlay
-from .ui import Label, ScrollView, TileView, View
+from .ui import ScrollView, TileView
 
 PAD, CELL_W, CELL_H, GAP = 14, 152, 146, 14
 HOLD_MS, HOLD_SLOP = 420, 8
 FLYOUT_ZOOM = 0.5
-ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)       # the page's own
+# The panel takes about the same share of any monitor: drawn at FLYOUT_ZOOM on one whose shorter side is
+# FIT_SIDE logical px (1080p), larger or smaller by that side on others, within FIT_RANGE; and never larger
+# than the work area holds, less FIT_MARGIN physical px all round.
+FIT_SIDE = 1080
+FIT_RANGE = (0.8, 1.5)
+FIT_MARGIN = 12
+ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
 
 
@@ -38,8 +43,7 @@ class PanelScene(OverlayScene):
         self.mode = "grid"
         self.tiles_views = []
         self.grid_scroll = None
-        self.bg_tag = None
-        self.bg_image = None
+        self._bg_made = None                 # (what it was made from, the picture): see make_bg
         self.arm_event = None
         self.hold_timer = QTimer(self)
         self.hold_timer.setSingleShot(True)
@@ -67,14 +71,17 @@ class PanelScene(OverlayScene):
         self.mode = "home" if panel.get("mode") == "home" else "grid"
         self.model.panel = panel if panel else self.model.panel
 
+    def _look(self):
+        """What, when it changes, the panel is themed, measured and given its glass again for."""
+        panel = self.prefs.get("panel") or {}
+        return (self.theme_raw, self.style, self.language, self.liquid_level, self.system_glass, self.mode,
+                panel.get("bg_image"), panel.get("bg_blur"))
+
     def apply_prefs(self, prefs):
-        before = (self.theme_raw, self.style, self.language, self.liquid_level, self.system_glass, self.mode,
-                  repr((prefs.get("panel") or {}).get("bg_image")), (prefs.get("panel") or {}).get("bg_blur"))
+        before = self._look()
         self.prefs = prefs
         self.configure()
-        after = (self.theme_raw, self.style, self.language, self.liquid_level, self.system_glass, self.mode,
-                 repr((self.prefs.get("panel") or {}).get("bg_image")), (self.prefs.get("panel") or {}).get("bg_blur"))
-        if before[:4] != after[:4] or before[4:] != after[4:]:
+        if self._look() != before:
             self.retheme()
             self.update_metrics()
             self.invalidate_glass()
@@ -181,7 +188,7 @@ class PanelScene(OverlayScene):
         if sv.max_offset() <= 0:
             return False
         row = sv.row
-        target = (round(sv.offset / row) - (1 if delta > 0 else -1)) * row     # a row at a time, as the page snaps
+        target = (round(sv.offset / row) - (1 if delta > 0 else -1)) * row     # a row at a time
         sv.scroll_to(max(0, min(sv.max_offset(), target)))
         return True
 
@@ -288,8 +295,7 @@ class PanelScene(OverlayScene):
     def make_bg(self):
         """The panel's own picture, blurred, in place of the desktop's glass."""
         if not self.custom_bg():
-            self.bg_image = None
-            self.bg_tag = None
+            self._bg_made = None
             self.glass = None
             self.invalidate_glass()
             return
@@ -297,8 +303,15 @@ class PanelScene(OverlayScene):
         path = self.api._panel_bg_path()
         if not path or self.pw <= 1:
             return
+        blur = (28 if panel.get("bg_blur") is None else panel["bg_blur"]) * self.dpi * self.zoom_css
+        # Decoding and blurring the picture takes tens of ms, and the panel is measured again at every
+        # rebuild: the same picture for the same size is made once.
+        made_from = (path, panel.get("bg_image"), blur, self.pw, self.ph, self.theme)
+        if self._bg_made is not None and self._bg_made[0] == made_from:
+            self.latest = self._bg_made[1]
+            self._on_glass_custom()
+            return
         from PIL import Image, ImageFilter
-        blur = (28 if panel.get("bg_blur") is None else panel["bg_blur"]) * self.dpi * FLYOUT_ZOOM
         over = int(2 * blur) + 1
         w, h = self.pw, self.ph
         try:
@@ -315,6 +328,7 @@ class PanelScene(OverlayScene):
         overlay = Image.new("RGB", canvas.size, veil[:3])
         canvas = Image.blend(canvas, overlay, veil[3])
         qimg = QImage(canvas.convert("RGBA").tobytes(), w, h, w * 4, QImage.Format_RGBA8888).copy()
+        self._bg_made = (made_from, qimg)
         self.latest = qimg
         self._on_glass_custom()
 
@@ -332,9 +346,38 @@ class PanelScene(OverlayScene):
         super().start_glass()
 
     def update_metrics(self):
+        self.zoom_css = FLYOUT_ZOOM * self.fit()
         super().update_metrics()
         if self.custom_bg():
             self.make_bg()
+
+    def monitor(self):
+        """The monitor the panel opens on: the one whose tray was clicked (Api._flyout_anchor), else the
+        one under the pointer."""
+        anchor = getattr(self.api, "_flyout_anchor", None)
+        work = anchor[0] if anchor else None
+        if work:
+            return screens.monitor_at((work[0] + work[2]) / 2, (work[1] + work[3]) / 2)
+        pos = QCursor.pos()
+        ratio = self.devicePixelRatioF() or 1.0
+        return screens.monitor_at(pos.x() * ratio, pos.y() * ratio)
+
+    def fit(self):
+        """How much larger (or smaller) than at FLYOUT_ZOOM the panel is drawn on its monitor."""
+        mon = self.monitor()
+        if mon is None:
+            return 1.0
+        k = max(FIT_RANGE[0], min(FIT_RANGE[1], mon.logical_short_side() / FIT_SIDE))
+        # A full Home panel on a small screen (or a tall one turned on its side) still fits.
+        l, t, r, b = mon.work
+        css_w, css_h = self.css_w * FLYOUT_ZOOM * mon.scale, self.css_h * FLYOUT_ZOOM * mon.scale
+        if css_w > 1 and css_h > 1:
+            k = min(k, (r - l - 2 * FIT_MARGIN) / css_w, (b - t - 2 * FIT_MARGIN) / css_h)
+        return max(0.3, k)
+
+    def display_changed(self):
+        """A monitor was added, removed or rescaled: measured again, and put at its corner again."""
+        self.request_size()
 
     # -- coming in and going away --------------------------------------------------------------------------------------
     def request_size(self, sync=False):

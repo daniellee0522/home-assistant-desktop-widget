@@ -1,39 +1,24 @@
-"""The window layer: frameless, transparent Qt web views plus the bridge.
+"""What every window of the program shares, whatever draws it (nativeui/).
 
-A Qt window can be genuinely transparent, so outside the card's rounded
-corners the desktop shows through unpainted. The interface loosely follows
-pywebview's (create_window, window.events, evaluate_js), which is why the
-page still calls `window.pywebview.api`.
-
-The bridge: the page's own origin (a loopback HTTP server) answers
-POST /api/<name> by calling that method on the api object, and
-web/bridge.js builds `window.pywebview.api` out of fetch(). Anything
-positional is done by HWND in physical pixels, as in main.py.
+The Qt application and its event loop; calls carried onto the GUI thread from any other (`_invoke`);
+the window events main.py listens to (`window.events.shown += handler`); the program's log; and the
+watchdog that writes every stack to it when the GUI thread stops answering, and that notices the
+machine coming back from sleep and screens being added, removed or rescaled.
 """
 
 import faulthandler
 from ctypes import wintypes
-import json
 import os
 import threading
 import time
 import traceback
-from collections import deque
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QFile, QIODevice,
-                            QObject, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
-# The browser engine is imported when the first page is made (see _WebWindow): with the
-# desktop widgets drawn natively, a program with no page open never loads it.
+from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Qt, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 _app = None
 _heartbeat = None
-_windows = []
-_server = None
-_server_port = 0
-_web_dir = None
+_windows = []             # every window made, for start() to show those not made hidden
 
 
 # ---------------------------------------------------------------------
@@ -190,361 +175,16 @@ class _Events:
         # DWM's rounding and border, so undoing them must run each time
         # and before the first frame is presented.
         self.showing = _Event()
-        self.loaded = _Event()
         self.closing = _Event()
         self.moved = _Event()
         self.deactivated = _Event()
 
 
 # ---------------------------------------------------------------------
-# The bridge: the page's own origin answers for the API
+# Calls onto the GUI thread
 # ---------------------------------------------------------------------
-_channel_js = None
-
-
-def _webchannel_script():
-    """Qt's own qwebchannel.js, which lives in its resources, not in web/."""
-    global _channel_js
-    if _channel_js is None:
-        f = QFile(":/qtwebchannel/qwebchannel.js")
-        _channel_js = bytes(f.readAll()) if f.open(QIODevice.ReadOnly) else b""
-        f.close()
-    return _channel_js
-
-
-class _FrameBridge(QObject):
-    """What the page listens to for pictures: a signal carries each one, so
-    nothing is compiled as script (every runJavaScript is a new script, and
-    a few KB of them sixty times a second is memory the page never gets
-    back)."""
-
-    frame = Signal(str)
-
-
-class _Handler(SimpleHTTPRequestHandler):
-    """Serves web/ and, at /api/<name>, the api object behind it."""
-
-    # Keep-alive: the backdrop alone calls ~20 times a second per window.
-    protocol_version = "HTTP/1.1"
-
-    def __init__(self, *a, **kw):
-        super().__init__(*a, directory=_web_dir, **kw)
-
-    def log_message(self, *a):
-        pass
-
-    def do_GET(self):
-        route = self.path.split("?", 1)[0]
-        if route == "/panel-bg":
-            # The picture the user chose for the tray panel.
-            path = getattr(self.server, "api", None) and self.server.api._panel_bg_path()
-            body = b""
-            if path:
-                try:
-                    with open(path, "rb") as f:
-                        body = f.read()
-                except OSError:
-                    body = b""
-            self.send_response(200 if body else 404)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if route == "/qwebchannel.js":
-            body = _webchannel_script()
-            self.send_response(200 if body else 404)
-            self.send_header("Content-Type", "text/javascript; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        super().do_GET()
-
-    def do_POST(self):
-        if not self.path.startswith("/api/"):
-            self.send_error(404)
-            return
-        name = self.path[5:].split("?", 1)[0]
-        api = getattr(self.server, "api", None)
-        fn = getattr(api, name, None)
-        if api is None or fn is None or name.startswith("_") or not callable(fn):
-            self.send_error(404)
-            return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            args = json.loads(self.rfile.read(length) or b"[]")
-        except Exception:
-            self.send_error(400)
-            return
-        # Each call runs on its own server thread; the api marshals window
-        # work onto the GUI thread itself (see Window.run_on_ui_thread).
-        try:
-            value = fn(*args)
-            body = json.dumps({"value": value}, ensure_ascii=False, default=str)
-        except Exception as e:
-            traceback.print_exc()
-            body = json.dumps({"error": repr(e)})
-        raw = body.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        try:
-            self.wfile.write(raw)
-        except Exception:
-            pass                  # the page went away mid-call
-
-    def end_headers(self):
-        if self.command == "GET":
-            self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-
-def _start_server(web_dir, api):
-    global _server, _server_port, _web_dir
-    _web_dir = web_dir
-    # Loopback only, on a port the OS picks.
-    _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    _server.daemon_threads = True
-    _server.api = api
-    _server_port = _server.server_address[1]
-    threading.Thread(target=_server.serve_forever, daemon=True).start()
-    return _server_port
-
-
-# ---------------------------------------------------------------------
-# The window
-# ---------------------------------------------------------------------
-class _WebWindow(QMainWindow):
-    """The Qt widget behind a Window."""
-
-    def __init__(self, window):
-        super().__init__()
-        from PySide6.QtWebChannel import QWebChannel
-        from PySide6.QtWebEngineCore import QWebEngineSettings
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-        self._window = window
-        # Qt.Tool keeps these windows off the taskbar and out of Alt-Tab.
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
-        if window.transparent:
-            self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self.view = QWebEngineView(self)
-        page = self.view.page()
-        if window.transparent:
-            page.setBackgroundColor(Qt.transparent)
-        s = page.settings()
-        s.setAttribute(QWebEngineSettings.ShowScrollBars, False)
-        s.setAttribute(QWebEngineSettings.FocusOnNavigationEnabled, False)
-        # The route pictures take to the page (see _FrameBridge).
-        self._frames = _FrameBridge()
-        self._channel = QWebChannel(self)
-        self._channel.registerObject("frames", self._frames)
-        page.setWebChannel(self._channel)
-        self.setCentralWidget(self.view)
-        self.view.loadStarted.connect(self._on_load_started)
-        self.view.loadFinished.connect(self._on_load)
-        page.renderProcessTerminated.connect(self._on_renderer_terminated)
-        self._shown_once = False
-        self._renderer_failures = 0
-        self._renderer_reload_pending = False
-        self._display_dirty = False
-        # The HWND is cached on the GUI thread and refreshed on WinIdChange.
-        # Calling winId() from request threads races Qt recreating native
-        # windows after a display change (e.g. on resume) and has wedged
-        # the GUI thread before.
-        self._hwnd = 0
-        self._cache_hwnd()
-
-    def _cache_hwnd(self):
-        """GUI thread only."""
-        try:
-            self._hwnd = int(self.winId())
-        except Exception:
-            self._hwnd = 0
-        return self._hwnd
-
-    def _on_load_started(self):
-        self._window._page_loaded = False
-
-    def _refresh_display(self):
-        """GUI thread: rebuild the viewport after monitor/DPI changes.
-
-        Hidden panels keep the dirty flag until shown on their final monitor.
-        A size round-trip forces WebEngine to submit a fresh surface even if
-        the final CSS dimensions match its pre-suspend cache.
-        """
-        if not self.isVisible():
-            self._display_dirty = True
-            return
-        self._display_dirty = False
-        size = self.size()
-        self.view.hide()
-        self.resize(size.width() + 1, size.height() + 1)
-        self.resize(size)
-        self.view.show()
-        self._cache_hwnd()
-        self.view.update()
-        self._window.evaluate_js(
-            "window.__recoverDisplay && window.__recoverDisplay()")
-
-    def _on_renderer_terminated(self, status, exit_code):
-        self._window._page_loaded = False
-        log("Renderer terminated: %s status=%s exit=%s" % (
-            self._window.title, getattr(status, 'name', str(status)), exit_code))
-        if self._renderer_reload_pending:
-            return
-        self._renderer_reload_pending = True
-        self._renderer_failures += 1
-        delay = min(1000 * (2 ** min(self._renderer_failures - 1, 4)), 16000)
-        QTimer.singleShot(delay, self._reload_renderer)
-
-    def _reload_renderer(self):
-        self._renderer_reload_pending = False
-        if self._window.url:
-            log("Reloading renderer: " + self._window.title)
-            self.view.load(QUrl(self._window.url))
-
-    def _on_load(self, ok):
-        self._window._page_loaded = bool(ok)
-        if not ok:
-            log("Page load failed: " + self._window.title)
-            return
-        self._renderer_failures = 0
-        # Scripts queued before this page could run them.
-        while self._window._pending_scripts:
-            self.view.page().runJavaScript(self._window._pending_scripts.popleft())
-        self._window.events.loaded.fire()
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        self._cache_hwnd()
-        self._window.events.showing.fire()
-        if self._display_dirty:
-            QTimer.singleShot(0, self._refresh_display)
-        if not self._shown_once:
-            self._shown_once = True
-            # Once the event loop has settled and the window is really up.
-            QTimer.singleShot(0, self._window.events.shown.fire)
-
-    def moveEvent(self, e):
-        super().moveEvent(e)
-        # Logical pixels; handlers needing physical ones read the HWND.
-        pos = e.pos()
-        self._window.events.moved.fire(pos.x(), pos.y())
-
-    def closeEvent(self, e):
-        keep = self._window.events.closing.fire()
-        if keep is False:
-            e.ignore()
-        else:
-            e.accept()
-
-    def event(self, e):
-        t = e.type()
-        if t == QEvent.Type.WindowDeactivate:
-            self._window.events.deactivated.fire()
-        elif t == QEvent.Type.WinIdChange:
-            self._cache_hwnd()
-        return super().event(e)
-
-
-class Window:
-    def __init__(self, title, url=None, js_api=None, width=800, height=600,
-                 x=None, y=None, transparent=False, hidden=False):
-        self.title = title
-        self.url = url
-        self.js_api = js_api
-        self.transparent = transparent
-        self.events = _Events()
-        self._page_loaded = False
-        self._pending_scripts = deque(maxlen=512)
-        self._native = _WebWindow(self)
-        self._native.setWindowTitle(title)
-        self._native.resize(int(width), int(height))
-        if x is not None and y is not None:
-            self._native.move(int(x), int(y))
-        self._hidden = hidden
-        if url:
-            self._native.view.load(QUrl(url))
-
-    @property
-    def native(self):
-        return self._native
-
-    def hwnd(self):
-        # Safe from any thread; see _WebWindow.__init__.
-        h = self._native._hwnd
-        if h:
-            return h
-        try:
-            return _invoke(self._native, self._native._cache_hwnd, wait=True) or None
-        except Exception:
-            return None
-
-    def show(self):
-        _invoke(self._native, self._native.show)
-
-    def refresh_display(self):
-        _invoke(self._native, self._native._refresh_display)
-
-    def prepare_for_show(self):
-        """Tray panels must adopt the click monitor before physical placement."""
-        def prepare():
-            screen = QApplication.screenAt(QCursor.pos())
-            if screen is not None and screen != self._native.screen():
-                self._native.setScreen(screen)
-                self._native._display_dirty = True
-            self._native._cache_hwnd()
-        _invoke(self._native, prepare, wait=True)
-
-    def hide(self):
-        _invoke(self._native, self._native.hide)
-
-    def set_opacity(self, value):
-        """The whole window's opacity: 0 shows it to the page (which draws only while shown)
-        and to nobody else."""
-        _invoke(self._native, lambda: self._native.setWindowOpacity(value), wait=True)
-
-    def destroy(self):
-        _invoke(self._native, self._native.close)
-
-    def dispose(self):
-        """Close for good, unlike destroy(), which a closing handler may veto."""
-        def run():
-            self.events.closing._handlers.clear()
-            self._native.close()
-            self._native.deleteLater()
-        _invoke(self._native, run, wait=True)
-        try:
-            _windows.remove(self)
-        except ValueError:
-            pass
-
-    def evaluate_js(self, script):
-        def run():
-            if self._page_loaded:
-                self._native.view.page().runJavaScript(script)
-            else:
-                self._pending_scripts.append(script)
-        _invoke(self._native, run)
-        return None
-
-    def push_frame(self, text):
-        """Hand the page a picture (a JSON string) without compiling script."""
-        _invoke(self._native, lambda: self._native._frames.frame.emit(text))
-
-    def run_on_ui_thread(self, fn):
-        """Run fn on the GUI thread and wait for its result."""
-        return _invoke(self._native, fn, wait=True)
-
-
 class _Marshal(QObject):
-    """Carries a call from a request thread onto the GUI thread.
+    """Carries a call from another thread onto the GUI thread.
 
     A queued signal on an object living there; QTimer.singleShot from a
     thread without an event loop silently never fires.
@@ -602,38 +242,35 @@ def _invoke(widget, fn, wait=False):
     return box.get("value")
 
 
+def follow_screen(hwnd, x, y):
+    """Before a window of ours is moved by its HWND to physical (x, y): put its Qt window on the screen there.
+
+    Qt does not notice a move made with SetWindowPos: it keeps the old screen's device pixel ratio, and a
+    window taken from a 125 % monitor to a 100 % one goes on drawing everything 1.25 times too large. GUI
+    thread only."""
+    app = QApplication.instance()
+    if app is None:
+        return
+    target = None
+    for screen in app.screens():
+        # Each screen's top-left is in physical pixels, its size in its own logical ones.
+        g, ratio = screen.geometry(), screen.devicePixelRatio()
+        if g.x() <= x < g.x() + g.width() * ratio and g.y() <= y < g.y() + g.height() * ratio:
+            target = screen
+            break
+    if target is None:
+        return
+    for widget in app.topLevelWidgets():
+        handle = widget.windowHandle()
+        if handle is not None and int(widget.winId()) == int(hwnd):
+            if handle.screen() is not target:
+                handle.setScreen(target)
+            return
+
+
 # ---------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------
-def create_window(title, url=None, **kw):
-    """`url` may be a path to a file in the web directory; it is served
-    from the bridge's origin so API calls are same-origin.
-
-    Safe from any thread: Qt objects are made on the GUI thread."""
-    if url and not url.startswith("http"):
-        path, _, frag = url.partition("#")
-        name = os.path.basename(path)
-        url = "http://127.0.0.1:%d/%s%s" % (_server_port, name, ("#" + frag) if frag else "")
-    if _marshal is None or threading.current_thread() is threading.main_thread():
-        win = Window(title, url=url, **kw)
-    else:
-        box = {}
-        done = threading.Event()
-
-        def make():
-            try:
-                box["win"] = Window(title, url=url, **kw)
-            finally:
-                done.set()
-        _marshal.post(make)
-        done.wait(10.0)
-        win = box.get("win")
-        if win is None:
-            raise RuntimeError("window could not be created")
-    _windows.append(win)
-    return win
-
-
 def start():
     """Show the windows not created hidden and run the event loop."""
     app = QApplication.instance() or QApplication([])
@@ -643,16 +280,9 @@ def start():
     app.exec()
 
 
-def prepare(web_dir, api, log_dir=None):
-    """Create the application and the bridge, before any window exists."""
+def prepare(log_dir=None):
+    """Create the application, before any window exists."""
     global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter, _display_timer
-    # The pages call gc() now and then (see the "garbage" timer in app.js): the
-    # engine collects by the size of the script heap, and the messages and
-    # pixel buffers a page receives live outside it, so left alone a widget
-    # page piles up tens of MB of garbage a minute.
-    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    if "--expose-gc" not in flags:
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (flags + " --js-flags=--expose-gc").strip()
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
         try:
@@ -660,9 +290,6 @@ def prepare(web_dir, api, log_dir=None):
             faulthandler.enable(open(_LOG_PATH, "a", encoding="utf-8"))
         except Exception:
             pass
-    # Needed by the browser engine whenever it is first used, and only settable before the
-    # application exists.
-    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     _app = QApplication.instance() or QApplication([])
     _app.setQuitOnLastWindowClosed(False)
     log("Started pid=%s" % os.getpid())
@@ -684,5 +311,3 @@ def prepare(web_dir, api, log_dir=None):
     _heartbeat.timeout.connect(lambda: _alive_at.__setitem__(0, time.monotonic()))
     _heartbeat.start(500)
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
-    _start_server(web_dir, api)
-    return _server_port

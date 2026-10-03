@@ -4,6 +4,7 @@ those threads, so callers must hop back to the UI thread themselves.
 """
 
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -11,6 +12,11 @@ import urllib.error
 import urllib.parse
 
 import websocket  # websocket-client
+
+# The entity a state_changed message is about: the first "entity_id" in it, since Home Assistant
+# writes the event's data as {"entity_id": ..., "old_state": ..., "new_state": ...}. Read from the raw
+# text so the (often large) messages about entities nobody shows are dropped without being parsed.
+_ENTITY_OF = re.compile(r'"entity_id"\s*:\s*"([^"\\]+)"')
 
 
 class HAClient:
@@ -24,6 +30,7 @@ class HAClient:
         self._entity_ids = []
         self._entity_set = frozenset()
         self._ws = None
+        self._live = False             # subscribed and answering
         self._stop = threading.Event()
         self._ws_thread = None
         self._poll_thread = None
@@ -208,6 +215,7 @@ class HAClient:
                         "id": 1, "type": "subscribe_events", "event_type": "state_changed",
                     }))
                     ws.recv()  # result ack for id 1
+                    self._live = True
                     self._set_status(True, "connected")
                     backoff = 2
                     # A quiet Home Assistant sends nothing for minutes, which is not a dead line: wait
@@ -229,6 +237,9 @@ class HAClient:
                         if raw is None or raw == "":
                             self._set_status(False, "disconnected")
                             break
+                        about = _ENTITY_OF.search(raw)
+                        if about and about.group(1) not in self._entity_set:
+                            continue
                         msg = json.loads(raw)
                         if msg.get("type") != "event":
                             continue
@@ -247,6 +258,7 @@ class HAClient:
                                 "entity_id": entity_id, "state": "unavailable", "attributes": {},
                             })
                 finally:
+                    self._live = False
                     try:
                         ws.close()
                     except Exception:
@@ -269,6 +281,10 @@ class HAClient:
                     return
                 time.sleep(1)
             if not self.url or not self.token:
+                continue
+            if self._live:
+                # The websocket already reports every change (and its keepalive notices a dead
+                # line): reading every state again would only redraw what is already shown.
                 continue
             wanted = self._entity_set
             if not wanted:

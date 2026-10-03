@@ -15,8 +15,8 @@ Every window is drawn natively (nativeui/), with no browser page, and shares one
   * flyout   - the tray panel, opened by clicking the tray icon (nativeui.panel)
 
 The card, the panel and Settings are made when first wanted and released after a while unused.
-(web/ is the earlier page-based interface, still used by HA_WIDGET_WEB=1 from source; the program
-only reads its icon paths and English texts.)
+main.py tells a window something with `window.send(name, *args)` (see nativeui/overlay.py), and
+the windows call the Api's public methods.
 
 Settings are saved to ha_widgets_config.json beside this script, or under
 %APPDATA%\\HA Widgets for an installed build (see config.py). Closing the
@@ -25,7 +25,6 @@ widget hides it; use the tray menu's Quit to exit.
 Run:  python main.py
 """
 
-import base64
 import ctypes
 import datetime
 import json
@@ -64,7 +63,7 @@ if sys.platform == "win32":
 # (about 40 MB) into the process the first time one is used.
 os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
 
-import qtshell as webview  # noqa: E402
+import qtshell  # noqa: E402
 from nativeui import detail as native_detail  # noqa: E402
 from nativeui import panel as native_panel  # noqa: E402
 from nativeui import settings as native_settings  # noqa: E402
@@ -75,17 +74,14 @@ import home  # noqa: E402
 from ha_client import HAClient  # noqa: E402
 from tray import build_tray_icon, restore_tray_icon  # noqa: E402
 
-# Frozen, bundled data lives under PyInstaller's _MEIPASS while the
-# executable's own folder is BASE_DIR.
+# The executable's own folder when frozen (the log is written there).
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
-    WEB_DIR = os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), "web")
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    WEB_DIR = os.path.join(BASE_DIR, "web")
 
-# Keep in step with --tile-w/--tile-h/--gap/--pad in style.css; used only
-# for the window's size before the page has measured itself.
+# A widget's tile cell, gap and padding in CSS px (nativeui/render.py draws with the same);
+# used for a window's size before it has measured itself.
 TILE_W, TILE_H, GAP, PAD = 152, 146, 14, 14
 
 # The smallest size any window is set to.
@@ -93,11 +89,11 @@ MIN_WINDOW_W = 80
 MIN_WINDOW_H = 60
 
 class Api:
-    """Served to the pages at /api/<method> (see qtshell.py).
+    """What every window works through: the config, Home Assistant, the windows' places and glass.
 
-    Only public methods are reachable from JavaScript; anything prefixed
-    with `_` is internal. Every call arrives on its own request thread, so
-    anything that touches a window is marshalled onto the GUI thread.
+    The public methods are what the windows (nativeui/) call, usually from a thread of their own;
+    anything that touches a window is marshalled onto the GUI thread. Anything prefixed with `_`
+    is main.py's own.
     """
 
     def __init__(self):
@@ -111,7 +107,6 @@ class Api:
         # The desktop widgets: id -> window, in creation order. The first
         # is also bound as _window, "main" to the older code paths.
         self._widgets = {}
-        self._widget_locks = {}
         self._widget_move_timers = {}
         self._widget_pin_stops = {}
         # Called when a widget window is closed: hides everything to the tray.
@@ -122,11 +117,7 @@ class Api:
         self._dimmed = False
         # The last small backdrop sent to each window: (hash, image).
         self._backdrop_sent = {}
-        # Windows being sent backdrop frames as they happen: kind -> state.
-        self._streams = {}
         self._hidden_cache = {}
-        self._hub_lock = threading.Lock()
-        self._hub_thread = None
         self._woke_at = 0.0
         self._off_desktop_since = 0.0
         self._dim_stop = threading.Event()
@@ -159,7 +150,7 @@ class Api:
         # (work area, notification area is on the right), fixed at open:
         # the pointer is only over the tray icon at the moment of the click.
         self._flyout_anchor = None
-        # The size the panel's page last asked for. A hidden window's own
+        # The size the panel last asked for. A hidden window's own
         # rectangle may not have caught up with it yet.
         self._flyout_size = None
         # Activation churns while a window is being shown; a Deactivate in
@@ -179,14 +170,17 @@ class Api:
         self._popover_last_resize_seq = -1
 
         # The tray panel and the detail card are made when first wanted and
-        # released after a while unused: each is a browser page, tens of MB.
+        # released after a while unused.
         self._overlay_lock = threading.Lock()
-        self._ready = {}
-        self._fresh = set()           # overlay pages made just now, which have not yet drawn
+        self._fresh = set()           # overlays made just now, which have not yet drawn
         self._release_timers = {}
         self._registry_cache = None
+        # The latest state of every entity a tile shows, kept by the websocket's pushes, so a window
+        # made later (the panel, the card) starts from it rather than reading every state again.
+        self._known_states = {}
+        self._known_read_at = -60.0
+        self._states_lock = threading.Lock()
         self._home_states = {}
-        self._home_rooms = []
         self._settings_window = None
         self._settings_lock = threading.Lock()
         self._settings_resize_lock = threading.Lock()
@@ -227,46 +221,32 @@ class Api:
         return tiles
 
     def _watched_entities(self):
-        seen = []
-        for t in self._all_tiles():
-            e = t.get("entity")
-            if e and e not in seen:
-                seen.append(e)
-        return seen
+        """The tiles' entities, each once, in order."""
+        return list(dict.fromkeys(t["entity"] for t in self._all_tiles() if t.get("entity")))
 
     def _bind_widget(self, widget_id, window):
         self._widgets[widget_id] = window
-        self._widget_locks[widget_id] = threading.Lock()
-        setattr(self, "_wseq_" + widget_id, -1)
         if self._window is None:
             self._window = window
 
-    # How long the panel or the card may stay unused before its page is
+    # How long the panel or the card may stay unused before it is
     # released; the next use makes it again (a few tenths of a second).
     _OVERLAY_RELEASE_S = 120
 
     def _ensure_overlay(self, kind):
-        """The popover or flyout window, made if it is not there (and waited
-        for until its page has drawn itself)."""
+        """The popover or flyout window, made if it is not there."""
         with self._overlay_lock:
             self._cancel_release(kind)
             window = self._popover_window if kind == "popover" else self._flyout_window
             if window:
                 return window
-            ready = self._ready[kind] = threading.Event()
             self._fresh.add(kind)
             first = (self._cfg.get("widgets") or [{}])[0]
             if kind == "popover":
-                # Its page numbers its resizes from 1 again.
+                # It numbers its resizes from 1 again.
                 self._popover_last_resize_seq = -1
-                if os.environ.get("HA_WIDGET_WEB"):
-                    window = _create_overlay_window(
-                        self, "HA Widget Detail", "popover", 260, 336, rehide=False,
-                        x=first.get("x", 200), y=first.get("y", 200))
-                else:
-                    window = native_detail.create_popover(
-                        self, x=first.get("x", 200), y=first.get("y", 200))
-                    ready.set()                      # drawn natively: nothing to wait for
+                window = native_detail.create_popover(
+                    self, x=first.get("x", 200), y=first.get("y", 200))
                 window.events.showing += lambda: _apply_window_shape(window)
                 window.events.shown += lambda: (
                     self._apply_capture_exclusion(), _set_noactivate(window, True),
@@ -276,32 +256,18 @@ class Api:
                 self._bind_popover_window(window)
             else:
                 self._flyout_last_resize_seq = -1
-                init = self._flyout_size or _widget_initial_size(
-                    first.get("size", "2x4"), self._cfg.get("zoom", 100))
-                if os.environ.get("HA_WIDGET_WEB"):
-                    window = _create_overlay_window(
-                        self, "HA Widgets Panel", "flyout", init[0], init[1], rehide=False,
-                        x=200, y=200)
-                else:
-                    window = native_panel.create_panel(self)
-                    ready.set()
+                window = native_panel.create_panel(self)
                 window.events.showing += lambda: _apply_window_shape(window)
                 window.events.shown += self._apply_capture_exclusion
                 window.events.deactivated += lambda: threading.Thread(
                     target=self.dismiss_flyout, daemon=True).start()
                 self._bind_flyout_window(window)
-        # The first page of a run also starts the browser engine, which takes a while.
-        ready.wait(10.0)
         return window
 
     @staticmethod
     def _close_detail_page(window):
-        # Clicking anywhere else closes the card. Deactivate fires on the GUI
-        # thread, so the page is called from another one.
-        try:
-            window.evaluate_js("window.closeDetail && window.closeDetail()")
-        except Exception:
-            pass
+        # Clicking anywhere else closes the card.
+        window.send("close_card")
 
     def _cancel_release(self, kind):
         timer = self._release_timers.pop(kind, None)
@@ -324,9 +290,7 @@ class Api:
                 self._popover_window = None
             else:
                 self._flyout_window = None
-            self._ready.pop(kind, None)
             self._fresh.discard(kind)
-        self._streams.pop(kind, None)
         if window:
             try:
                 window.dispose()
@@ -358,11 +322,11 @@ class Api:
                             self._flyout_window, self._settings_window) if w]
 
     # ---------------------------------------------------------------
-    # JS-callable API
+    # What the windows call
     # ---------------------------------------------------------------
 
     def _prefs(self):
-        """The preferences every page renders from."""
+        """The preferences every window draws from."""
         return {
             "theme": self._cfg.get("theme", "auto"),
             "language": self._cfg.get("language", "zh-TW"),
@@ -377,7 +341,7 @@ class Api:
             "panel_theme": self._cfg.get("panel_theme", "follow"),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
             "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
-            # Positions stay on this side; the pages only need what to draw.
+            # Positions stay on this side; the windows only need what to draw.
             "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"]}
                         for w in self._cfg.get("widgets", [])],
             "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None,
@@ -402,20 +366,24 @@ class Api:
         entities = self._watched_entities()
         if not (self._cfg.get("ha_token") and entities):
             return {}
-        states = {}
-        try:
-            by_id = {s.get("entity_id"): s for s in self._client.get_states()}
-            for entity in entities:
-                if entity in by_id:
-                    states[entity] = by_id[entity]
-        except Exception:
-            pass
-        return states
+        # One read at a time: the widgets all ask at start, and the first answers the rest.
+        with self._states_lock:
+            known = self._known_states
+            # Trusted while the websocket keeps it, or for a moment after it was read (before the
+            # websocket is up, as at start).
+            fresh = self._connected or time.monotonic() - self._known_read_at < 10.0
+            if not (fresh and all(e in known for e in entities)):
+                try:
+                    by_id = {s.get("entity_id"): s for s in self._client.get_states()}
+                    self._known_read_at = time.monotonic()
+                except Exception:
+                    by_id = {}
+                for entity in entities:
+                    if entity in by_id:
+                        known[entity] = by_id[entity]
+            return {e: known[e] for e in entities if e in known}
 
     def ui_ready(self, kind=None):
-        ready = self._ready.get(kind)
-        if ready:
-            ready.set()
         self._ui_ready = True
         with self._pending_lock:
             pending, self._pending = self._pending, []
@@ -472,7 +440,6 @@ class Api:
         entities, sensors, rooms = home.build_home(
             states, areas, devices, registry, overrides)
         self._home_states = {e["entity_id"]: e["state"] for e in (*entities, *sensors)}
-        self._home_rooms = rooms
         self._sync_client_entities()
         return {"rooms": rooms, "entities": entities, "sensors": sensors}
 
@@ -490,16 +457,15 @@ class Api:
 
     def choose_panel_background(self):
         """Ask for a picture, keep a reduced copy in the settings folder and
-        use it behind the panel (blurred; see paintCustomBackdrop)."""
-        source = webview.choose_image_file("選擇面板背景圖片")
+        use it behind the panel (blurred; see nativeui/panel.py make_bg)."""
+        source = qtshell.choose_image_file("選擇面板背景圖片")
         if not source:
             return False
         try:
             from PIL import Image
             with Image.open(source) as image:
                 image = image.convert("RGB")
-                # A phone-sized picture is plenty behind a blur, and what a
-                # page decodes is what it keeps in memory.
+                # A phone-sized picture is plenty behind a blur.
                 image.thumbnail((self._BG_MAX_SIDE, self._BG_MAX_SIDE))
                 folder = os.path.dirname(cfgmod.CONFIG_FILE)
                 os.makedirs(folder, exist_ok=True)
@@ -524,10 +490,6 @@ class Api:
         panel["bg_image"] = tag
         self._cfg["panel"] = cfgmod.clean_panel(panel, self._clean_tiles)
         self._tiles_changed()
-
-    def get_room_names(self):
-        """Room names to offer when moving a device."""
-        return list(self._home_rooms)
 
     def _home_mode(self):
         return (self._cfg.get("panel") or {}).get("mode") == "home"
@@ -598,11 +560,10 @@ class Api:
         if not isinstance(panel, dict):
             return False
         self._cfg["panel"] = cfgmod.clean_panel(panel, self._clean_tiles)
-        self._home_cache = None             # rooms may have moved
         self._tiles_changed()
         return True
 
-    # Beyond this many widgets each extra one is another browser process.
+    # The editor suggests no more widgets than this (each has its own glass to keep).
     WIDGET_SOFT_LIMIT = 6
 
     def add_widget(self, size="2x4"):
@@ -735,11 +696,8 @@ class Api:
     def open_widget_editor(self, widget_id=None):
         """Settings, opened on the visual widget editor."""
         self.open_settings_window()
-        try:
-            self._settings_window.evaluate_js(
-                "window.__enterEditor && window.__enterEditor(%s)" % json.dumps(widget_id))
-        except Exception:
-            pass
+        if self._settings_window:
+            self._settings_window.send("enter_editor", widget_id)
 
     def remove_widget(self, widget_id):
         widgets = self._cfg.get("widgets", [])
@@ -747,12 +705,11 @@ class Api:
             return False
         self._cfg["widgets"] = [w for w in widgets if w["id"] != widget_id]
         window = self._widgets.pop(widget_id, None)
-        self._widget_locks.pop(widget_id, None)
         stop = self._widget_pin_stops.pop(widget_id, None)
         if stop:
             stop.set()
         kind = self._widget_kind(widget_id)
-        for table in (self._streams, self._backdrop_sent,
+        for table in (self._backdrop_sent,
                       self._duplication_after, self._system_glass_hwnds,
                       self._widget_frames):
             table.pop(kind, None)
@@ -776,7 +733,7 @@ class Api:
         self._push_prefs()
         return True
 
-    # How each preference is validated. Pages send only the keys they
+    # How each preference is validated. Windows send only the keys they
     # changed, so one window's stale copy never overwrites another's edit.
     _PREF_CLEANERS = {
         "theme": lambda v: v if v in ("auto", "light", "dark") else "auto",
@@ -866,8 +823,7 @@ class Api:
                 continue
             points.append([when, value])
         points.sort(key=lambda p: p[0])
-        # The chart is a couple of hundred pixels wide; thin the series
-        # before it crosses the bridge.
+        # The chart is a couple of hundred pixels wide; thin the series.
         limit = 240
         if len(points) > limit:
             step = len(points) / float(limit)
@@ -882,19 +838,8 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # Sizes arrive in physical pixels: the page multiplies its CSS size by
-    # its own devicePixelRatio, which avoids a second, disagreeing DPI
-    # conversion on this side.
-
-    def resize_window(self, phys_w, phys_h, seq=None, widget_id=None):
-        widget_id = widget_id if widget_id in self._widgets else next(
-            iter(self._widgets), None)
-        if widget_id is None:
-            return
-        self._resize_native(
-            self._widgets[widget_id], self._widget_locks[widget_id],
-            "_wseq_" + widget_id, phys_w, phys_h, seq,
-        )
+    # Sizes arrive in physical pixels: a window multiplies its CSS size by
+    # its own DPI, which avoids a second, disagreeing conversion on this side.
 
     def resize_popover_window(self, phys_w, phys_h, seq=None):
         # Where the popover goes depends on its size, so it is placed and
@@ -960,7 +905,7 @@ class Api:
     _FLYOUT_MARGIN = 12         # what Windows leaves around its own flyouts
 
     def backdrop_armed(self):
-        """Called by a page once the backdrop it was asked to take is
+        """Called by a window once the backdrop it was asked to take is
         painted - see _arm_backdrop."""
         self._armed.set()
         return True
@@ -971,12 +916,8 @@ class Api:
         picture of wherever it was last time."""
         self._arming_kind = kind
         self._armed.clear()
-        try:
-            window.evaluate_js(
-                "window.__armBackdrop && window.__armBackdrop()")
-        except Exception:
-            pass
-        # The timeout only guards against a page that never answers.
+        window.send("arm")
+        # The timeout only guards against a window that never answers.
         self._armed.wait(timeout)
         # A moment for the compositor to put that frame on the surface.
         time.sleep(0.04)
@@ -1020,11 +961,11 @@ class Api:
         self._arming_kind = "flyout"
         self._apply_capture_exclusion()
         if "flyout" in self._fresh:
-            # A page just made has drawn nothing and does not know its size yet; shown now it
+            # A panel just made has drawn nothing and does not know its size yet; shown now it
             # would open blank and then jump. Let it size itself, fetch its data and take its
             # backdrop while it is still hidden, as the detail card does.
             self._fresh.discard("flyout")
-            # A hidden page does not draw, so it is shown, at no opacity, while it does.
+            # A hidden window does not draw, so it is shown, at no opacity, while it does.
             window.set_opacity(0.0)
             try:
                 window.show()
@@ -1036,7 +977,7 @@ class Api:
                 self._place_flyout(window, hwnd, self._flyout_size)
             self._arming_kind = "flyout"
         # Shown before its backdrop is armed, unlike the popover: waiting up
-        # to 300ms for the page after a tray click reads as a stutter, while
+        # to 300ms for the panel after a tray click reads as a stutter, while
         # a stale first frame lasts only a frame or two.
         try:
             window.show()
@@ -1044,7 +985,7 @@ class Api:
             pass
         # Let Qt finish the resize and DWM compose it.
         time.sleep(0.05)
-        # The size the page asked for may have landed while it was hidden.
+        # The size the panel asked for may have landed while it was hidden.
         if self._flyout_size:
             self._place_flyout(window, hwnd, self._flyout_size)
         self._apply_capture_exclusion()
@@ -1053,11 +994,7 @@ class Api:
         self._watch_flyout_focus()
         self._arm_backdrop("flyout", window)
         _bring_to_front(window)
-        try:
-            window.evaluate_js(
-                "window.__flyoutEnter && window.__flyoutEnter()")
-        except Exception:
-            pass
+        window.send("flyout_enter")
 
     def dismiss_flyout(self):
         """Close the panel because focus moved elsewhere.
@@ -1077,7 +1014,7 @@ class Api:
             pass
         self.hide_flyout()
 
-    # Keep in step with .flyout-leave in style.css.
+    # Keep in step with the panel's own exit (nativeui/panel.py flyout_leave).
     _FLYOUT_LEAVE_S = 0.16
 
     def hide_flyout(self):
@@ -1095,11 +1032,7 @@ class Api:
         def fade_then_hide():
             # On a thread: this can be called from the GUI thread, where
             # waiting out the animation would block it.
-            try:
-                window.evaluate_js(
-                    "window.__flyoutLeave && window.__flyoutLeave()")
-            except Exception:
-                pass
+            window.send("flyout_leave")
             time.sleep(self._FLYOUT_LEAVE_S)
             if self._flyout_open:
                 return          # opened again mid-fade
@@ -1174,7 +1107,7 @@ class Api:
         work = _work_area_at(x, y)
         if not work or w <= 0 or h <= 0:
             return None
-        # Remembered for the next open, which needs a size before its page
+        # Remembered for the next open, which needs a size before the card
         # reports one. The collapsed minimum is the closing animation's.
         if w > MIN_WINDOW_W and h > MIN_WINDOW_H:
             self._popover_size = (w, h)
@@ -1192,20 +1125,11 @@ class Api:
         self._popover_owner = owner_kind
         # The card takes the theme of the window it opens from (the panel has
         # its own).
-        try:
-            self._popover_window.evaluate_js(
-                "window.__popoverOwner && window.__popoverOwner(%s)" % json.dumps(owner_kind))
-        except Exception:
-            pass
+        self._popover_window.send("set_owner", owner_kind)
         if tile_id.startswith("home:"):
             state = self._home_states.get(tile_id[5:])
             if state:
-                try:
-                    self._popover_window.evaluate_js(
-                        "window.__haPushBatch && window.__haPushBatch(%s)"
-                        % json.dumps([[tile_id[5:], state]], ensure_ascii=False))
-                except Exception:
-                    pass
+                self._broadcast("push_states", [[tile_id[5:], state]], windows=(self._popover_window,))
         hwnd = _get_hwnd(self._popover_window)
         if hwnd:
             # Anchored at the tile's top-left, flipping at screen edges.
@@ -1213,7 +1137,7 @@ class Api:
                 screen_y), int(tile_w), int(tile_h))
             # The window is still collapsed from its last close, so place it
             # with the last known size; resize_popover_window corrects it
-            # once the page reports the real one.
+            # once the card reports the real one.
             guess = self._popover_size
             if guess:
                 at = self._popover_origin(guess[0], guess[1])
@@ -1231,13 +1155,7 @@ class Api:
         self._apply_capture_exclusion()
         # Render the card, let it settle its size and place, and take the
         # backdrop there - all while the window is still hidden.
-        try:
-            self._popover_window.evaluate_js(
-                "window.__showPopoverForTile && window.__showPopoverForTile(%s)" % json.dumps(
-                    tile_id)
-            )
-        except Exception:
-            pass
+        self._popover_window.send("open_tile", tile_id)
         self._arm_backdrop("popover", self._popover_window)
         try:
             self._popover_window.show()
@@ -1247,26 +1165,17 @@ class Api:
         _bring_to_front(self._popover_window)
         self._apply_system_glass("popover")
         # Its entrance played while hidden; replay it now that it is visible.
-        try:
-            self._popover_window.evaluate_js(
-                "window.__popoverEnter && window.__popoverEnter()")
-        except Exception:
-            pass
+        self._popover_window.send("enter")
 
     def _ensure_settings_window(self):
-        """Settings is seldom open, and a browser page costs tens of MB, so
-        it is made when asked for and released when closed."""
+        """Settings is seldom open, so it is made when asked for and released
+        when closed."""
         with self._settings_lock:
             if self._settings_window:
                 return self._settings_window
-            # Its page numbers its resizes from 1 again.
+            # It numbers its resizes from 1 again.
             self._settings_last_resize_seq = -1
-            # Focusable (it has text fields) and ignores the widget's zoom.
-            if os.environ.get("HA_WIDGET_WEB"):
-                window = _create_overlay_window(
-                    self, "HA Widgets Settings", "settings", 420, 640, rehide=False)
-            else:
-                window = native_settings.create_settings(self)
+            window = native_settings.create_settings(self)
             window.events.showing += lambda: _apply_window_shape(window)
             window.events.shown += self._apply_capture_exclusion
             self._bind_settings_window(window)
@@ -1293,12 +1202,7 @@ class Api:
         except Exception:
             pass
         _bring_to_front(self._settings_window)
-        try:
-            self._settings_window.evaluate_js(
-                "window.__enterSettings && window.__enterSettings()"
-            )
-        except Exception:
-            pass
+        self._settings_window.send("enter_settings")
 
     def close_settings_window(self):
         window, self._settings_window = self._settings_window, None
@@ -1318,7 +1222,7 @@ class Api:
             except Exception:
                 pass
             self._schedule_release("popover")
-        # Forget the tile: the page shrinks the hidden window on the way out,
+        # Forget the tile: the card shrinks the hidden window on the way out,
         # and that resize must not move it.
         self._popover_anchor = None
         self._overlays_open.discard("popover")
@@ -1331,139 +1235,14 @@ class Api:
                 _bring_to_front(self._popover_window)
         return True
 
-    # How long a stream outlives its page's last sign of life, and the fastest
-    # the hub goes round (about sixty a second).
-    _STREAM_LEASE_S = 15.0
-    _STREAM_MIN_GAP_S = 0.016
-    _STREAM_DUTY = 0.45
-    # While the panel or a detail card is open the user is looking at its
-    # glass, and anything moving under it (a scrolling window) shows any lag
-    # as a seam at its edge: it may use more of the hub, for a short time.
-    _OVERLAY_STREAM_GAP_S = 0.004
-    _OVERLAY_STREAM_DUTY = 0.8
-
-    def backdrop_stream(self, window_kind, token, want_w=0, want_h=0, last_hash=None,
-                        channel=False):
-        """Send this window's backdrop to its page as the screen changes,
-        instead of waiting to be asked for each frame.
-
-        Called again with the same token it only renews the lease; with a
-        token of None it stops. The page ends a stream whenever what it
-        wants changes (size, position), and Python ends it when a frame
-        cannot be paced by the screen, with a final {"stream_end": True}
-        answer to be handled like the answer to a call.
-
-        One thread (the hub) serves every stream, so the screen is waited on
-        once, all the windows are looked at in the same pass, and they update
-        together.
-        """
-        if token is None:
-            self._streams.pop(window_kind, None)
-            return True
-        entry = self._streams.get(window_kind)
-        if entry and entry["token"] == token:
-            entry["beat"] = time.monotonic()
-            return True
-        self._streams[window_kind] = {
-            "token": token, "w": want_w, "h": want_h, "hash": last_hash,
-            "beat": time.monotonic(), "channel": bool(channel)}
-        with self._hub_lock:
-            if not (self._hub_thread and self._hub_thread.is_alive()):
-                self._hub_thread = threading.Thread(
-                    target=self._hub_loop, daemon=True, name="backdrop-hub")
-                self._hub_thread.start()
-        return True
-
-    def _push_to(self, kind, entry, shot):
-        window = self._window_for(kind)
-        if not window:
-            return
-        payload = dict(shot or {})
-        payload["token"] = entry["token"]
-        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        try:
-            if entry.get("channel"):
-                window.push_frame(text)
-            else:
-                window.evaluate_js("window.__backdropPush && window.__backdropPush(%s)" % text)
-        except Exception:
-            pass
-
-    def _serve_stream(self, kind, entry, prefetched=None):
-        """One look at one stream: push a new picture, or end the stream.
-        Returns True when a picture was sent."""
-        if time.monotonic() - entry["beat"] > self._STREAM_LEASE_S:
-            if self._streams.get(kind) is entry:
-                del self._streams[kind]
-            return False
-        # wait_secs=0: a look, never a wait - the hub waits for the whole screen.
-        shot = self.get_desktop_backdrop(
-            kind, entry["hash"], entry["w"], entry["h"], wait_secs=0,
-            prefetched=prefetched)
-        if self._streams.get(kind) is not entry:
-            return False                    # superseded; the page has moved on
-        if shot and shot.get("paced") and shot.get("unchanged"):
-            entry["hash"] = shot.get("hash")
-            return False
-        if shot and shot.get("paced") and shot.get("blur_raw"):
-            entry["hash"] = shot.get("hash")
-            self._push_to(kind, entry, shot)
-            return True
-        # Skipped, unpaced or failed: hand back to the page's ticker.
-        final = dict(shot or {})
-        final["stream_end"] = True
-        del self._streams[kind]
-        self._push_to(kind, entry, final)
-        return False
-
-    def _hub_loop(self):
-        idle_passes = 0
-        while not self._dim_stop.is_set():
-            entries = list(self._streams.items())
-            if not entries:
-                idle_passes += 1
-                if idle_passes > 20:
-                    return                  # restarted by the next stream
-                time.sleep(0.25)
-                continue
-            idle_passes = 0
-            started = time.monotonic()
-            frames = _screen_duplication.frame_count()
-            sent = False
-            try:
-                batch = self._prefetch(entries)
-            except Exception:
-                batch = {}
-            for kind, entry in entries:
-                try:
-                    sent = self._serve_stream(kind, entry, batch.get(kind)) or sent
-                except Exception:
-                    if self._streams.get(kind) is entry:
-                        del self._streams[kind]
-                    self._push_to(kind, entry, {"stream_end": True})
-            if sent:
-                # Pace by what a pass costs: the hub works at most about
-                # 45% of the time, however many widgets there are, and they
-                # share that, instead of each adding its own full rate.
-                cost = time.monotonic() - started
-                if "flyout" in self._streams or "popover" in self._streams:
-                    gap, duty = self._OVERLAY_STREAM_GAP_S, self._OVERLAY_STREAM_DUTY
-                else:
-                    gap, duty = self._STREAM_MIN_GAP_S, self._STREAM_DUTY
-                pause = max(gap, cost / duty) - cost
-                if pause > 0:
-                    time.sleep(pause)
-            else:
-                # Nothing changed anywhere: sleep until the screen does.
-                _screen_duplication.wait_for_frame(frames, 0.1)
-
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             at_x=None, at_y=None, wait_secs=None, prefetched=None, binary=False):
-        """The desktop behind a window, blurred, as a small raw-pixel picture.
+                             at_x=None, at_y=None, wait_secs=None):
+        """The desktop behind a window, blurred, as a small raw-pixel picture
+        (RGB bytes in "blur_raw", "blur_w" x "blur_h").
 
-        `last_hash` is the page's previous frame; an identical capture is
+        `last_hash` is the window's previous frame; an identical capture is
         answered with {"unchanged": True} and costs no encoding.
-        `want_w`/`want_h` are the device-pixel size the page will draw at,
+        `want_w`/`want_h` are the device-pixel size the window draws at,
         used when it differs from the window by more than rounding (fixed
         size, zoom). `at_x`/`at_y` capture where a dragged window is going
         rather than where it still is.
@@ -1539,12 +1318,9 @@ class Api:
                     # The widget drawn into this frame changes on its own,
                     # so the screen under it cannot set the pace.
                     after = None
-                if prefetched and prefetched[0] == rect and prefetched[1] is not None:
-                    got = prefetched[1]         # read with the other widgets'
-                else:
-                    got = _screen_duplication.grab(
-                        x, y, w, h, after,
-                        _DUPLICATION_WAIT_SECS if wait_secs is None else wait_secs)
+                got = _screen_duplication.grab(
+                    x, y, w, h, after,
+                    _DUPLICATION_WAIT_SECS if wait_secs is None else wait_secs)
                 if got is not None:
                     paced = not compose_widget
                     self._duplication_after[window_kind] = (rect, got[0])
@@ -1636,8 +1412,7 @@ class Api:
             # Raw pixels, not an image file: a JPEG this small, stretched back
             # up to the window, shows its 8x8 blocks as mottling, and a file
             # needs decoding (and leaves memory behind) for a few KB of data.
-            blur_raw = (small.tobytes() if binary
-                        else base64.b64encode(small.tobytes()).decode("ascii"))
+            blur_raw = small.tobytes()
             blur_size = small.size
 
             if capture_epoch != self._capture_epoch:
@@ -1650,8 +1425,7 @@ class Api:
                 "w": w,
                 "h": h,
                 "hash": digest,
-                # The capture's own cost; the page paces itself from this
-                # rather than from the bridge round trip.
+                # The capture's own cost; the window paces itself from this.
                 "ms": (time.perf_counter() - started) * 1000.0,
                 # The screen set the pace; ask again straight away.
                 "paced": paced,
@@ -1672,40 +1446,11 @@ class Api:
                 pass
         if want_w and want_h:
             want_w, want_h = max(1, int(want_w)), max(1, int(want_h))
-            # Within a few pixels the page's viewport arithmetic is just
+            # Within a few pixels the window's own arithmetic is just
             # rounding, and the window's real size is the accurate one.
             if abs(want_w - w) > 3 or abs(want_h - h) > 3:
                 w, h = want_w, want_h
         return x, y, w, h
-
-    def _prefetch(self, entries):
-        """Read what every streaming widget needs from the screen in one go:
-        {kind: (rect, result)}. The expensive part of a read is waiting for
-        the GPU, and one batch waits once for all of them. Widgets that are
-        hidden, covered or not on the fast path are left to their own look."""
-        wanted = []
-        for kind, entry in entries:
-            if not _is_widget_kind(kind) or kind not in self._excluded_kinds:
-                continue
-            hwnd = _get_hwnd(self._window_for(kind))
-            if (not hwnd or self._hidden_answer(kind, hwnd)
-                    or self._system_glass_on(kind)
-                    or time.monotonic() < self._capture_transition_until):
-                continue
-            try:
-                x, y, w, h = self._capture_rect(hwnd, entry["w"], entry["h"])
-            except Exception:
-                continue
-            seen = self._duplication_after.get(kind)
-            after = seen[1] if seen and seen[0] == (x, y, w, h) \
-                and entry["hash"] is not None else None
-            wanted.append((kind, (x, y, w, h), after))
-        if not wanted:
-            return {}
-        results = _screen_duplication.grab_many(
-            [(*rect, after) for _, rect, after in wanted])
-        return {kind: (rect, result)
-                for (kind, rect, _), result in zip(wanted, results)}
 
     def _hidden_answer(self, kind, hwnd):
         """{"skip": ...} when the window is hidden or entirely covered. For a
@@ -1730,8 +1475,7 @@ class Api:
         return {h for h in (_get_hwnd(w) for w in self._all_windows()) if h}
 
     def move_window(self, screen_x, screen_y, window_kind="main"):
-        # Physical screen pixels from the page's own drag handling (see
-        # installWindowDrag in app.js).
+        # Physical screen pixels, from a widget being dragged.
         window = self._window_for(window_kind)
         if not window:
             return
@@ -1746,15 +1490,6 @@ class Api:
             window, lambda: _set_window_pos(
                 hwnd, int(screen_x), int(screen_y)),
         )
-
-    def get_window_pos(self, window_kind="main"):
-        # Lets a page convert on-page positions into screen positions.
-        window = self._window_for(window_kind)
-        hwnd = _get_hwnd(window) if window else None
-        rect = _window_rect(hwnd) if hwnd else None
-        if not rect:
-            return {"x": 0, "y": 0}
-        return {"x": rect[0], "y": rect[1]}
 
     # ---------------------------------------------------------------
     # internal
@@ -1856,28 +1591,21 @@ class Api:
     # ---- dimming while the desktop is out of sight ------------------------
 
     def wake(self):
-        """Called by the page when someone touches the widget."""
+        """Called by a widget when someone touches it."""
         # Held awake for a full idle period from here, so a click cannot be
         # answered by fading out from under the hand that made it.
         self._woke_at = time.monotonic()
         self._off_desktop_since = 0.0
-        # Every widget at once, from here, rather than each page waking itself
-        # and the rest following a round trip later. Sent even when this side
-        # thinks nothing was dimmed, which repairs a page that disagreed.
+        # Every widget at once, from here, rather than each waking itself
+        # and the rest following later. Sent even when this side thinks
+        # nothing was dimmed, which repairs a widget that disagreed.
         self._dimmed = False
         self._push_dim()
         return True
 
     def _push_dim(self):
-        script = ("window.__setDimmed && window.__setDimmed(%s)"
-                  % ("true" if self._dimmed else "false"))
-        for window in (list(self._widgets.values()) or [self._window]):
-            if not window:
-                continue
-            try:
-                window.evaluate_js(script)
-            except Exception:
-                pass
+        self._broadcast("set_dim", bool(self._dimmed),
+                        windows=list(self._widgets.values()) or [self._window])
 
     def _watch_for_idle(self):
         """Dim the widget once the desktop has been out of sight for
@@ -1919,63 +1647,64 @@ class Api:
 
         threading.Thread(target=loop, daemon=True).start()
 
-    # ---- pushing to the pages ---------------------------------------------
+    # ---- telling the windows ------------------------------------------------
 
-    def _eval_all(self, script):
-        for window in self._all_windows():
+    def _broadcast(self, name, *args, windows=None):
+        """Call `name` with `args` on every window (or on those given) that has it, without
+        waiting. Each window is given its own copy of the arguments, so none can change what
+        another holds, or the config they were read from."""
+        text = json.dumps(args, ensure_ascii=False, separators=(",", ":"))
+        for window in (self._all_windows() if windows is None else windows):
+            if not window:
+                continue
             try:
-                window.evaluate_js(script)
+                window.send(name, *json.loads(text))
             except Exception:
                 pass
 
     def _push_prefs(self):
-        """Send the current preferences to every page.
-
-        Each window runs its own copy of app.js with its own CONFIG, and any
-        of them can change something. __applyPrefs compares before acting,
-        so the window that made the change is not disturbed.
-        """
+        """Send the current preferences to every window. Any of them can
+        change something; each compares before acting, so the window that
+        made the change is not disturbed."""
         if not self._all_tiles() and self._flyout_open:
             self.hide_flyout()
-        payload = json.dumps(self._prefs(), ensure_ascii=False)
-        self._eval_all("window.__applyPrefs && window.__applyPrefs(%s)" % payload)
+        self._broadcast("apply_prefs", self._prefs())
 
     def _push_batch(self, items):
-        # Hidden pages keep their state too, ready for their next opening.
-        payload = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
-        self._eval_all(
-            'if (typeof window.__haPushBatch === "function") window.__haPushBatch(%s)' % payload)
+        # Hidden windows keep their states too, ready for their next opening.
+        self._broadcast("push_states", items)
 
     def _on_ha_event(self, entity_id, new_state):
+        self._on_ha_events([[entity_id, new_state]])
+
+    def _on_ha_events(self, items):
+        """New states, [[entity_id, state], ...], to the windows that show them, in one push each."""
+        for entity_id, new_state in items:
+            self._known_states[entity_id] = new_state
         if not self._ui_ready or not (self._widgets or self._window):
             with self._pending_lock:
-                self._pending.append([entity_id, new_state])
+                self._pending.extend(items)
                 if len(self._pending) > 500:
                     self._pending = self._pending[-500:]
             return
-        if entity_id in self._home_states:
-            self._home_states[entity_id] = new_state
-        if entity_id not in self._watched_entities():
-            # Only the Home panel (and a card opened from it) shows it.
-            payload = json.dumps([[entity_id, new_state]], ensure_ascii=False,
-                                 separators=(",", ":"))
-            for window in (self._flyout_window, self._popover_window):
-                if not window:
-                    continue
-                try:
-                    window.evaluate_js(
-                        'if (typeof window.__haPushBatch === "function") window.__haPushBatch(%s)' % payload)
-                except Exception:
-                    pass
-            return
-        self._push_batch([[entity_id, new_state]])
+        watched = set(self._watched_entities())
+        on_tiles, home_only = [], []
+        for entity_id, new_state in items:
+            if entity_id in self._home_states:
+                self._home_states[entity_id] = new_state
+            (on_tiles if entity_id in watched else home_only).append([entity_id, new_state])
+        if home_only:
+            # Only the Home panel (and a card opened from it) shows these.
+            self._broadcast("push_states", home_only,
+                            windows=(self._flyout_window, self._popover_window))
+        if on_tiles:
+            self._push_batch(on_tiles)
 
     def _on_ha_status(self, connected, detail=""):
         reconnected = connected and not self._connected
         self._connected = connected
         if self._ui_ready:
-            self._eval_all(
-                'if (typeof window.__haStatus === "function") window.__haStatus(%s)' % json.dumps(bool(connected)))
+            self._broadcast("set_connected", bool(connected))
         if reconnected:
             self._refresh_now()
 
@@ -2005,10 +1734,7 @@ class Api:
         told it moved; one on 'live' follows the screen by itself."""
         if self._cfg.get("glass_sampling") != "still":
             return
-        try:
-            window.evaluate_js("window.__widgetMoved && window.__widgetMoved()")
-        except Exception:
-            pass
+        window.send("widget_moved")
 
     def _refresh_now(self):
         def go():
@@ -2020,10 +1746,10 @@ class Api:
             except Exception as exc:
                 states = {}
                 self._on_ha_status(False, str(exc))
-            for entity in wanted:
-                self._on_ha_event(entity, states.get(entity) or {
-                    "entity_id": entity, "state": "unavailable", "attributes": {},
-                })
+            # One push for all of them: per entity, every window would redraw once for each.
+            self._on_ha_events([[entity, states.get(entity) or {
+                "entity_id": entity, "state": "unavailable", "attributes": {},
+            }] for entity in wanted])
         threading.Thread(target=go, daemon=True).start()
 
     def _quit(self):
@@ -2453,9 +2179,9 @@ class _DesktopCapture:
 _desktop_capture = _DesktopCapture()
 _compat_capture = CaptureWorker()
 _screen_duplication = DesktopDuplication()
-_screen_duplication.set_logger(webview.log)
+_screen_duplication.set_logger(qtshell.log)
 # How long a read waits for the screen under a window to change before
-# answering "unchanged", so the page can notice it has been hidden.
+# answering "unchanged", so the window can notice it has been hidden.
 _DUPLICATION_WAIT_SECS = 0.5
 
 
@@ -2497,6 +2223,18 @@ def _class_name(hwnd, size=64):
 
 def _set_window_pos_raw(hwnd, x, y, w, h, flags):
     """SetWindowPos without touching z-order. GUI thread only."""
+    if not flags & SWP_NOMOVE:
+        # Onto another monitor, the Qt window has to be told (see qtshell.follow_screen); the centre
+        # decides, as it does for Windows.
+        if flags & SWP_NOSIZE:
+            rect = _window_rect(hwnd)
+            w, h = (rect[2] - rect[0], rect[3] - rect[1]) if rect else (0, 0)
+        try:
+            qtshell.follow_screen(hwnd, x + w // 2, y + h // 2)
+        except Exception:
+            pass
+        if flags & SWP_NOSIZE:
+            w = h = 0
     with _hwnd_lock:
         try:
             _user32.SetWindowPos(hwnd, None, x, y, w, h,
@@ -2564,7 +2302,7 @@ def _set_system_glass(window, on):
                     hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
                 return True
             except Exception as exc:
-                webview.log(str(exc))
+                qtshell.log(str(exc))
                 # Undo partial activation before using the software backdrop.
                 try:
                     set_backdrop(DWMSBT_NONE)
@@ -2992,7 +2730,7 @@ def _centre_on_window_monitor(anchor_window, hwnd_to_place):
 def _apply_window_shape(window):
     """Turn off DWM's rounding, border and show animation for a window.
 
-    Every outline and animation here is the page's own; DWM's rounding also
+    Every outline and animation here is the window's own; DWM's rounding also
     brings a shadow. Showing a window restores DWM's defaults, so this runs
     on every show (events.showing). Windows 10 ignores these attributes.
     """
@@ -3102,7 +2840,7 @@ def _hide_own_console():
 
 
 def _widget_initial_size(size, zoom):
-    """Only the size until the page's first measurement; close is better.
+    """Only the size until the window's first measurement; close is better.
     Every side is a whole number of tile cells."""
     cols, rows = cfgmod.widget_grid(size)
     w = 2 * PAD + cols * TILE_W + (cols - 1) * GAP
@@ -3116,26 +2854,9 @@ def _widget_initial_size(size, zoom):
 
 def _create_widget_window(api, widget, show=False):
     """One desktop widget: its own window, pinned to the bottom of the
-    z-order, bound into the api under its id. Drawn natively (nativeui), not as a
-    browser page, which is what keeps the program's resting memory small;
-    HA_WIDGET_WEB=1 brings back the page."""
+    z-order, bound into the api under its id."""
     widget_id = widget["id"]
-    if os.environ.get("HA_WIDGET_WEB"):
-        width, height = _widget_initial_size(widget["size"], api._cfg.get("zoom", 100))
-        window = webview.create_window(
-            "HA Widgets",
-            url=os.path.join(WEB_DIR, "index.html") + "#grid:" + widget_id,
-            js_api=api,
-            width=width,
-            height=height,
-            # Qt scales these by the creation monitor's DPI; on_shown restores
-            # the saved position in physical pixels.
-            x=widget["x"],
-            y=widget["y"],
-            transparent=True,
-        )
-    else:
-        window = native_widget.create_widget(api, widget)
+    window = native_widget.create_widget(api, widget)
     api._bind_widget(widget_id, window)
     window.events.moved += lambda x, y: api._on_widget_moved(widget_id)
     stop = threading.Event()
@@ -3165,39 +2886,11 @@ def _create_widget_window(api, widget, show=False):
     return window
 
 
-def _create_overlay_window(api, title, role, width, height, rehide=True, **kw):
-    """A hidden, reusable window for the page in `role`. `rehide`: a page
-    that reloads (after a renderer crash) has lost its state, so the window
-    hides again; not wanted for one that is made at the moment it is shown."""
-    window = webview.create_window(
-        title,
-        url=os.path.join(WEB_DIR, "index.html") + "#" + role,
-        js_api=api,
-        width=width,
-        height=height,
-        transparent=True,
-        hidden=True,
-        **kw,
-    )
-    window.events.showing += lambda: _apply_window_shape(window)
-    # A reloaded page (e.g. after a renderer crash) has lost its view
-    # state; keep the window hidden until it is asked for again.
-    if rehide:
-        window.events.loaded += lambda: window.hide()
-
-    def on_closing():
-        window.hide()
-        return False        # reused, never destroyed
-
-    window.events.closing += on_closing
-    return window
-
-
 def main():
     _hide_own_console()
 
     api = Api()
-    webview.prepare(WEB_DIR, api, log_dir=BASE_DIR)
+    qtshell.prepare(log_dir=BASE_DIR)
 
     for widget in api._cfg["widgets"]:
         _create_widget_window(api, widget)
@@ -3266,9 +2959,9 @@ def main():
             _apply_window_shape(win)
         api._apply_capture_exclusion()
         api._apply_system_glass()
-        webview.log("Display surfaces refreshed")
+        qtshell.log("Display surfaces refreshed")
 
-    webview.on_display_change(restore_window)
+    qtshell.on_display_change(restore_window)
 
     def on_resume():
         """Rebuild what a suspend invalidates: GDI objects made for the old
@@ -3278,9 +2971,9 @@ def main():
             # the panel even when the desktop widget was manually hidden.
             try:
                 posted = restore_tray_icon(api._tray_icon)
-                webview.log("Resume tray re-registration requested: %s" % posted)
+                qtshell.log("Resume tray re-registration requested: %s" % posted)
             except Exception as exc:
-                webview.log("Resume tray re-registration failed: %s" % exc)
+                qtshell.log("Resume tray re-registration failed: %s" % exc)
 
         def schedule_restore():
             from PySide6.QtCore import QTimer
@@ -3306,18 +2999,16 @@ def main():
             api._client._kick()
         except Exception:
             pass
-        # Every page's backdrop and frame hash describe the old screen.
-        api._eval_all(
-            "window.__invalidateBackdrop && window.__invalidateBackdrop()")
+        # Every window's backdrop and frame hash describe the old screen.
+        api._broadcast("invalidate_glass")
 
-    webview.on_resume(on_resume)
+    qtshell.on_resume(on_resume)
 
     api._watch_for_idle()
     if os.environ.get("HA_WIDGET_OPEN_PANEL"):
         # For looking at the first opening of the panel: opens it after a pause and writes
         # a picture of it every 0.25 s into the folder named.
         def probe():
-            from PySide6.QtGui import QImage
             folder = os.environ["HA_WIDGET_OPEN_PANEL"]
             os.makedirs(folder, exist_ok=True)
             time.sleep(6)
@@ -3340,9 +3031,9 @@ def main():
                 sc.glass_signals.glass.disconnect()
                 sc.glass_signals.glass.connect(lambda: (count.__setitem__(0, count[0] + 1), inner()))
                 time.sleep(5.0)
-                webview.log("probe: panel glass %.1f pictures/s" % (count[0] / 5.0))
+                qtshell.log("probe: panel glass %.1f pictures/s" % (count[0] / 5.0))
                 os._exit(0)
-            webview.log("probe: toggle returned after %.2fs" % (time.time() - t0))
+            qtshell.log("probe: toggle returned after %.2fs" % (time.time() - t0))
             if os.environ.get("HA_WIDGET_PROBE_CYCLES"):
                 # opens and closes it again and again, timing each (no pictures)
                 def timed(name):
@@ -3353,7 +3044,7 @@ def main():
                         try:
                             return inner(*a, **k)
                         finally:
-                            webview.log("probe:   %s %.3fs" % (name, time.time() - t))
+                            qtshell.log("probe:   %s %.3fs" % (name, time.time() - t))
                     setattr(api, name, run)
                 for name in ("close_popover", "_sync_client_entities", "_apply_capture_exclusion",
                              "_ensure_overlay", "_place_flyout", "_arm_backdrop", "_apply_system_glass",
@@ -3368,7 +3059,7 @@ def main():
                     api.toggle_flyout()
                     t4 = time.time()
                     time.sleep(1.5)
-                    webview.log("probe: cycle %d open call %.2fs close call %.2fs" % (n, t2 - t1, t4 - t3))
+                    qtshell.log("probe: cycle %d open call %.2fs close call %.2fs" % (n, t2 - t1, t4 - t3))
                 os._exit(0)
             from PIL import ImageGrab
             for i in range(32):
@@ -3378,7 +3069,7 @@ def main():
                     w.run_on_ui_thread(lambda i=i: w.native.grab().save(
                         os.path.join(folder, "p%02d_%04d.png" % (i, ms))))
                     rect = _window_rect(_get_hwnd(w))
-                    webview.log("probe: %d ms rect=%s want=%s scene=%dx%d opacity=%.2f" % (
+                    qtshell.log("probe: %d ms rect=%s want=%s scene=%dx%d opacity=%.2f" % (
                         ms, rect, api._flyout_origin(rect[2] - rect[0], rect[3] - rect[1]) if rect else None,
                         w.native.pw, w.native.ph, w.native.windowOpacity()))
                     try:
@@ -3394,7 +3085,7 @@ def main():
     api._tray_icon = tray_icon
     tray_icon.run_detached()
 
-    webview.start()
+    qtshell.start()
 
 
 if __name__ == "__main__":

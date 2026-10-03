@@ -377,47 +377,6 @@ class _Output:
                   argtypes=(_vp, ctypes.c_uint))
         return data, pitch, w, h
 
-    def read_many(self, tex_rects):
-        """Like read(), for several rectangles at once: each is copied into
-        one staging texture, stacked, and mapped once. Reading back from the
-        GPU waits for it to finish, and that wait, not the copying, is what a
-        read costs, so N rectangles cost about one. A list aligned with
-        `tex_rects`, None where one cannot be read."""
-        out = [None] * len(tex_rects)
-        todo = [(i, r) for i, r in enumerate(tex_rects)
-                if self.copy and self.valid and _intersect(r, self.valid) == r]
-        if not todo:
-            return out
-        widths = [r[2] - r[0] for _, r in todo]
-        heights = [r[3] - r[1] for _, r in todo]
-        need_w, need_h = max(widths), sum(heights)
-        if self.staging_size[0] < need_w or self.staging_size[1] < need_h:
-            _release(self.staging)
-            self.staging = None
-            sw, sh = max(need_w, self.staging_size[0]), max(need_h, self.staging_size[1])
-            self.staging = self._texture(sw, sh, staging=True)
-            self.staging_size = (sw, sh)
-        offsets, top = [], 0
-        for (_, r), h in zip(todo, heights):
-            offsets.append(top)
-            _call(self.context, 46, self.staging, 0, 0, top, 0, self.copy, 0,
-                  ctypes.byref(_BOX(r[0], r[1], 0, r[2], r[3], 1)),
-                  restype=None, argtypes=_COPY_REGION_ARGS)
-            top += h
-        mapped = _MAPPED()
-        _call(self.context, 14, self.staging, 0, D3D11_MAP_READ, 0, ctypes.byref(mapped),
-              argtypes=(_vp, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, _vp), what="Map")
-        try:
-            pitch = mapped.RowPitch
-            for (i, _), w, h, off in zip(todo, widths, heights, offsets):
-                out[i] = (ctypes.string_at(mapped.pData + off * pitch,
-                                           pitch * (h - 1) + w * 4), pitch, w, h)
-        finally:
-            _call(self.context, 15, self.staging, 0, restype=None,
-                  argtypes=(_vp, ctypes.c_uint))
-        return out
-
-
 # ---------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------
@@ -454,8 +413,6 @@ class DesktopDuplication:
         self._log = None
         # Counts the desktop frames received, so that anyone watching
         # several rectangles can wait for "the screen changed" once.
-        self._frames = 0
-        self._frame_cond = threading.Condition()
 
     def set_logger(self, fn):
         self._log = fn
@@ -641,10 +598,7 @@ class DesktopDuplication:
         # Shared between the outputs, so none waits on another for long.
         wait_ms = max(8, _ACQUIRE_MS // len(active))
         for out in active:
-            if out.acquire(wait_ms, self._gpu):
-                with self._frame_cond:
-                    self._frames += 1
-                    self._frame_cond.notify_all()
+            out.acquire(wait_ms, self._gpu)
 
     def _serve(self):
         with self._lock:
@@ -657,68 +611,6 @@ class DesktopDuplication:
                     if read in self._reads:
                         self._reads.remove(read)
                 read.done.set()
-
-    def grab_many(self, items):
-        """grab() for several rectangles in one pass, never waiting:
-        `items` are (x, y, w, h, after). Each result is as grab()'s, or None
-        for one that cannot be answered yet. The rectangles that changed are
-        read back together (see _Output.read_many)."""
-        results = [None] * len(items)
-        if not items or not self.available():
-            return results
-        now = time.monotonic()
-        with self._lock:
-            for x, y, w, h, _ in items:
-                self._interest[(x, y, x + w, y + h)] = now
-            if not self._thread or not self._thread.is_alive():
-                self._thread = threading.Thread(
-                    target=self._run, daemon=True, name="dxgi-capture")
-                self._thread.start()
-        try:
-            with self._gpu:
-                if not self._outputs:
-                    return results
-                plan, wanted = [], {}
-                for index, (x, y, w, h, after) in enumerate(items):
-                    rect = (x, y, x + w, y + h)
-                    parts = [(out,) + out.texture_rect(rect) for out in self._outputs]
-                    parts = [p for p in parts if p[1]]
-                    frame = tuple((out.name, out.seq) for out, _, _ in parts)
-                    seen = dict(after or ())
-                    changed = (after is None or not parts
-                               or any(out.name not in seen
-                                      or out.changed_since(tex, seen[out.name])
-                                      for out, _, tex in parts))
-                    if not changed:
-                        results[index] = (after, None)
-                        continue
-                    for out, _, tex in parts:
-                        wanted[(id(out), tex)] = (out, tex)
-                    plan.append((index, rect, parts, frame))
-                reads, by_output = {}, {}
-                for key, (out, tex) in wanted.items():
-                    by_output.setdefault(id(out), (out, []))[1].append((key, tex))
-                for out, listed in by_output.values():
-                    for (key, _), got in zip(listed, out.read_many([t for _, t in listed])):
-                        reads[key] = got
-                for index, rect, parts, frame in plan:
-                    data = self._compose(rect, parts, reads)
-                    if data is not None:
-                        results[index] = (frame, data)
-        except DxgiError:
-            pass                        # the capture thread rebuilds
-        return results
-
-    def frame_count(self):
-        return self._frames
-
-    def wait_for_frame(self, seen, timeout):
-        """Block until the screen has produced a frame after the `seen`-th
-        (see frame_count), or the timeout. One wait for all watchers."""
-        with self._frame_cond:
-            if self._frames == seen:
-                self._frame_cond.wait(timeout)
-            return self._frames
 
     def _answer(self, read, final):
         """Fill read.result if it can be answered now. GPU lock held.
@@ -746,16 +638,14 @@ class DesktopDuplication:
         return False
 
     @staticmethod
-    def _compose(rect, parts, reads=None):
+    def _compose(rect, parts):
         """The rectangle as BGRA bytes; black where no output covers it."""
         from PIL import Image
         x, y = rect[0], rect[1]
         w, h = rect[2] - rect[0], rect[3] - rect[1]
         canvas = None
         for out, part, tex in parts:
-            got = reads.get((id(out), tex)) if reads else None
-            if got is None:
-                got = out.read(tex)
+            got = out.read(tex)
             if got is None:
                 return None
             data, pitch, tw, th = got

@@ -2,11 +2,11 @@
 goes), pulled by a corner to another shape, removed; rooms are pulled into a new order. The page's
 attachHomeDrag, attachHomeResize and attachRoomReorder."""
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPen
 
 from . import render, ui
 from .homemodel import OTHER_ROOM, home_layout
-from .ui import Button, Label, Rect, View
+from .ui import Rect, View
 
 TILE_W, TILE_H, GAP = 152, 146, 14
 SPAN_W = TILE_W + GAP
@@ -277,7 +277,7 @@ class EditMixin:
         self.body.changed()
 
     def relayout_drag(self, d, ev):
-        tv, e = d["tv"], d["e"]
+        e = d["e"]
         px, py = self.content_point(ev.gx, ev.gy)
         target = d["target"]
         over = None

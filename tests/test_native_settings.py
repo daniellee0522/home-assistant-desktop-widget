@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QApplication                             # noqa: E
 app = QApplication.instance() or QApplication([])
 
 from nativeui import settings                                           # noqa: E402
-from nativeui.ui import Ev                                              # noqa: E402
 
 
 class FakeApi:
@@ -35,6 +34,9 @@ class FakeApi:
     def get_layout(self):
         return {"monitors": [{"x": 0, "y": 0, "w": 1920, "h": 1080}],
                 "widgets": [{"id": "w1", "size": "2x4", "x": 100, "y": 100, "w": 440, "h": 217, "visible": True}]}
+
+    def fetch_initial_states(self):
+        return {"light.l0": {"state": "on", "attributes": {}}}
 
     def get_entities(self):
         return [{"entity_id": "light.x", "domain": "light", "name": "客廳燈", "state": {"state": "on"}}]

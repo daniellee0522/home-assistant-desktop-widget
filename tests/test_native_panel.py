@@ -282,5 +282,38 @@ class Card(unittest.TestCase):
         win.dispose()
 
 
+class FitsItsMonitor(unittest.TestCase):
+    """The panel takes about the same share of any monitor, and never more than its work area."""
+
+    def panel_on(self, w, h, scale, work_h=None, mode="home"):
+        from unittest.mock import patch
+        from nativeui import screens
+        work_h = h - 48 * scale if work_h is None else work_h
+        mon = screens.Monitor((0, 0, w, h), (0, 0, w, work_h), scale)
+        with patch.object(screens, "monitor_at", lambda x, y: mon):
+            win, sc = make_panel(FakeApi(mode, tiles_of(8)))
+            sc.update_metrics()
+            zoom, height = sc.zoom_css, sc.css_h * sc.zoom_css * scale
+        win.dispose()
+        return zoom, height
+
+    def test_same_share_of_the_screen(self):
+        self.assertAlmostEqual(self.panel_on(1920, 1080, 1.0)[0], panel.FLYOUT_ZOOM)
+        # 1440p at 125 % is 1152 logical px high: a little larger, the same share of the screen
+        zoom, height = self.panel_on(2560, 1440, 1.25)
+        self.assertAlmostEqual(zoom, panel.FLYOUT_ZOOM * 1152 / 1080)
+        self.assertAlmostEqual(height / 1440, self.panel_on(1920, 1080, 1.0)[1] / 1080, places=3)
+        # a portrait monitor goes by its shorter side, as a landscape one does
+        self.assertAlmostEqual(self.panel_on(1080, 1920, 1.0)[0], panel.FLYOUT_ZOOM)
+
+    def test_within_limits(self):
+        self.assertAlmostEqual(self.panel_on(3840, 2160, 1.0)[0], panel.FLYOUT_ZOOM * panel.FIT_RANGE[1])
+        self.assertAlmostEqual(self.panel_on(1366, 768, 1.0)[0], panel.FLYOUT_ZOOM * panel.FIT_RANGE[0])
+
+    def test_never_taller_than_the_work_area(self):
+        zoom, height = self.panel_on(1920, 1080, 1.0, work_h=200)
+        self.assertLessEqual(height, 200 - 2 * panel.FIT_MARGIN + 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

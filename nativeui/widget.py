@@ -1,25 +1,22 @@
-"""A desktop widget drawn natively: no browser page, a QWidget painted with QPainter.
+"""A desktop widget, drawn natively: a QWidget painted with QPainter.
 
-It stands where the page-based widget stood (main.py's `_create_widget_window`): the same
-window interface (hwnd, show, hide, dispose, events, run_on_ui_thread, evaluate_js), the same
-Api behind it (states, preferences, service calls, the detail card, the desktop capture and
-its exclusion, dimming, snapping). What it does itself is what the page did itself: draw the
-tiles, take the touches, ask for the glass.
+main.py holds a `NativeWidget` for each: the window's interface (hwnd, show, hide, dispose, events,
+run_on_ui_thread, send) over a `_Surface`, with the Api behind it (states, preferences, service calls,
+the detail card, the desktop capture and its exclusion, dimming, snapping). What the widget does
+itself: draw the tiles, take the touches, ask for the glass.
 
 Threads: the Qt widget lives on the GUI thread; the glass is made on its own thread from
 what `Api.get_desktop_backdrop` answers, and only the newest picture ever reaches the GUI.
 """
 import ctypes
-import json
 import os
-import re
 import threading
 import time
 import traceback
 from ctypes import wintypes
 
-from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
+from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 
 import qtshell
@@ -128,7 +125,7 @@ class _Surface(GlassMixin, QWidget):
             self._hwnd = 0
         return self._hwnd
 
-    _cache_hwnd = cache_hwnd          # the name main.py knows from the page windows
+    _cache_hwnd = cache_hwnd          # the name main.py uses
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -194,9 +191,9 @@ class _Surface(GlassMixin, QWidget):
 
     def _theme_changed(self):
         if self.theme_raw == "auto" and self._resolve_theme() != self.theme:
-            self.rebuild(all_=True)
+            self.rebuild()
 
-    def apply(self, prefs):
+    def apply_prefs(self, prefs):
         changed = self.configure(prefs)
         if not changed:
             return
@@ -204,7 +201,7 @@ class _Surface(GlassMixin, QWidget):
         if changed & {"size_key", "zoom", "tiles"}:
             self.relayout()
         elif changed & {"theme_raw", "style", "language", "system_glass"}:
-            self.rebuild(all_=True)
+            self.rebuild()
         if changed & {"style", "liquid_level", "size_key", "zoom", "system_glass"}:
             self.reset_glass()
             self.facade.invalidate_backdrop()
@@ -225,10 +222,10 @@ class _Surface(GlassMixin, QWidget):
         if hwnd:
             _user32.SetWindowPos(hwnd, None, 0, 0, self.pw, self.ph, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
         self.reset_glass()
-        self.rebuild(all_=True)
+        self.rebuild()
         self.facade.invalidate_backdrop()
 
-    def rebuild(self, all_=False):
+    def rebuild(self):
         self.theme = self._resolve_theme()
         self.tcol = render.tokens(self.theme, False, self.style)
         render.set_language(self.language)
@@ -290,6 +287,10 @@ class _Surface(GlassMixin, QWidget):
             m.end()
             p.drawImage(0, 0, self.mix)
         p.end()
+
+    def widget_moved(self):
+        """Moved (Api._on_widget_moved): a still glass takes its picture again."""
+        self.sample_now.set()
 
     # ---- the states -----------------------------------------------------------
     def push_states(self, items):
@@ -496,6 +497,9 @@ class _Surface(GlassMixin, QWidget):
         if new != self.scroll:
             self.scroll = new
             self._invalidate_overlay()
+            if self._liquid_glass():
+                # The liquid glass blurs behind each tile (glass_tiles), which have just moved.
+                self.invalidate_glass()
 
     def _invalidate_overlay(self):
         # The pointer, a scroll, a flash: what is dimmed does not show them, so the dimmed picture stays
@@ -523,14 +527,12 @@ def has_hold(domain):
 
 
 class NativeWidget:
-    """What main.py holds for a widget: the qtshell.Window's interface over a _Surface."""
+    """What main.py holds for a widget: the window's interface (as NativeOverlay's) over a _Surface."""
 
     is_native_widget = True
 
     def __init__(self, api, widget_id):
         self.title = "HA Widgets"
-        self.url = None
-        self.js_api = api
         self.api = api
         self.widget_id = widget_id
         self.events = qtshell._Events()
@@ -581,46 +583,12 @@ class NativeWidget:
     def run_on_ui_thread(self, fn):
         return qtshell._invoke(self._native, fn, wait=True)
 
-    def push_frame(self, text):
-        pass
-
-    # -- what main.py sends to a page, as script, is taken here -----------------
-    _CALLS = (
-        (re.compile(r"__applyPrefs\((.*)\)\s*$", re.S), "_apply_prefs"),
-        (re.compile(r"__haPushBatch\((.*)\)\s*$", re.S), "_push_states"),
-        (re.compile(r"__setDimmed\((true|false)\)"), "_set_dim"),
-        (re.compile(r"__widgetMoved\(\)"), "_moved"),
-        (re.compile(r"__invalidateBackdrop\(\)"), "_invalidate"),
-    )
-
-    def evaluate_js(self, script):
-        for pattern, name in self._CALLS:
-            m = pattern.search(script)
-            if m:
-                try:
-                    getattr(self, name)(m.group(1) if m.groups() else None)
-                except Exception:
-                    traceback.print_exc()
-                return None
-        return None
-
-    def _apply_prefs(self, text):
-        prefs = json.loads(text)
-        qtshell._invoke(self._native, lambda: self._native.apply(prefs))
-
-    def _push_states(self, text):
-        items = json.loads(text)
-        qtshell._invoke(self._native, lambda: self._native.push_states(items))
-
-    def _set_dim(self, text):
-        on = text == "true"
-        qtshell._invoke(self._native, lambda: self._native.set_dim(on))
-
-    def _moved(self, _):
-        self._native.sample_now.set()
-
-    def _invalidate(self, _=None):
-        self.invalidate_backdrop()
+    def send(self, name, *args):
+        """Call the window's `name` with `args` on the GUI thread, without waiting for it. What main.py
+        tells every window (the preferences, new states, ...), so one a window has no use for is ignored."""
+        method = getattr(self._native, name, None)
+        if method is not None:
+            qtshell._invoke(self._native, lambda: method(*args))
 
     def invalidate_backdrop(self):
         self._native.force.set()
@@ -628,7 +596,7 @@ class NativeWidget:
 
     # -- actions -------------------------------------------------------------------
     def popover(self, tile):
-        """The detail card over this tile (a page, in the popover window)."""
+        """The detail card over this tile."""
         surf = self._native
         rect = _rect(surf._hwnd)
         if not rect:
@@ -680,7 +648,7 @@ class NativeWidget:
 
 
 def create_widget(api, widget):
-    """A native desktop widget in place of a web window; same position rules as qtshell.create_window."""
+    """A desktop widget, placed where the config says (physical pixels; main.py puts it there again once shown)."""
     def make():
         win = NativeWidget(api, widget["id"])
         win._native.resize(*render.widget_size(widget["size"]))
