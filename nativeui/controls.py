@@ -1,6 +1,7 @@
 """The controls of the detail screen, after Home Assistant's own more-info dialogs: a tall slider and a tall
 switch to drag or tap, a dial for a thermostat, a bar of modes, rows of presets, a mode card that opens
-its choices, a cover picture and a progress bar for media, and how long ago something changed.
+its choices in a menu floating over the screen, a cover picture and a progress bar for media, and how long
+ago something changed.
 
 Views of nativeui/ui.py, in the detail's units (see detail.py); colours are scene tokens or CSS colours.
 """
@@ -330,17 +331,30 @@ class Swatches(View):
 
 class ModeCard(View):
     """A small card with an icon, what it sets and what it is set to (a thermostat's mode, a fan speed,
-    a light's effect). Pressed, its choices open under the cards (see DetailContent.choices)."""
+    a light's effect). Pressed, its choices open in a menu over it (ChoiceMenu); the screen stays as it is."""
     cursor = Qt.PointingHandCursor
 
-    def __init__(self, w, icon, title, value, on_click, open_=False):
+    def __init__(self, w, icon, title, value, options=None, on_pick=None, current=None):
+        """options: [(value, label)]; on_pick(value) when one is chosen; current: the value chosen now."""
         super().__init__(0, 0, w, 62)
         self.interactive = True
-        self.icon, self.title, self.value, self.open = icon, title, value, open_
+        self.icon, self.title, self.value = icon, title, value
+        self.options, self.on_pick, self.current = options or [], on_pick, current
+        self.open = False
         self.on_press = lambda e: True
-        self.on_click = lambda e: on_click()
+        self.on_click = lambda e: self.show_menu()
         self.on_enter = lambda e: self.changed()
         self.on_leave = lambda e: self.changed()
+
+    def show_menu(self):
+        if not self.options or self.scene is None:
+            return
+
+        def closed():
+            self.open = False
+            self.changed()
+        self.open = True
+        open_menu(self, self.options, self.current, self.on_pick, closed)
 
     def paint(self, p):
         fill = "btn_fill_strong" if (self.hovered or self.open) else "btn_fill"
@@ -352,6 +366,106 @@ class ModeCard(View):
         _text(p, render.tr(self.title), ui.font(13, QFont.Medium), ui.resolve(self.scene, "ink2"), x, 11)
         f = ui.font(16, QFont.DemiBold)
         _text(p, ui.ellipsize(render.tr(self.value), f, self.w - x - 10), f, ui.resolve(self.scene, "ink1"), x, 31)
+
+
+class ChoiceMenu(View):
+    """The choices of a mode card, as iOS shows a menu: a rounded pane over everything, a row for each choice
+    and a tick by the one chosen now; long lists scroll."""
+    ROW = 42
+    MAX_ROWS = 7
+
+    def __init__(self, options, current, w, on_pick):
+        f = ui.font(15)
+        widest = max([ui.text_width(render.tr(lab), f) for _, lab in options] or [0])
+        w = max(w, min(320, widest + 16 + 40))
+        shown = min(len(options), self.MAX_ROWS)
+        super().__init__(0, 0, w, shown * self.ROW + 12)
+        self.interactive = True
+        self.on_press = lambda e: True
+        self.on_click = lambda e: True
+        self.on_closed = None
+        sv = ui.ScrollView(0, 6, w, shown * self.ROW)
+        for i, (val, lab) in enumerate(options):
+            sv.add(_ChoiceRow(i, w, lab, val == current, lambda v=val: on_pick(v), i < len(options) - 1))
+        sv.content.w, sv.content.h = w, len(options) * self.ROW
+        chosen = next((i for i, (val, _) in enumerate(options) if val == current), 0)
+        sv.scroll_to((chosen - shown // 2) * self.ROW)       # the one chosen now in sight
+        self.add(sv)
+
+    def paint(self, p):
+        p.setPen(Qt.NoPen)
+        for spread in (24, 18, 12, 6):                # a soft shadow, a little below
+            p.setBrush(QColor(0, 0, 0, 9))
+            p.drawRoundedRect(QRectF(-spread / 2, -spread / 2 + 6, self.w + spread, self.h + spread),
+                              16 + spread / 2, 16 + spread / 2)
+        p.setBrush(ui.resolve(self.scene, "panel_solid"))
+        p.setPen(QPen(ui.resolve(self.scene, "input_border"), 1))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.w - 1, self.h - 1), 16, 16)
+
+
+class _ChoiceRow(View):
+    cursor = Qt.PointingHandCursor
+
+    def __init__(self, i, w, label, chosen, pick, line):
+        super().__init__(6, i * ChoiceMenu.ROW, w - 12, ChoiceMenu.ROW)
+        self.interactive = True
+        self.label, self.chosen, self.line = label, chosen, line
+        self.on_press = lambda e: True
+        self.on_click = lambda e: pick()
+        self.on_enter = self.on_leave = lambda e: self.changed()
+
+    def paint(self, p):
+        if self.hovered:
+            p.setPen(Qt.NoPen)
+            p.setBrush(ui.resolve(self.scene, "btn_fill"))
+            p.drawRoundedRect(QRectF(0, 1, self.w, self.h - 2), 11, 11)
+        f = ui.font(15, QFont.DemiBold if self.chosen else QFont.Normal)
+        fm = ui.QFontMetricsF(f)
+        _text(p, ui.ellipsize(render.tr(self.label), f, self.w - 12 - 34), f,
+              ui.resolve(self.scene, "accent_blue" if self.chosen else "ink1"), 12, (self.h - fm.height() / 10) / 2)
+        if self.chosen:
+            render.draw_icon(p, "mdi:check", ui.resolve(self.scene, "accent_blue").name(),
+                             QRectF(self.w - 10 - 20, (self.h - 20) / 2, 20, 20))
+        if self.line and not self.hovered:
+            c = ui.resolve(self.scene, "input_border")
+            p.setPen(Qt.NoPen)
+            p.setBrush(c)
+            p.drawRect(QRectF(12, self.h - 0.5, self.w - 24, 0.5))
+
+
+def open_menu(anchor, options, current, on_pick, closed=None):
+    """A ChoiceMenu for `anchor`, under it (over it when there is no room below), as large as the anchor is
+    drawn; choosing closes it and then calls on_pick."""
+    scene = anchor.scene
+    ax, ay, k = anchor.in_scene()
+
+    def pick(value):
+        scene.close_popup()
+        on_pick(value)
+    menu = ChoiceMenu(options, current, anchor.w, pick)
+    menu.scale = k
+    mw, mh = menu.w * k, menu.h * k
+    x = min(max(6.0, ax + (anchor.w * k - mw) / 2), scene.css_w - mw - 6)
+    y = ay + (anchor.h + 6) * k
+    if y + mh > scene.css_h - 6:
+        y = ay - 6 * k - mh
+    menu.x, menu.y = x, max(6.0, min(y, scene.css_h - mh - 6))
+    menu.alpha, menu.dy = 0.0, -6.0
+    scene.open_popup(menu)
+    menu.animate(160, "out", alpha=1.0, dy=0.0)
+    if closed is not None:
+        _when_gone(scene, menu, closed)
+    return menu
+
+
+def _when_gone(scene, menu, closed):
+    """closed() once the menu is no longer the scene's popup (chosen, pressed outside, Escape)."""
+    def check():
+        if scene.popup is menu:
+            QTimer.singleShot(120, check)
+        else:
+            closed()
+    QTimer.singleShot(120, check)
 
 
 class Picture(View):

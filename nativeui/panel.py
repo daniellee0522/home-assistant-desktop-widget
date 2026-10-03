@@ -32,7 +32,8 @@ ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
 # A tile's detail is shown over the panel's own tiles, as a capsule's devices are: at the size of the detail
 # card beside a widget at 100 % (its units are DETAIL_SCALE of the panel's), with DETAIL_MARGIN around it.
-# A panel too small for it (a row or two of tiles) grows while it is shown, up to DETAIL_MAX_H.
+# A panel too small for it (a row or two of tiles) grows while it is shown, up to DETAIL_MAX_H. It never
+# scrolls: its tall controls are made shorter, and what is still too tall is drawn smaller.
 DETAIL_SCALE = 1 / FLYOUT_ZOOM
 DETAIL_MARGIN = 14
 DETAIL_MAX_H = 900                     # as tall as the Home panel
@@ -312,7 +313,9 @@ class PanelScene(OverlayScene):
         old = self.detail_view
         k, m = DETAIL_SCALE, DETAIL_MARGIN
         base_w, base_h = self.base_css or (self.css_w, self.css_h)
-        content = self.detail.build(max_h=(max(base_h, DETAIL_MAX_H) - 2 * m) / k)
+        room = max(base_h, DETAIL_MAX_H) - 2 * m
+        content = self.detail.build(max_h=room / k, fit=True)
+        k = min(k, room / content.h)
         w = max(base_w, CARD_W * k + 2 * m)
         h = max(base_h, content.h * k + 2 * m)
         overlay = View(0, 0, w, h)
@@ -345,6 +348,7 @@ class PanelScene(OverlayScene):
         self.detail.tile = None
         self.detail_view = None
         self.root.no_hit = False
+        self.close_popup()
 
         def gone():
             self.layer.remove(v)
@@ -563,6 +567,9 @@ class PanelScene(OverlayScene):
             self.model.reset()
 
     def escape(self):
+        if self.popup is not None:
+            self.close_popup()
+            return
         if self.detail_view is None:
             return
         if self.detail.edit:

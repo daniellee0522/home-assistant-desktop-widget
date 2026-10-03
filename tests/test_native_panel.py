@@ -341,6 +341,61 @@ class DetailOverThePanel(unittest.TestCase):
         pump(500)
         return api, win, sc
 
+    def test_it_fits_the_panel_without_scrolling(self):
+        """A light has the most to show: its tall slider is made shorter, and the rest drawn smaller."""
+        api = FakeApi("grid", [{"id": "l", "entity": "light.l", "domain": "light", "room": "燈", "label": ""}])
+        win, sc = make_panel(api)
+        sc.push_states([("light.l", {"state": "on", "attributes": {
+            "brightness": 200, "supported_color_modes": ["color_temp", "hs"], "min_color_temp_kelvin": 2700,
+            "max_color_temp_kelvin": 6500, "effect_list": ["a", "b"], "effect": "a"}})])
+        sc.open_detail("l")
+        pump(500)
+        self.assertEqual(sc.detail.body_scroll.max_offset(), 0)
+        holder = sc.detail_view.children[0]
+        self.assertLessEqual(holder.h * holder.scale + 2 * panel.DETAIL_MARGIN, panel.DETAIL_MAX_H + 0.5)
+        win.dispose()
+
+    def test_a_mode_card_opens_a_menu_over_it_and_leaves_the_screen_as_it_is(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        api = FakeApi("grid", [{"id": "ac", "entity": "climate.ac", "domain": "climate", "room": "冷氣", "label": ""}])
+        win, sc = make_panel(api)
+        sc.push_states([("climate.ac", {"state": "off", "attributes": {
+            "temperature": 24, "hvac_modes": ["off", "cool", "heat"], "fan_modes": ["auto", "low"], "fan_mode": "auto"}})])
+        sc.open_detail("ac")
+        pump(500)
+        card = self.find(sc.detail_view, "ModeCard")[0]
+        built = sc.detail_view
+        s = sc.scale / sc.devicePixelRatioF()
+        x, y, k = card.in_scene()
+        QTest.mouseClick(sc, Qt.LeftButton, pos=QPoint(round((x + card.w * k / 2) * s), round((y + 20 * k) * s)))
+        pump(300)
+        self.assertIsNotNone(sc.popup)
+        self.assertIs(sc.detail_view, built)                         # nothing was built again
+        self.assertAlmostEqual(sc.popup.scale, k)                    # as large as the card is drawn
+        rows = sc.popup.children[0].content.children
+        rx, ry, rk = rows[1].in_scene()
+        QTest.mouseClick(sc, Qt.LeftButton, pos=QPoint(round((rx + 40 * rk) * s), round((ry + 20 * rk) * s)))
+        pump(200)
+        self.assertIsNone(sc.popup)
+        self.assertIn(("climate", "set_hvac_mode", "climate.ac", {"hvac_mode": "cool"}), api.calls)
+        win.dispose()
+
+    def test_built_again_it_stays_where_it_was_scrolled(self):
+        from nativeui import detail
+        api = FakeApi("grid", [{"id": "l", "entity": "light.l", "domain": "light", "room": "燈", "label": ""}])
+        win, sc = make_panel(api)
+        content = detail.DetailContent(sc, lambda: sc.prefs, sc.states, lambda: None)
+        content.open("l")
+        content.build(max_h=200)
+        content.body_scroll.scroll_to(60)
+        content.build(max_h=200)                                     # a new state came
+        self.assertEqual(content.body_scroll.offset, 60)
+        content.open("l")                                            # opened again: from the top
+        content.build(max_h=200)
+        self.assertEqual(content.body_scroll.offset, 0)
+        win.dispose()
+
     def test_a_small_panel_grows_for_it_and_shrinks_back(self):
         api, win, sc = self.open_speaker(n=2)
         base = sc.base_css
@@ -356,14 +411,14 @@ class DetailOverThePanel(unittest.TestCase):
         win.dispose()
 
     def test_the_volume_slider_answers_where_it_is_drawn(self):
-        """The detail is drawn at twice the panel's units: a press three quarters along the slider, in the
-        window, sets three quarters of the volume."""
+        """The detail is drawn at up to twice the panel's units (less when it has more to show than fits): a
+        press three quarters along the slider, in the window, sets three quarters of the volume."""
         from PySide6.QtCore import QPoint
         from PySide6.QtTest import QTest
         api, win, sc = self.open_speaker()
         slider = self.find(sc.detail_view, "Slider")[0]
         x, y, k = slider.in_scene()
-        self.assertAlmostEqual(k, 2.0)
+        self.assertTrue(1.5 < k <= 2.0, k)
         s = sc.scale / sc.devicePixelRatioF()
         at = QPoint(round((x + slider.w * k * 0.75) * s), round((y + slider.h * k / 2) * s))
         QTest.mousePress(sc, Qt.LeftButton, pos=at)

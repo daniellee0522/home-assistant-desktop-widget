@@ -117,8 +117,10 @@ class DetailContent:
         self.tile = None
         self.edit = False
         self.history_token = 0
-        self.choice = None                  # the mode card whose choices are open
         self.light_view = "brightness"      # what a light's tall slider sets: brightness or "temp"
+        self.tall = TALL_H                  # how tall the tall controls are (less where there is less room)
+        self.body_scroll = None
+        self._built_for = None              # (tile, edit panel) last built: built again, it keeps its scroll
 
     @property
     def prefs(self):
@@ -151,13 +153,10 @@ class DetailContent:
         """Show this tile (False when there is no such tile)."""
         self.tile = self.find_tile(tile_id)
         self.edit = False
-        self.choice = None
         self.light_view = "brightness"
+        self._built_for = None
+        self.host.close_popup()
         return self.tile is not None
-
-    def set_choice(self, key):
-        self.choice = None if self.choice == key else key
-        self.rebuilt()
 
     def set_light_view(self, view):
         self.light_view = view
@@ -191,9 +190,26 @@ class DetailContent:
         threading.Thread(target=go, daemon=True).start()
 
     # -- the views -----------------------------------------------------------------------------------------
-    def build(self, max_h=BODY_MAX + 67):
-        """The content, CARD_W wide and as tall as it needs up to max_h (the rest scrolls)."""
+    def build(self, max_h=BODY_MAX + 67, fit=False):
+        """The content, CARD_W wide and as tall as it needs up to max_h: the rest scrolls, or, with `fit`, the
+        tall controls are made shorter until it all fits (and it is as tall as it needs: the tray panel scales
+        it to its room). Built again for the same tile, it keeps where it was scrolled to."""
+        self.tall = TALL_H
+        if not fit:
+            return self._build(max_h)
+        out = self._build(float("inf"))
+        for _ in range(3):                      # (a control or two follow the tall one's height loosely)
+            if out.h <= max_h + 0.01 or self.tall <= TALL_MIN:
+                break
+            self.tall = max(TALL_MIN, self.tall - (out.h - max_h))
+            out = self._build(float("inf"))
+        return out
+
+    def _build(self, max_h):
         tile = self.tile
+        same = self._built_for == (tile["id"], self.edit)
+        keep = self.body_scroll.offset if (same and self.body_scroll is not None) else 0.0
+        self._built_for = (tile["id"], self.edit)
         out = View(0, 0, CARD_W, 0)
         state = self.states.get(tile["entity"])
         title = tile.get("room") or ((state or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
@@ -221,9 +237,10 @@ class DetailContent:
         content_h = stack.end() + 14
         body.h = content_h
         shown_h = max(60, min(content_h, max_h - top))
-        scroll = ScrollView(BODY_X, top, BODY_W, shown_h)
+        scroll = ScrollView(BODY_X, top, BODY_W, shown_h, fade=24 if content_h > shown_h else 0)
         scroll.add(body)
         scroll.content.w, scroll.content.h = BODY_W, content_h
+        scroll.scroll_to(keep)
         out.add(scroll)
         out.h = top + shown_h
         self.body_scroll = scroll
@@ -426,6 +443,7 @@ class DetailCard(OverlayScene):
         if self.tile is None:
             return
         self.content.tile = None
+        self.close_popup()
         threading.Thread(target=lambda: self.api.set_popover_activatable(False), daemon=True).start()
         self.root.animate(150, "out", alpha=0.0, dy=6.0)
 
@@ -435,7 +453,9 @@ class DetailCard(OverlayScene):
         QTimer.singleShot(170, finish)
 
     def escape(self):
-        if self.content.edit:
+        if self.popup is not None:
+            self.close_popup()
+        elif self.content.edit:
             self.set_edit(False)
         else:
             self.close_card()
@@ -506,6 +526,7 @@ STATE_TEXT = {
                "error": "錯誤"},
 }
 TALL_W, TALL_H = 120, 220
+TALL_MIN = 150                       # the shortest a tall control is made to fit the tray panel
 
 
 def _attrs(state):
@@ -531,8 +552,8 @@ def big_value(stack, text, state, mt=6):
 
 
 def cards(card, stack, items):
-    """Mode cards two to a row; the open one lists its choices under them.
-    items: [(key, icon, title, current label, [(value, label)], on_pick)]."""
+    """Mode cards two to a row; pressed, one opens its choices in a menu over the screen.
+    items: [(icon, title, current label, [(value, label)], on_pick)]."""
     if not items:
         return
     gap = 10
@@ -541,33 +562,19 @@ def cards(card, stack, items):
         row = View(0, 0, BODY_W, 62)
         pair = items[i:i + 2]
         left = (BODY_W - (len(pair) * w + (len(pair) - 1) * gap)) / 2
-        for j, (key, icon, title, value, options, pick) in enumerate(pair):
-            mc = controls.ModeCard(w, icon, title, value, lambda k=key: card.set_choice(k), open_=card.choice == key)
+        for j, (icon, title, value, options, pick) in enumerate(pair):
+            current = next((v for v, lab in options if lab == value), None)
+            mc = controls.ModeCard(w, icon, title, value, options, pick, current)
             mc.x = left + j * (w + gap)
             row.add(mc)
         stack.place(row, 8, 8)
-        for key, icon, title, value, options, pick in pair:
-            if card.choice != key:
-                continue
-            wrap = View(0, 0, BODY_W, 0)
-            x = y = 0
-            for val, lab in options:
-                b = Button(lab, size=14, weight=QFont.Medium, h=36, pad=14, active=lab == value,
-                           on_click=lambda e, v=val: (card.set_choice(None), pick(v)))
-                if x and x + b.w > BODY_W:
-                    x, y = 0, y + 36 + 8
-                b.x, b.y = x, y
-                wrap.add(b)
-                x += b.w + 8
-            wrap.h = y + 36
-            stack.place(wrap, 4, 10)
 
 
 def _toggle(domain):
     def build(card, stack, tile, state):
         on = bool(state) and state.get("state") == "on"
         big_value(stack, "開啟" if on else "關閉", state)
-        centered(stack, controls.TallSwitch(TALL_W, TALL_H, on, "accent_yellow", render.icon_name(tile, state),
+        centered(stack, controls.TallSwitch(TALL_W, card.tall, on, "accent_yellow", render.icon_name(tile, state),
                                             lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
                                                      card.call(domain, "toggle", tile["entity"]))), 4, 16)
     return build
@@ -593,7 +600,7 @@ def build_light(card, stack, tile, state):
         cur = attrs.get("color_temp_kelvin")
         val = cur if isinstance(cur, (int, float)) and lo_k <= cur <= hi_k else round((lo_k + hi_k) / 2)
         warm, cool = kelvin_css(lo_k), kelvin_css(hi_k)
-        slider = controls.TallSlider(TALL_W, TALL_H, val, lo_k, hi_k, color, step=50,
+        slider = controls.TallSlider(TALL_W, card.tall, val, lo_k, hi_k, color, step=50,
                                      gradient=[(0, warm), (1, cool)],
                                      on_input=lambda v: setattr(label, "text", "%dK" % v),
                                      on_commit=lambda v: card.call("light", "turn_on", entity, {"color_temp_kelvin": int(v)}))
@@ -604,7 +611,7 @@ def build_light(card, stack, tile, state):
                 card.call("light", "turn_off", entity)
             else:
                 card.call("light", "turn_on", entity, {"brightness_pct": int(v)})
-        slider = controls.TallSlider(TALL_W, TALL_H, pct if on else 0, 0, 100, color,
+        slider = controls.TallSlider(TALL_W, card.tall, pct if on else 0, 0, 100, color,
                                      on_input=lambda v: setattr(label, "text", ("%d%%" % v) if v else render.tr("關閉")),
                                      on_commit=commit)
     centered(stack, slider, 4, 14)
@@ -636,7 +643,7 @@ def build_light(card, stack, tile, state):
         stack.place(controls.Swatches(BODY_W, swatches, pick), 4, 14)
     effects = attrs.get("effect_list") or []
     if effects and on:
-        cards(card, stack, [("effect", "mdi:auto-fix", "特效", attrs.get("effect") or "無",
+        cards(card, stack, [("mdi:auto-fix", "特效", attrs.get("effect") or "無",
                              [(e, e) for e in effects],
                              lambda v: card.call("light", "turn_on", entity, {"effect": v}))])
 
@@ -661,14 +668,14 @@ def build_fan(card, stack, tile, state):
         else:
             card.call("fan", "set_percentage", entity, {"percentage": int(v)})
     step = attrs.get("percentage_step") or 1
-    centered(stack, controls.TallSlider(TALL_W, TALL_H, pct, 0, 100, "accent_blue", step=step,
+    centered(stack, controls.TallSlider(TALL_W, card.tall, pct, 0, 100, "accent_blue", step=step,
                                         on_input=lambda v: setattr(label, "text", ("%d%%" % v) if v else render.tr("關閉")),
                                         on_commit=commit), 4, 14)
     centered(stack, controls.ModeBar([("mdi:power", on, lambda: (card.optimistic(entity, {"state": "off" if on else "on"}),
                                                                  card.call("fan", "toggle", entity)))]), 4, 14)
     presets = attrs.get("preset_modes") or []
     if presets:
-        cards(card, stack, [("preset", "mdi:fan", "預設模式", attrs.get("preset_mode") or "無",
+        cards(card, stack, [("mdi:fan", "預設模式", attrs.get("preset_mode") or "無",
                              [(p, p) for p in presets],
                              lambda v: card.call("fan", "set_preset_mode", entity, {"preset_mode": v}))])
 
@@ -677,7 +684,7 @@ def build_lock(card, stack, tile, state):
     s = (state or {}).get("state")
     locked = s == "locked"
     big_value(stack, STATE_TEXT["lock"].get(s, s or "無法連線"), state)
-    centered(stack, controls.TallSwitch(TALL_W, TALL_H, locked, "accent_green",
+    centered(stack, controls.TallSwitch(TALL_W, card.tall, locked, "accent_green",
                                         "mdi:lock" if locked else "mdi:lock-open-variant",
                                         lambda: (card.optimistic(tile["entity"], {"state": "unlocked" if locked else "locked"}),
                                                  card.call("lock", "unlock" if locked else "lock", tile["entity"]))), 4, 16)
@@ -706,7 +713,7 @@ def build_climate(card, stack, tile, state):
     def commit(v):
         card.optimistic(entity, {"attributes": dict(attrs, temperature=v)})
         card.call("climate", "set_temperature", entity, {"temperature": v})
-    dial = controls.Dial(236, target, lo, hi, step, current, HVAC_LABELS.get(mode, mode),
+    dial = controls.Dial(card.tall + 16, target, lo, hi, step, current, HVAC_LABELS.get(mode, mode),
                          None if mode == "off" else render.HVAC_COLORS.get(mode, "accent_cyan"), on_commit=commit)
     centered(stack, dial, 0, 0)
 
@@ -719,16 +726,16 @@ def build_climate(card, stack, tile, state):
                    fill=None, ring="ink2", hover_fill="btn_fill", on_click=lambda e, d=delta: stepper(d))
         row.add(b)
     stack.place(row, 0, 14)
-    items = [("hvac", "mdi:power" if mode == "off" else "mdi:thermostat", "模式", HVAC_LABELS.get(mode, mode),
+    items = [("mdi:power" if mode == "off" else "mdi:thermostat", "模式", HVAC_LABELS.get(mode, mode),
               [(m, HVAC_LABELS.get(m, m)) for m in (attrs.get("hvac_modes") or ["off", "cool", "heat", "auto"])],
               lambda m: (card.optimistic(entity, {"state": m}),
                          card.call("climate", "set_hvac_mode", entity, {"hvac_mode": m})))]
     if attrs.get("fan_modes"):
-        items.append(("fan", "mdi:fan", "風速模式", FAN_LABELS.get(attrs.get("fan_mode"), attrs.get("fan_mode") or "無"),
+        items.append(("mdi:fan", "風速模式", FAN_LABELS.get(attrs.get("fan_mode"), attrs.get("fan_mode") or "無"),
                       [(m, FAN_LABELS.get(m, m)) for m in attrs["fan_modes"]],
                       lambda m: card.call("climate", "set_fan_mode", entity, {"fan_mode": m})))
     if attrs.get("preset_modes"):
-        items.append(("preset", "mdi:tune-variant", "預設模式", attrs.get("preset_mode") or "無",
+        items.append(("mdi:tune-variant", "預設模式", attrs.get("preset_mode") or "無",
                       [(m, m) for m in attrs["preset_modes"]],
                       lambda m: card.call("climate", "set_preset_mode", entity, {"preset_mode": m})))
     cards(card, stack, items)
@@ -745,7 +752,7 @@ def build_cover(card, stack, tile, state):
     pos = attrs.get("current_position")
     label = big_value(stack, ("%d%%" % pos) if pos is not None else STATE_TEXT["cover"].get(s, s or "無法連線"), state)
     if pos is not None:
-        centered(stack, controls.TallSlider(TALL_W, TALL_H, pos, 0, 100, "accent_blue",
+        centered(stack, controls.TallSlider(TALL_W, card.tall, pos, 0, 100, "accent_blue",
                                             on_input=lambda v: setattr(label, "text", "%d%%" % v),
                                             on_commit=lambda v: card.call("cover", "set_cover_position", entity,
                                                                          {"position": int(v)})), 4, 14)
@@ -761,7 +768,8 @@ def build_media(card, stack, tile, state):
     s = (state or {}).get("state") or ""
     playing = s == "playing"
     art = attrs.get("entity_picture")
-    centered(stack, controls.Picture(196, 196, art, card.api.get_picture, card.run_on_ui_thread), 4, 16)
+    side = card.tall - 24
+    centered(stack, controls.Picture(side, side, art, card.api.get_picture, card.run_on_ui_thread), 4, 16)
     title = attrs.get("media_title") or STATE_TEXT.get("media", {}).get(s) or s
     stack.place(Label(title, 19, QFont.Bold, "ink1", w=BODY_W, overflow="ellipsis"), 0, 2)
     artist = attrs.get("media_artist") or attrs.get("app_name") or ""
@@ -804,10 +812,10 @@ def build_media(card, stack, tile, state):
         stack.place(vol, 6, 10)
     items = []
     if attrs.get("source_list"):
-        items.append(("source", "mdi:import", "來源", attrs.get("source") or "無", [(x, x) for x in attrs["source_list"]],
+        items.append(("mdi:import", "來源", attrs.get("source") or "無", [(x, x) for x in attrs["source_list"]],
                       lambda v: card.call("media_player", "select_source", entity, {"source": v})))
     off = s in ("off", "standby", "")
-    items.append(("power", "mdi:power", "電源", "關閉" if off else "開啟", [("on", "開啟"), ("off", "關閉")],
+    items.append(("mdi:power", "電源", "關閉" if off else "開啟", [("on", "開啟"), ("off", "關閉")],
                   lambda v: card.call("media_player", "turn_on" if v == "on" else "turn_off", entity)))
     cards(card, stack, items)
 

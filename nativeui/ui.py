@@ -1075,10 +1075,12 @@ class Scene(GlassMixin, QWidget):
             q = QPainter(img)
             q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
             q.scale(self.scale, self.scale)
-            self.paint_card(q)
-            self.root.paint_tree(q)
-            self.layer.paint_tree(q)
-            q.end()
+            try:
+                self.paint_card(q)
+                self.root.paint_tree(q)
+                self.layer.paint_tree(q)
+            finally:
+                q.end()                         # (a painter left open on a picture brings Qt down when it is freed)
             img.setDevicePixelRatio(self.dpi)
             self._content, self._content_dirty, self._content_at = img, False, time.monotonic()
         return img
