@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QWidget
 
 import qtshell
 
-from . import render
+from . import kinds, render
 from .actions import TileActions
 from .glass import GlassMixin
 
@@ -33,6 +33,8 @@ _user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
                                  ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 
 HOLD_MS = 420                 # how long a press is held to open the detail card
+# How often what a widget of another kind shows besides states is fetched again (seconds).
+EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300}
 HOLD_SLOP_PX = 8              # moving further than this cancels the hold
 DRAG_PX = 5                   # moving further than this drags the widget
 SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
@@ -88,6 +90,11 @@ class _Surface(GlassMixin, QWidget):
         self.scale = 1.0
         self.pw = self.ph = 1
         self.form, self.rects = "small", []
+        self.wkind = "tiles"                      # what it shows: tiles, weather, camera, chart, shortcuts
+        self.extras, self._extras_at, self._fetching = {}, {}, set()
+        self.extras_timer = QTimer(self)
+        self.extras_timer.setInterval(5000)
+        self.extras_timer.timeout.connect(self.refresh_extras)
         self.scroll, self.scroll_max = 0.0, 0.0
         self.tcol = render.tokens("light")
         # What is drawn.
@@ -140,6 +147,8 @@ class _Surface(GlassMixin, QWidget):
         self.facade.events.shown.fire()
         self.relayout()
         self.start_glass()
+        self.extras_timer.start()
+        QTimer.singleShot(0, self.refresh_extras)
 
     def moveEvent(self, e):
         super().moveEvent(e)
@@ -164,8 +173,11 @@ class _Surface(GlassMixin, QWidget):
         if mine is None and prefs.get("widgets"):
             mine = prefs["widgets"][0]
         mine = mine or {"size": "2x4", "tiles": []}
+        wkind = mine.get("kind") if mine.get("kind") in kinds.KINDS else "tiles"
         new = {
-            "tiles": mine["tiles"], "size_key": mine["size"], "zoom": prefs.get("zoom", 100),
+            # a widget of another kind holds only the devices it shows (the first weather, the shortcuts...)
+            "tiles": mine["tiles"] if wkind == "tiles" else kinds.shown(wkind, mine["tiles"]),
+            "wkind": wkind, "size_key": mine["size"], "zoom": prefs.get("zoom", 100),
             "theme_raw": prefs.get("theme", "auto"), "style": prefs.get("glass_style", "classic"),
             "language": prefs.get("language", "zh-TW"), "liquid_level": prefs.get("liquid_blur", 0),
             "sampling": prefs.get("glass_sampling", "live"), "locked": bool(prefs.get("lock_position")),
@@ -198,7 +210,10 @@ class _Surface(GlassMixin, QWidget):
         if not changed:
             return
         render.set_language(self.language)
-        if changed & {"size_key", "zoom", "tiles"}:
+        if changed & {"tiles", "wkind"}:
+            self.extras, self._extras_at = {}, {}
+            QTimer.singleShot(0, self.refresh_extras)
+        if changed & {"size_key", "zoom", "tiles", "wkind"}:
             self.relayout()
         elif changed & {"theme_raw", "style", "language", "system_glass"}:
             self.rebuild()
@@ -216,8 +231,12 @@ class _Surface(GlassMixin, QWidget):
         self.scale = max(0.5, min(2.0, self.zoom / 100.0)) * self.dpi
         cw, ch = render.widget_size(self.size_key)
         self.pw, self.ph = round(cw * self.scale), round(ch * self.scale)
-        self.form, self.rects = render.tile_layout(self.size_key, len(self.tiles))
-        self.scroll_max = render.scroll_range(self.size_key, len(self.tiles))
+        if self.wkind in ("tiles", "shortcuts"):
+            self.form, self.rects = render.tile_layout(self.size_key, len(self.tiles),
+                                                       "small" if self.wkind == "shortcuts" else None)
+            self.scroll_max = render.scroll_range(self.size_key, len(self.tiles))
+        else:                                    # one picture: no tiles to press, nothing to scroll
+            self.form, self.rects, self.scroll_max = "small", [], 0.0
         self.scroll = max(0.0, min(self.scroll, self.scroll_max))
         if hwnd:
             _user32.SetWindowPos(hwnd, None, 0, 0, self.pw, self.ph, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
@@ -241,8 +260,12 @@ class _Surface(GlassMixin, QWidget):
         img = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
-        self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
-                                               self.scale, dim, self.style, self._ui(), self.theme_raw)
+        if self.wkind == "tiles":
+            self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
+                                                   self.scale, dim, self.style, self._ui(), self.theme_raw)
+        else:
+            self.empty_button = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
+                                                  self.scale, dim, self.style, self._ui(), self.theme_raw, self.extras)
         p.end()
         pix = QPixmap.fromImage(img)
         pix.setDevicePixelRatio(self.dpi)
@@ -254,6 +277,8 @@ class _Surface(GlassMixin, QWidget):
         return cw, ch, self.tcol["radius_panel"]
 
     def glass_tiles(self):
+        if self.wkind != "tiles":                # the other kinds draw over their glass themselves
+            return []
         s, off, H = self.scale, self.scroll, render.widget_size(self.size_key)[1]
         return [(round(x * s), round((y - off) * s), round(w * s), round(h * s), round(self.tcol["radius_tile"] * s))
                 for x, y, w, h in self.rects if 0 <= y - off and y - off + h <= H]
@@ -466,6 +491,8 @@ class _Surface(GlassMixin, QWidget):
         if i < 0:
             if press.get("button") and self._button_at(x, y):
                 threading.Thread(target=self.api.open_settings_window, daemon=True).start()
+            elif self.wkind in EXTRAS_EVERY and self.tiles and not press.get("moved"):
+                self.facade.popover(self.tiles[0])        # a weather, a camera, a chart: its detail
             return
         if i >= len(self.tiles) or press.get("fired"):
             return
@@ -506,6 +533,48 @@ class _Surface(GlassMixin, QWidget):
         # (it is the one fading out when a touch wakes the widget, which must not stall to draw twice).
         self.overlay = None
         self.update()
+
+    # ---- what another kind shows besides states -----------------------------------------
+    def refresh_extras(self):
+        """Fetch, off the GUI thread, what is due: the weather's coming days, the camera's picture (not while
+        dimmed: the desktop is out of sight), the sensors' last day."""
+        kind = self.wkind
+        if kind not in EXTRAS_EVERY or not self.tiles or not self.isVisible() or kind in self._fetching:
+            return
+        if kind == "camera" and self.dim_target:
+            return
+        now = time.monotonic()
+        if now - self._extras_at.get(kind, -1e9) < EXTRAS_EVERY[kind]:
+            return
+        self._extras_at[kind] = now
+        self._fetching.add(kind)
+        tiles, states, api = list(self.tiles), dict(self.states), self.api
+
+        def go():
+            got = {}
+            try:
+                if kind == "weather":
+                    got["forecast"] = api.get_forecast(tiles[0]["entity"])
+                elif kind == "camera":
+                    e = tiles[0]["entity"]
+                    url = ((states.get(e) or {}).get("attributes") or {}).get("entity_picture") or "/api/camera_proxy/" + e
+                    data = api.get_picture(url)
+                    img = QImage.fromData(data) if data else None
+                    if img is not None and not img.isNull():
+                        got["picture"], got["picture_at"] = img, time.time()
+                elif kind == "chart":
+                    got["history"] = {t["entity"]: (api.get_history(t["entity"], 24) or {}).get("points") or []
+                                      for t in tiles}
+            except Exception:
+                traceback.print_exc()
+
+            def done():
+                self._fetching.discard(kind)
+                if got and kind == self.wkind:
+                    self.extras.update(got)
+                    self._redraw_tiles()
+            self.facade.run_on_ui_thread(done)
+        threading.Thread(target=go, daemon=True).start()
 
     # ---- flashes of the momentary tiles -------------------------------------------
     def flash_tile(self, i):
@@ -604,7 +673,10 @@ class NativeWidget:
         i = next((j for j, t in enumerate(surf.tiles) if t["id"] == tile["id"]), -1)
         if i < 0:
             return
-        x, y, w, h = surf.rects[i]
+        if i < len(surf.rects):
+            x, y, w, h = surf.rects[i]
+        else:                                    # a widget of one picture: the card itself
+            (w, h), x, y = render.widget_size(surf.size_key), 0, surf.scroll
         sx = rect[0] + round(x * surf.scale)
         sy = rect[1] + round((y - surf.scroll) * surf.scale)
         threading.Thread(target=self.api.open_popover, args=(

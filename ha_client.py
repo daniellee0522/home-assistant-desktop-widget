@@ -149,6 +149,21 @@ class HAClient:
             data["entity_id"] = entity_id
         return self._request("/api/services/%s/%s" % (domain, service), "POST", data, timeout=timeout)
 
+    def get_forecast(self, entity_id, kind="daily", timeout=10):
+        """A weather entity's forecast, [{datetime, condition, temperature, templow, ...}]: asked of the
+        weather.get_forecasts service (Home Assistant no longer puts it in the state), or the state's own
+        forecast on an older one."""
+        try:
+            res = self._request("/api/services/weather/get_forecasts?return_response", "POST",
+                                {"entity_id": entity_id, "type": kind}, timeout=timeout) or {}
+            found = (res.get("service_response") or {}).get(entity_id) or {}
+            if isinstance(found.get("forecast"), list):
+                return found["forecast"]
+        except Exception:
+            pass
+        state = self._request("/api/states/" + entity_id, timeout=timeout) or {}
+        return (state.get("attributes") or {}).get("forecast") or []
+
     def ws_commands(self, types, timeout=15):
         """Run several websocket commands on one short-lived connection and
         return their results in order. The areas and registries of Home

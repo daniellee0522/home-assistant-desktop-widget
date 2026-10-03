@@ -866,9 +866,69 @@ def build_readout(card, stack, tile, state):
         threading.Thread(target=load, daemon=True).start()
 
 
+def build_weather(card, stack, tile, state):
+    """Now, large, and the coming days, each with its low and high (fetched once, then kept on the card)."""
+    from . import kinds
+    attrs = _attrs(state)
+    icon, text = kinds.condition(state)
+    centered(stack, ui.IconView(icon, "ink1", size=52), 4, 0)
+    stack.place(Label("%s°" % trim_number(attrs["temperature"]) if attrs.get("temperature") is not None else "--",
+                      52, QFont.Light, "ink1", w=BODY_W, align="c"), 0, 0)
+    stack.place(Label(text, 17, QFont.DemiBold, "ink1", w=BODY_W, align="c"), 2, 4)
+    extra = " · ".join(x for x in (("%s %s%%" % (render.tr("濕度"), trim_number(attrs["humidity"])))
+                                   if attrs.get("humidity") is not None else "",
+                                   controls.ago((state or {}).get("last_changed"))) if x)
+    if extra:
+        stack.place(Label(extra, 13, QFont.Medium, "ink2", w=BODY_W, align="c"), 0, 14)
+    kept = getattr(card, "forecast", None)
+    if not kept or kept[0] != tile["entity"]:
+        stack.place(Label("載入中…", 13, QFont.Normal, "ink2", w=BODY_W, align="c"), 6, 8)
+        entity = tile["entity"]
+
+        def load():
+            try:
+                days = card.api.get_forecast(entity)
+            except Exception:
+                days = []
+
+            def apply():
+                card.forecast = (entity, days)
+                if card.tile and card.tile["entity"] == entity:
+                    card.rebuilt()
+            card.run_on_ui_thread(apply)
+        threading.Thread(target=load, daemon=True).start()
+        return
+    days = kept[1][:7]
+    if not days:
+        stack.place(Label("沒有預報", 13, QFont.Normal, "ink2", w=BODY_W, align="c"), 6, 8)
+    for i, d in enumerate(days):
+        r = View(0, 0, BODY_W, 40)
+        r.add(Label(kinds._day(d.get("datetime"), i), 15, QFont.DemiBold, "ink1", x=4, y=10, w=80))
+        r.add(ui.IconView("mdi:" + kinds.CONDITIONS.get(d.get("condition"), ("weather-cloudy",))[0], "ink1",
+                          x=96, y=7, size=26))
+        lo = d.get("templow")
+        r.add(Label(("%s°" % trim_number(lo)) if lo is not None else "", 15, QFont.Medium, "ink2", x=BODY_W - 120,
+                    y=10, w=50, align="r"))
+        r.add(Label("%s°" % trim_number(d.get("temperature")) if d.get("temperature") is not None else "--", 15,
+                    QFont.DemiBold, "ink1", x=BODY_W - 60, y=10, w=56, align="r"))
+        stack.place(r, 0, 2)
+
+
+def build_camera(card, stack, tile, state):
+    """The camera's view, large; a new one each time the card is built."""
+    attrs = _attrs(state)
+    url = attrs.get("entity_picture") or "/api/camera_proxy/" + tile["entity"]
+    url += ("&" if "?" in url else "?") + "_=%d" % (time.time() // 5)
+    stack.place(controls.Picture(BODY_W, round(BODY_W * 9 / 16), url, card.api.get_picture, card.run_on_ui_thread,
+                                 icon="mdi:cctv"), 4, 10)
+    since = controls.ago((state or {}).get("last_changed"))
+    stack.place(Label(" · ".join(x for x in ((state or {}).get("state") or "", since) if x), 13, QFont.Medium, "ink2",
+                      w=BODY_W, align="c"), 0, 10)
+
+
 DETAIL = {"light": build_light, "fan": build_fan, "switch": _toggle("switch"), "input_boolean": _toggle("input_boolean"),
           "lock": build_lock, "climate": build_climate, "cover": build_cover, "media_player": build_media,
-          "vacuum": build_vacuum}
+          "vacuum": build_vacuum, "weather": build_weather, "camera": build_camera}
 
 
 def create_popover(api, x=200, y=200):

@@ -35,8 +35,10 @@ CONFIG_FILE = _config_path()
 SUPPORTED_DOMAINS = [
     "light", "switch", "climate", "fan", "cover", "media_player",
     "lock", "vacuum", "camera", "scene", "script", "automation",
-    "sensor", "binary_sensor", "input_boolean",
+    "sensor", "binary_sensor", "input_boolean", "weather",
 ]
+# What a widget shows: its devices as tiles, or one of the other kinds (nativeui/kinds.py).
+WIDGET_KINDS = ("tiles", "weather", "camera", "chart", "shortcuts")
 
 DEFAULT_CONFIG = {
     "ha_url": "http://homeassistant.local:8123",
@@ -180,6 +182,7 @@ def _clean_widget(w, fallback_xy=(200, 200)):
         "x": x,
         "y": y,
         "tiles": [_migrate_tile(t) for t in (w.get("tiles") or [])],
+        "kind": w.get("kind") if w.get("kind") in WIDGET_KINDS else "tiles",
     }
 
 

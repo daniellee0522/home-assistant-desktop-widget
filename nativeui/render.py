@@ -245,7 +245,7 @@ def is_on(domain, st):
 
 
 MOMENTARY = ("scene", "script", "automation")
-READONLY = ("sensor", "binary_sensor")
+READONLY = ("sensor", "binary_sensor", "weather", "camera")
 
 
 def is_readonly(domain):
@@ -260,7 +260,8 @@ DEFAULT_ICON = {"light": "light", "switch": "switch", "input_boolean": "switch",
                 "climate": "mdi:air-conditioner", "fan": "fan", "cover": "mdi:blinds",
                 "media_player": "media", "lock": "lock", "vacuum": "mdi:robot-vacuum",
                 "scene": "mdi:palette", "script": "script", "automation": "mdi:robot",
-                "sensor": "sensor", "binary_sensor": "sensor"}
+                "sensor": "sensor", "binary_sensor": "sensor", "weather": "mdi:weather-partly-cloudy",
+                "camera": "mdi:cctv"}
 
 
 def icon_name(tile, st):

@@ -354,7 +354,7 @@ class Api:
             "alert_sensors": bool(self._cfg.get("alert_sensors", False)),
             "alert_locks": bool(self._cfg.get("alert_locks", False)),
             # Positions stay on this side; the windows only need what to draw.
-            "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"]}
+            "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"], "kind": w.get("kind", "tiles")}
                         for w in self._cfg.get("widgets", [])],
             "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None,
                                                  "home_tiles": [], "room_overrides": {}},
@@ -564,6 +564,8 @@ class Api:
             mine = self._widget_cfg(incoming.get("id"))
             if mine is not None:
                 mine["tiles"] = self._clean_tiles(incoming.get("tiles"))
+                if incoming.get("kind") in cfgmod.WIDGET_KINDS:
+                    mine["kind"] = incoming["kind"]
         self._tiles_changed()
         return True
 
@@ -848,6 +850,21 @@ class Api:
             points = [points[min(len(points) - 1, int(i * step))]
                       for i in range(limit)]
         return {"ok": True, "points": points, "hours": hours}
+
+    _FORECAST_TTL_S = 1200
+
+    def get_forecast(self, entity_id):
+        """A weather entity's coming days (kept for 20 minutes), or []."""
+        cache = self.__dict__.setdefault("_forecasts", {})
+        got = cache.get(entity_id)
+        if got and time.monotonic() - got[0] < self._FORECAST_TTL_S:
+            return got[1]
+        try:
+            days = self._client.get_forecast(entity_id)
+        except Exception:
+            return got[1] if got else []
+        cache[entity_id] = (time.monotonic(), days)
+        return days
 
     def get_picture(self, path):
         """The bytes of a picture from Home Assistant (a song's cover, a camera's view), or None."""

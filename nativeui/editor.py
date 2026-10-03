@@ -9,7 +9,7 @@ import uuid
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPixmap, QPen
 
-from . import render, ui
+from . import kinds, render, ui
 from .ui import Button, CheckRow, Label, Rect, ScrollView, TextField, View
 
 PANEL_ID = "__panel"
@@ -318,15 +318,20 @@ class Preview(View):
 
     def paint(self, p):
         s = self.scene.scale / self.scene.dpi
-        key = (self.scene.theme, self.scene.style, repr(self.widget["tiles"]), self.zoom_k,
+        key = (self.scene.theme, self.scene.style, repr(self.widget["tiles"]), self.widget.get("kind"), self.zoom_k,
                repr({t["entity"]: self.editor.states.get(t["entity"]) for t in self.widget["tiles"]}), self.hover)
         if self.cache is None or self.cache[0] != key:
             img = QImage(round(self.w * s) + 2, round(self.h * s) + 2, QImage.Format_ARGB32_Premultiplied)
             img.fill(Qt.transparent)
             q = QPainter(img)
             q.scale(s * self.zoom_k, s * self.zoom_k)
-            render.draw_widget(q, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme, None, 1.0,
-                               False, self.scene.style, None, self.scene.theme_raw, self.form_override, False)
+            kind = self.widget.get("kind") or "tiles"
+            if kind == "tiles":
+                render.draw_widget(q, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme, None,
+                                   1.0, False, self.scene.style, None, self.scene.theme_raw, self.form_override, False)
+            else:
+                kinds.draw_widget(q, kind, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme,
+                                  1.0, False, self.scene.style, None, self.scene.theme_raw, None, False)
             q.end()
             pix = QPixmap.fromImage(img)
             pix.setDevicePixelRatio(s)
@@ -492,6 +497,26 @@ class EditorMixin:
     def current_tiles(self):
         w = self.settings_widget()
         return w["tiles"] if w else []
+
+    def current_kind(self):
+        w = self.settings_widget()
+        return (w.get("kind") or "tiles") if w and not w.get("panel") else "tiles"
+
+    def set_kind(self, kind):
+        """What the widget shows. Its devices that the kind cannot show go (a weather keeps its weather)."""
+        w = self.settings_widget()
+        if not w or w.get("panel") or (w.get("kind") or "tiles") == kind:
+            return
+        w["kind"] = kind
+        if kind != "tiles":
+            keep = kinds.shown(kind, w["tiles"])
+            w["tiles"] = [t for t in w["tiles"] if t in keep]
+        self.persist()
+        self.build()
+
+    def can_add(self):
+        kind = self.current_kind()
+        return kind not in kinds.KIND_MAX or len(self.current_tiles()) < kinds.KIND_MAX[kind]
 
     def own_panel_tiles(self):
         panel = self.prefs.setdefault("panel", {"mode": "grid", "tiles": None, "home_tiles": []})
@@ -751,6 +776,18 @@ class EditorMixin:
             rm.x, rm.y = tx, ty
             body.add(rm)
             tx += rm.w + 6
+        if not on_panel:
+            tx, ty = RIGHT_X, ty + 28 + 8
+            body.add(Label("類型", 12, QFont.DemiBold, "ink2", x=tx, y=ty + 6))
+            tx += 40
+            for k in kinds.KINDS:
+                c = Chip(kinds.KIND_LABELS[k], self.current_kind() == k, lambda e, k=k: self.set_kind(k))
+                if tx + c.w > EDITOR_W - 18:
+                    tx, ty = RIGHT_X + 40, ty + 28 + 6
+                c.x, c.y = tx, ty
+                body.add(c)
+                tx += c.w + 6
+            tx = EDITOR_W
         if on_panel or isinstance(panel.get("tiles"), list):
             fo = Button("改為顯示所有 Widget 的配件", size=12, weight=QFont.DemiBold, h=28, pad=12,
                         on_click=lambda e: self.follow_widgets())
@@ -764,6 +801,8 @@ class EditorMixin:
         body.add(Label("%s (%d)" % (render.tr("配件"), len(tiles)), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5, spacing=0.36))
         add = Button("+ 新增配件", size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue", hover_fill="accent_blue",
                      color="white", on_click=lambda e: self.open_picker())
+        if not self.can_add():                   # a weather, a camera: one; a chart: three
+            add.alpha, add.interactive = 0.4, False
         add.x, add.y = EDITOR_W - 18 - add.w, y
         body.add(add)
         y += 28 + 8

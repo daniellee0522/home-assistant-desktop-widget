@@ -121,6 +121,8 @@ def pump(ms):
 class DemoApi:
     """What the panel and Settings ask of main.py's Api, answered with the demo devices."""
 
+    _flyout_anchor = None                          # the panel opens at no tray: its own monitor
+
     def __init__(self, theme="light", style="classic"):
         self.theme, self.style = theme, style
 

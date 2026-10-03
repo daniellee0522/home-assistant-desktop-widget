@@ -14,6 +14,7 @@ import hotkey as hotkeymod
 
 from . import render, ui
 from .detail import Stack
+from . import kinds
 from .editor import EditorMixin
 from .overlay import OverlayScene, create_overlay
 from .ui import Button, CheckRow, Label, Rect, ScrollView, Select, Slider, TextField, View
@@ -23,7 +24,8 @@ BODY_MAX = 520
 SOLID = {"light": (240, 245, 250), "dark": (26, 29, 34)}
 DOMAIN_LABELS = {"light": "燈光", "switch": "開關/插座", "input_boolean": "虛擬開關", "climate": "空調", "fan": "風扇",
                  "cover": "窗簾/百葉", "media_player": "媒體播放器", "lock": "門鎖", "vacuum": "掃地機", "scene": "場景",
-                 "script": "腳本", "automation": "自動化", "sensor": "感測器", "binary_sensor": "感測器 (開關型)"}
+                 "script": "腳本", "automation": "自動化", "sensor": "感測器", "binary_sensor": "感測器 (開關型)",
+                 "camera": "攝影機", "weather": "天氣"}
 
 
 def dim_text(sec):
@@ -656,9 +658,10 @@ class SettingsScene(EditorMixin, OverlayScene):
             return
         q = (getattr(self, "picker_query", "") or "").lower()
         used = {t["entity"] for t in self.current_tiles()}
+        allowed = kinds.KIND_DOMAINS.get(self.current_kind())
         groups = {}
         for e in self.entities:
-            if e["entity_id"] in used:
+            if e["entity_id"] in used or (allowed and e["domain"] not in allowed):
                 continue
             if q and q not in (e["entity_id"] + " " + (e.get("name") or "")).lower():
                 continue
