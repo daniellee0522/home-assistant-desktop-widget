@@ -201,12 +201,24 @@ class ClockCalendarPlayer(unittest.TestCase):
         self.assertTrue(all(b >= a for a, b in zip(steps, steps[1:])))              # it darkens smoothly
         self.assertLess(max(b - a for a, b in zip(steps, steps[1:])), 0.2)
 
-    def test_the_clock_has_its_own_digits_with_a_colon_of_round_dots(self):
-        self.assertIsNotNone(kinds.clock_face())                 # shipped in nativeui/fonts
+    def test_a_clock_takes_any_font_installed_and_keeps_its_digits_inside_the_ring(self):
+        from nativeui import fonts
         W, H = render.widget_size("2x2")
-        box = kinds.clock_digits(W, H, "10:29").boundingRect()
-        self.assertAlmostEqual(box.center().x(), W / 2, delta=2)
-        self.assertLess(box.width(), W - 100)                   # inside the ring
+        chosen = [f for f in fonts.installed() if f["name"] in ("Segoe UI Bold", "Arial", "Consolas")]
+        self.assertTrue(chosen)
+        for f in chosen:
+            self.assertIsNotNone(kinds.clock_face(f), f["name"])
+            box = kinds.clock_digits(W, H, "10:29", f).boundingRect()
+            self.assertAlmostEqual(box.center().x(), W / 2, delta=2, msg=f["name"])
+            self.assertLess(box.width(), W - 100, f["name"])                # inside the ring
+        gone = {"file": "C:/nowhere/gone.ttf", "name": "Gone"}
+        self.assertEqual(kinds.clock_face(gone), kinds.clock_face(None))  # a font gone: the default again
+
+    def test_a_clocks_font_is_kept_in_its_settings(self):
+        f = {"file": "C:/Windows/Fonts/arial.ttf", "name": "Arial"}
+        self.assertEqual(config._clean_widget({"id": "a", "kind": "clock", "font": f})["font"], f)
+        self.assertNotIn("font", config._clean_widget({"id": "a", "kind": "tiles", "font": f}))
+        self.assertNotIn("font", config._clean_widget({"id": "a", "kind": "clock", "font": "x"}))
 
     def test_a_clock_on_the_desktop_draws_only_its_ring_each_second(self):
         api, win, surf = make([], "clock", "2x2")
@@ -270,7 +282,10 @@ class PlayerOnTheDesktop(unittest.TestCase):
                                                  "supported_features": 2}}
         api, win, surf = make([T("media_player.s", "media_player")], "media")
         surf.push_states([("media_player.s", st)])
-        TW.pump(200)
+        for _ in range(40):                                    # until it has been drawn (the suite runs busy)
+            TW.pump(50)
+            if any(a == "seek" for _, a in surf.kind_buttons):
+                break
         bar = next(r for r, a in surf.kind_buttons if a == "seek")
         s = surf.scale / surf.devicePixelRatioF()
         y = round(bar.center().y() * s)

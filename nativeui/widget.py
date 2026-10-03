@@ -96,6 +96,7 @@ class _Surface(GlassMixin, QWidget):
         self.pw = self.ph = 1
         self.form, self.rects = "small", []
         self.wkind = "tiles"                      # what it shows: tiles, weather, camera, chart
+        self.clock_font = None                    # a clock's digits' font ({"file", "name"}; None: the default)
         self.extras, self._extras_at, self._fetching = {}, {}, set()
         self.extras_timer = QTimer(self)
         self.extras_timer.setInterval(5000)
@@ -202,6 +203,7 @@ class _Surface(GlassMixin, QWidget):
             "theme_raw": prefs.get("theme", "auto"), "style": prefs.get("glass_style", "classic"),
             "language": prefs.get("language", "zh-TW"), "liquid_level": prefs.get("liquid_blur", 0),
             "sampling": prefs.get("glass_sampling", "live"), "locked": bool(prefs.get("lock_position")),
+            "clock_font": mine.get("font") if wkind == "clock" else None,
         }
         if new["style"] not in ("classic", "liquid", "windows"):
             new["style"] = "classic"
@@ -236,7 +238,7 @@ class _Surface(GlassMixin, QWidget):
             QTimer.singleShot(0, self.refresh_extras)
         if changed & {"size_key", "zoom", "tiles", "wkind"}:
             self.relayout()
-        elif changed & {"theme_raw", "style", "language", "system_glass"}:
+        elif changed & {"theme_raw", "style", "language", "system_glass", "clock_font"}:
             self.rebuild()
         if changed & {"style", "liquid_level", "size_key", "zoom", "system_glass"}:
             self.reset_glass()
@@ -288,7 +290,7 @@ class _Surface(GlassMixin, QWidget):
             if self.wkind == "clock":                     # its ring is drawn live, in paintEvent
                 now = datetime.datetime.now()
                 self._drawn_minute = now.replace(second=0, microsecond=0)
-                extras = dict(extras, live_ticks=True, now=now)
+                extras = dict(extras, live_ticks=True, now=now, font=self.clock_font)
             got = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
                                     self.scale, dim, self.style, self._ui(), self.theme_raw, extras)
             self.kind_buttons = got if isinstance(got, list) else []

@@ -363,7 +363,8 @@ class Api:
             "alert_sensors": bool(self._cfg.get("alert_sensors", False)),
             "alert_locks": bool(self._cfg.get("alert_locks", False)),
             # Positions stay on this side; the windows only need what to draw.
-            "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"], "kind": w.get("kind", "tiles")}
+            "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"], "kind": w.get("kind", "tiles"),
+                         "font": w.get("font")}
                         for w in self._cfg.get("widgets", [])],
             "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None,
                                                  "home_tiles": [], "room_overrides": {}},
@@ -561,6 +562,17 @@ class Api:
         widget["tiles"] = self._clean_tiles([{"id": os.urandom(4).hex(), "entity": entity_id,
                                               "domain": cfgmod.domain_of(entity_id), "room": name}])
         self._tiles_changed()
+        return True
+
+    def set_widget_font(self, widget_id, font):
+        """A clock's digits in a font installed here ({"file", "name"}), or the default (None)."""
+        widget = self._widget_cfg(widget_id)
+        if widget is None or widget.get("kind") != "clock":
+            return False
+        widget.pop("font", None)
+        widget.update({k: v for k, v in cfgmod._clean_widget(dict(widget, font=font)).items() if k == "font"})
+        cfgmod.save_config(self._cfg)
+        self._push_prefs()
         return True
 
     def _read_new_states(self, entities):

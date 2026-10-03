@@ -446,7 +446,8 @@ class Preview(View):
         key = (sc.theme, sc.style, self.kind, self.zoom_k, p.transform().m11(), render._language,
                repr(tiles) if whole else None,
                repr({t["entity"]: self.editor.states.get(t["entity"]) for t in tiles}) if whole else None,
-               time.strftime("%Y%m%d%H%M") if self.kind in kinds.NO_DEVICES else None)   # a clock's minute
+               time.strftime("%Y%m%d%H%M") if self.kind in kinds.NO_DEVICES else None,   # a clock's minute
+               repr(self.widget.get("font")))
         if self.cache is None or self.cache[0] != key:
             z = self.zoom_k
 
@@ -457,7 +458,8 @@ class Preview(View):
                                        sc.theme_raw, self.form_override, False)
                 else:
                     kinds.draw_widget(q, self.kind, self.size_key, tiles if whole else [], self.editor.states,
-                                      sc.theme, 1.0, False, sc.style, None, sc.theme_raw, None, False)
+                                      sc.theme, 1.0, False, sc.style, None, sc.theme_raw,
+                                      {"font": self.widget.get("font")}, False)
             self.cache = (key, device_image(p, self.w, self.h, draw))
         return self.cache[1]
 
@@ -824,6 +826,42 @@ class EditorMixin:
         self.page = self.return_page
         self.build()
 
+    def font_card(self, widget):
+        """A clock's font: a card that opens the fonts installed on this computer in a menu."""
+        from . import controls, fonts
+        default = fonts.default()
+        default_text = render.tr("預設") + (" (%s)" % fonts.DEFAULT_NAME if default else "")
+        chosen = widget.get("font") or {}
+        options = [("", default_text)] + [(f["file"] + "|" + f["name"], f["name"]) for f in fonts.installed()]
+        current = (chosen["file"] + "|" + chosen.get("name", "")) if chosen.get("file") else ""
+        value = chosen.get("name") or default_text
+        if chosen.get("file") and kinds.clock_face(chosen) is None:
+            value = render.tr("無法使用：") + value                # gone, or without digits: the default shows
+        return controls.ModeCard(RIGHT_W, "mdi:format-font", "時鐘字體", value, options,
+                                 lambda v, wid=widget["id"]: self.set_font(wid, v), current)
+
+    def set_font(self, widget_id, value):
+        widget = next((w for w in self.widgets() if w["id"] == widget_id), None)
+        if widget is None:
+            return
+        file, _, name = value.partition("|")
+        font = {"file": file, "name": name} if file else None
+        if font and kinds.clock_face(font) is None:
+            return                                # can't be read, or has no digits: kept as it was
+        if font:
+            widget["font"] = font
+        else:
+            widget.pop("font", None)
+        self.close_popup()
+
+        def go():
+            try:
+                self.facade.api.set_widget_font(widget["id"], font)
+            except Exception:
+                traceback.print_exc()
+        threading.Thread(target=go, daemon=True).start()
+        self.build()
+
     def set_size(self, size):
         w = self.settings_widget()
         if not w or w.get("panel") or w["size"] == size or (w.get("kind") or "tiles") != "tiles":
@@ -993,7 +1031,14 @@ class EditorMixin:
             fo.x, fo.y = tx, ty
             body.add(fo)
         y = ty + 28 + 10
-        if kind in kinds.NO_DEVICES:             # a clock, a calendar: nothing to choose
+        if kind == "clock" and widget and not on_panel:      # its digits' font
+            body.add(style.label("group", "字體", x=RIGHT_X, y=y + 5, spacing=0.36))
+            y += 5 + 14.4 + 8
+            card = self.font_card(widget)
+            card.x, card.y = RIGHT_X, y
+            body.add(card)
+            y += card.h + 10
+        if kind in kinds.NO_DEVICES:             # a clock, a calendar: no devices to choose
             body.h = max(left_h, y) + 18
             return body
         # the devices

@@ -82,7 +82,7 @@ carries it over. Add a test that pushes a new state while it is active.
   their bounds (not clipped by a scroll box).
 - Repaints are not free. A self-ticking view stops when its window is hidden. Something that moves every
   second redraws only what moves over a picture kept for the rest (the clock's ring over its face), and moves
-  in a short eased step rather than continuously (`kinds.HAND_MOVE_S`: ~2% of a core against ~7%). Blurs are made at reduced
+  in a short eased step rather than continuously (`kinds.HAND_MOVE_S`: ~3% of a core against ~7%). Blurs are made at reduced
   resolution (`Scene.paint_blurred`). Measure animations with a script before calling them smooth.
 
 ## Checking work

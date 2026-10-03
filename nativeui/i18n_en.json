@@ -289,5 +289,9 @@
  "本機": "This computer",
  "本機播放": "This computer",
  "播放來源": "Play on",
- "已關閉": "Closed"
+ "已關閉": "Closed",
+ "字體": "Font",
+ "時鐘字體": "Clock font",
+ "預設": "Default",
+ "無法使用：": "Unavailable: "
 }

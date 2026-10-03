@@ -180,7 +180,7 @@ def _clean_widget(w, fallback_xy=(200, 200)):
     except (TypeError, ValueError):
         x, y = fallback_xy
     kind = w.get("kind") if w.get("kind") in WIDGET_KINDS else "tiles"
-    return {
+    out = {
         "id": str(w.get("id") or new_widget_id()),
         "size": KIND_SIZE.get(kind) or (size if size in WIDGET_SIZES else DEFAULT_WIDGET_SIZE),
         "x": x,
@@ -188,6 +188,10 @@ def _clean_widget(w, fallback_xy=(200, 200)):
         "tiles": [_migrate_tile(t) for t in (w.get("tiles") or [])],
         "kind": kind,
     }
+    font = w.get("font")
+    if kind == "clock" and isinstance(font, dict) and isinstance(font.get("file"), str) and font["file"]:
+        out["font"] = {"file": font["file"], "name": str(font.get("name") or "")}   # its digits' font
+    return out
 
 
 def sync_legacy(cfg):

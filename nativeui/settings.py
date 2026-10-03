@@ -14,7 +14,7 @@ import hotkey as hotkeymod
 
 from . import render, style, ui
 from .detail import Stack
-from . import kinds
+from . import controls, kinds
 from .editor import EditorMixin
 from .overlay import OverlayScene, create_overlay
 from .ui import Button, CheckRow, Label, Rect, ScrollView, Select, Slider, TextField, View
@@ -239,7 +239,11 @@ class SettingsScene(EditorMixin, OverlayScene):
         if hasattr(self, "url_field"):
             self.fields_text["url"] = self.url_field.value()
             self.fields_text["token"] = self.token_field.value()
-        self.close_popup()
+        # A menu open over the page stays open over the page built again (reattach_menu, below); anything
+        # else floating closes.
+        menu = isinstance(self.popup, (controls.ChoiceMenu, controls.ColorMenu))
+        if not menu:
+            self.close_popup()
         self.root.clear()
         for f in list(self.fields):
             self.fields.remove(f)
@@ -278,6 +282,8 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.request_size()
         for f in self.fields:
             f.place()
+        if menu:
+            controls.reattach_menu(self, self.root)
         self.request_paint()
 
     def mousePressEvent(self, e):
