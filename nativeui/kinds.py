@@ -727,7 +727,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
     button = None
     if kind in NO_DEVICES:
         ink, ink2 = _face(p, W, H, card, theme, dim, tcol, style)
-        now = datetime.datetime.now()
+        now = extras.get("now") or datetime.datetime.now()      # (a picture of it may give its own time)
         if kind == "clock":
             draw_clock(p, W, H, ink, ink2, now, tcol["radius_panel"])
         else:

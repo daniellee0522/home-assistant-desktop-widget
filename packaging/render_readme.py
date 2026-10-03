@@ -6,6 +6,7 @@ No Home Assistant and no desktop capture: the widgets' glass is made from a gene
 same way the windows make it from the screen. The detail-card pictures (docs/detail-*.png) are not
 made here.
 """
+import datetime
 import os
 from pathlib import Path
 import sys
@@ -17,13 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from PIL import Image, ImageDraw, ImageFilter                      # noqa: E402
-from PySide6.QtCore import QRectF, Qt                               # noqa: E402
-from PySide6.QtGui import QImage, QPainter                          # noqa: E402
+from PySide6.QtCore import QPointF, QRectF, Qt                      # noqa: E402
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QRadialGradient  # noqa: E402
 from PySide6.QtWidgets import QApplication                          # noqa: E402
 
 app = QApplication.instance() or QApplication([])
 
-from nativeui import liquid, panel, render, settings               # noqa: E402
+from nativeui import kinds, liquid, panel, render, settings        # noqa: E402
 
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs"
 MARGIN = 21                                         # wallpaper around the card, as on a desktop
@@ -203,9 +204,124 @@ def settings_pictures():
     win.dispose()
 
 
+def banner_wallpaper(w, h):
+    """A soft wallpaper for the banner: a dusk gradient with a few large blurred lights."""
+    img = Image.new("RGB", (w, h))
+    d = ImageDraw.Draw(img)
+    top, bottom = (58, 76, 128), (196, 132, 160)
+    for y in range(h):
+        t = y / h
+        d.line([(0, y), (w, y)], fill=tuple(round(top[i] + (bottom[i] - top[i]) * t) for i in range(3)))
+    for cx, cy, r, color in ((0.18, 0.25, 0.30, (110, 160, 230)), (0.62, 0.75, 0.34, (250, 170, 120)),
+                             (0.86, 0.20, 0.26, (180, 120, 220)), (0.40, 0.95, 0.22, (120, 210, 200))):
+        d.ellipse([w * (cx - r), h * cy - w * r, w * (cx + r), h * cy + w * r], fill=color)
+    return img.filter(ImageFilter.GaussianBlur(w / 14))
+
+
+def demo_cover(side):
+    """An abstract album cover (no real one is shown)."""
+    img = QImage(side, side, QImage.Format_RGB32)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    g = QLinearGradient(0, 0, side, side)
+    g.setColorAt(0, QColor("#ff5f6d"))
+    g.setColorAt(1, QColor("#7b2ff7"))
+    p.fillRect(0, 0, side, side, g)
+    r = QRadialGradient(QPointF(side * 0.7, side * 0.3), side * 0.5)
+    r.setColorAt(0, QColor(255, 220, 120, 220))
+    r.setColorAt(1, QColor(255, 220, 120, 0))
+    p.setBrush(r)
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(QPointF(side * 0.7, side * 0.3), side * 0.5, side * 0.5)
+    p.end()
+    return img
+
+
+def banner_picture(width=1600, height=820, k=2):
+    """The README's banner: widgets laid out as on a desktop (a clock and a calendar over a widget of tiles,
+    a player under it) on the right, the name on the left. Drawn at k times its size."""
+    W, H = width * k, height * k
+    bg = banner_wallpaper(W, H)
+    out = to_qimage(bg)
+    p = QPainter(out)
+    p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+    gap = render.WIDGET_GAP
+    sw, _ = render.widget_size("2x2")
+    tw, th = render.widget_size("2x4")
+    layout = [("clock", "2x2", 0, 0), ("calendar", "2x2", sw + gap, 0), ("tiles", "2x4", 0, th + gap),
+              ("media", "2x4", 0, 2 * (th + gap))]
+    col_h = 3 * th + 2 * gap
+    s = (height - 2 * 70) / col_h                   # css px to banner px
+    ox, oy = width - 90 - tw * s, (height - col_h * s) / 2
+    theme, style = "light", "classic"
+    tcol = render.tokens(theme, False, style)
+    player = {"media_player.living": {"state": "playing", "attributes": {
+        "media_title": "Golden Hour", "media_artist": "Demo Artist", "media_duration": 214, "media_position": 96,
+        "media_position_updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "supported_features": 1 | 2 | 16 | 32 | 16384}}}
+    at = datetime.datetime(2026, 10, 4, 9, 41)       # the time a demo clock shows
+    for kind, size, x, y in layout:
+        w, h = render.widget_size(size)
+        px, py = (ox + x * s) * k, (oy + y * s) * k
+        p.save()
+        # a soft shadow, as the desktop's own
+        p.setPen(Qt.NoPen)
+        for spread, a in ((30, 10), (18, 14), (8, 18)):
+            p.setBrush(QColor(0, 0, 0, a))
+            p.drawPath(render.squircle(px - spread / 2, py - spread / 2 + 10, w * s * k + spread, h * s * k + spread,
+                                       tcol["radius_panel"] * s * k + spread / 2))
+        p.translate(px, py)
+        p.scale(s * k, s * k)
+        if kind == "tiles":
+            behind = bg.crop((round(px), round(py), round(px + w * s * k), round(py + h * s * k)))
+            p.save()
+            p.setClipPath(render.squircle(0, 0, w, h, tcol["radius_panel"]))
+            p.drawImage(QRectF(0, 0, w, h), to_qimage(behind.reduce(8).filter(ImageFilter.GaussianBlur(2))))
+            p.restore()
+            render.draw_widget(p, size, TILES, STATES, theme, None, 1.0, False, style)
+        elif kind == "media":
+            tile = {"id": "m", "entity": "media_player.living", "domain": "media_player", "room": "Living room",
+                    "label": "", "icon": ""}
+            kinds.draw_widget(p, kind, size, [tile], player, theme, 1.0, False, style, None, theme,
+                              {"art": demo_cover(600)})
+        else:
+            kinds.draw_widget(p, kind, size, [], {}, theme, 1.0, False, style, None, theme, {"now": at})
+        p.restore()
+    # the name, on the left
+    p.save()
+    p.scale(k, k)
+    left = 96
+    title = QFont()
+    title.setFamilies(render.FAMILIES)
+    title.setPixelSize(86)
+    title.setWeight(QFont.Bold)
+    p.setFont(title)
+    p.setPen(QColor(255, 255, 255))
+    p.drawText(QRectF(left, 250, ox - left - 40, 110), Qt.AlignLeft | Qt.AlignVCenter, "HA Widgets")
+    sub = QFont(title)
+    sub.setPixelSize(32)
+    sub.setWeight(QFont.Medium)
+    p.setFont(sub)
+    p.setPen(QColor(255, 255, 255, 235))
+    p.drawText(QRectF(left, 368, ox - left - 40, 100), Qt.AlignLeft | Qt.TextWordWrap,
+               "Home Assistant on your Windows desktop")
+    small = QFont(title)
+    small.setPixelSize(22)
+    small.setWeight(QFont.Normal)
+    p.setFont(small)
+    p.setPen(QColor(255, 255, 255, 200))
+    p.drawText(QRectF(left, 470, ox - left - 40, 120), Qt.AlignLeft | Qt.TextWordWrap,
+               "Glass widgets of your devices, a clock, a calendar, the weather, a camera and a player, "
+               "and a tray panel of every room.")
+    p.restore()
+    p.end()
+    return out
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     render.set_language("en")
+    save(banner_picture(), "banner.png")
     for style in ("classic", "liquid", "windows"):
         for theme in ("light", "dark"):
             save(widget_picture("2x4", TILES, theme, style), "theme-%s-%s.png" % (style, theme))

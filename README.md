@@ -1,5 +1,7 @@
 # Home Assistant Desktop Widget for Windows (HA Widgets)
 
+![HA Widgets: a clock, a calendar, device tiles and a player on the Windows desktop](docs/banner.png)
+
 English | [繁體中文](README.zh-TW.md)
 
 Home Assistant controls on your Windows 10/11 desktop. A lightweight desktop

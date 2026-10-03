@@ -1,5 +1,7 @@
 # Home Assistant 桌面小工具（Windows）— HA Widgets
 
+![HA Widgets：Windows 桌面上的時鐘、日曆、配件磁貼與播放器](docs/banner.png)
+
 [English](README.md) | 繁體中文
 
 把 Home Assistant 的控制項放到 Windows 10/11 桌面上。輕量的桌面 widget，
