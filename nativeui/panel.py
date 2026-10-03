@@ -62,7 +62,7 @@ class PanelScene(OverlayScene):
         self.home = None
         # The detail shown over the tiles (open_detail), and the panel's own size without it.
         self.detail = DetailContent(self, lambda: self.prefs, self.states, self.layout_detail,
-                                    on_back=self.close_detail)
+                                    on_close=self.close_detail, area_of=self._area_of)
         self.detail_view = None
         self.base_css = None
         self.configure()
@@ -362,6 +362,11 @@ class PanelScene(OverlayScene):
             self.root.alpha, self.root.zoom, self.root.blur = 1.0, 1.0, 0.0
             gone()
         self.invalidate_glass()
+
+    def _area_of(self, entity_id):
+        """The room a device is in, as the Home panel knows it ("" in the tile panel)."""
+        e = self.model.entity_by_id(entity_id)
+        return (e or {}).get("area") or ""
 
     def _in_detail(self, view):
         v = view

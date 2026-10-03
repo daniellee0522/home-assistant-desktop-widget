@@ -849,6 +849,15 @@ class Api:
                       for i in range(limit)]
         return {"ok": True, "points": points, "hours": hours}
 
+    def get_picture(self, path):
+        """The bytes of a picture from Home Assistant (a song's cover, a camera's view), or None."""
+        if not path:
+            return None
+        try:
+            return self._client.get_bytes(path)
+        except Exception:
+            return None
+
     def call_service(self, domain, service, entity_id, extra):
         try:
             self._client.call_service(domain, service, entity_id, extra or {})

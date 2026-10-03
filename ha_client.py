@@ -97,6 +97,16 @@ class HAClient:
             raw = resp.read()
             return json.loads(raw.decode("utf-8")) if raw else None
 
+    def get_bytes(self, path, timeout=8):
+        """The raw bytes at a path of Home Assistant (a picture: /api/camera_proxy/..., a media player's
+        entity_picture), or at a full URL."""
+        if not self.url:
+            raise RuntimeError("not configured")
+        url = path if path.startswith(("http://", "https://")) else self.url + path
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self.token})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
     def test_connection(self):
         try:
             self._request("/api/")

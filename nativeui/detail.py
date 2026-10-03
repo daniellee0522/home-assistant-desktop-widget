@@ -9,28 +9,18 @@ import threading
 import time
 import traceback
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
-from . import render, ui
+from . import controls, render, ui
 from .overlay import OverlayScene, create_overlay
 from .ui import Button, Label, ScrollView, Slider, TextField, View
 
-CARD_W = 288
-BODY_X, BODY_W = 14, 260
-BODY_MAX = 520
+CARD_W = 320
+BODY_X, BODY_W = 14, 292
+BODY_MAX = 560
 HISTORY_HOURS = 24
 
-ICON_PLAY = "path:M8 5v14l11-7z"
-ICON_PAUSE = "path:M7 5h4v14H7zM13 5h4v14h-4z"
-ICON_PREV = "path:M6 6h2v12H6zM20 6L10 12l10 6z"
-ICON_NEXT = "path:M16 6h2v12h-2zM4 6l10 6-10 6z"
-ICON_GEAR = ("path:M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7zm9 3.5c0 .64-.07 1.26-.19 1.86l2.03 1.58a.75.75 0 01.17.96"
-             "l-1.92 3.32a.75.75 0 01-.91.32l-2.39-.96c-.98.75-1.44.99-2.36 1.32l-.36 2.54a.75.75 0 01-.74.64h-3.84a.75.75"
-             " 0 01-.74-.64l-.36-2.54c-.93-.33-1.38-.57-2.36-1.32l-2.39.96a.75.75 0 01-.91-.32l-1.92-3.32a.75.75 0 01.17-.96"
-             "l2.03-1.58C3.07 13.26 3 12.64 3 12s.07-1.26.19-1.86L1.16 8.56a.75.75 0 01-.17-.96l1.92-3.32a.75.75 0 01.91-.32"
-             "l2.39.96c.98-.75 1.44-.99 2.36-1.32l.36-2.54A.75.75 0 019.67 0h3.84c.37 0 .68.27.74.64l.36 2.54c.93.33 1.38.57"
-             " 2.36 1.32l2.39-.96a.75.75 0 01.91.32l1.92 3.32a.75.75 0 01-.17.96l-2.03 1.58c.12.6.19 1.22.19 1.86z")
 ICON_CHOICES = ["light", "switch", "mdi:air-conditioner", "fan", "mdi:blinds", "mdi:curtains", "media", "monitor",
                 "lock", "door", "mdi:robot-vacuum", "mdi:palette", "script", "mdi:robot",
                 "thermometer", "humidity", "sensor"]
@@ -60,80 +50,6 @@ class Stack:
 
     def end(self):
         return self.y + (self.prev_mb or 0)
-
-
-class AccessoryTile(View):
-    """The large tile at the top of a device's detail: glance, and tap to toggle. On, a colour rises
-    from the bottom (to the brightness, for a light)."""
-    cursor = Qt.PointingHandCursor
-
-    def __init__(self, w, icon, on, pct, color, state_text, on_click):
-        super().__init__(0, 0, w, 150)
-        self.interactive = True
-        self.icon, self.on, self.color, self.state_text = icon, on, color, state_text
-        self.fill = (max(6, pct) if on else 0) / 100.0
-        self.on_click = lambda e: on_click()
-        self.on_press = lambda e: True
-
-    def paint(self, p):
-        t = self.scene.t
-        r = t["radius_tile"] - 26
-        shape = render.squircle(0, 0, self.w, self.h, r)
-        p.setPen(Qt.NoPen)
-        p.setBrush(render.rgba(t["tile_off"]))
-        p.drawPath(shape)
-        p.save()
-        p.setClipPath(shape)
-        if self.fill > 0:
-            p.setBrush(ui.resolve(self.scene, self.color))
-            p.drawRect(QRectF(0, self.h * (1 - self.fill), self.w, self.h * self.fill))
-        p.restore()
-        render.inner_shadow(p, shape, render.rgba(t["edge"]))
-        if t["edge_top"]:
-            render.inner_shadow(p, shape, render.rgba(t["edge_top"]), dy=1, spread=0)
-        render.draw_icon(p, self.icon, "#ffffff", QRectF(16, 16, 36, 36))
-        f = ui.font(17, QFont.DemiBold)
-        fm = ui.QFontMetricsF(f)
-        base = self.h - 14 - fm.descent() / 10 - (1.2 * 17 - fm.height() / 10) / 2
-        p.setBrush(QColor(255, 255, 255))
-        p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.state_text), 16, base))
-
-
-class ToggleSlab(View):
-    """A switch or a lock: the tile is the track, a half-height slab rides from the lower half to the
-    upper, turning white, when on."""
-    cursor = Qt.PointingHandCursor
-
-    def __init__(self, w, icon, on, on_click):
-        super().__init__(0, 0, w, 150)
-        self.interactive = True
-        self.icon, self.on = icon, on
-        self.up = 1.0 if on else 0.0          # 0 low, 1 high; eased when it changes
-        self.on_click = lambda e: on_click()
-        self.on_press = lambda e: True
-
-    def paint(self, p):
-        t = self.scene.t
-        r = t["radius_tile"] - 26
-        shape = render.squircle(0, 0, self.w, self.h, r)
-        p.setPen(Qt.NoPen)
-        p.setBrush(render.rgba(t["tile_off"]))
-        p.drawPath(shape)
-        slab_h = self.h / 2 - 12
-        low, high = self.h - 8 - slab_h, self.h / 2 - 4 - slab_h
-        top = low + (high - low) * self.up
-        rect = QRectF(8, top, self.w - 16, slab_h)
-        k = self.up
-        fill = QColor(round(255 * k), round(255 * k), round(255 * k), round(255 * (0.42 * (1 - k) + k)))
-        fill = QColor(round(255 * k), round(255 * k), round(255 * k)) if k >= 1 else fill
-        p.setBrush(QColor(255, 255, 255) if k >= 1 else QColor(0, 0, 0, round(255 * 0.42 * (1 - k)) + round(255 * k)) if False else fill)
-        p.drawPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), max(4, r - 15)))
-        ink = round(255 - (255 - 29) * k)
-        render.draw_icon(p, self.icon, "#%02x%02x%02x" % (ink, ink, ink if k < 1 else 31),
-                         QRectF(rect.center().x() - 17, rect.center().y() - 17, 34, 34))
-        render.inner_shadow(p, shape, render.rgba(t["edge"]))
-        if t["edge_top"]:
-            render.inner_shadow(p, shape, render.rgba(t["edge_top"]), dy=1, spread=0)
 
 
 class Chart(View):
@@ -185,39 +101,6 @@ class Chart(View):
         p.drawEllipse(QPointF(*xy[-1]), 2.5, 2.5)
 
 
-class ColorRow(View):
-    """'Colour' and a swatch that opens the colour dialog."""
-
-    def __init__(self, w, rgb, on_pick):
-        super().__init__(0, 0, w, 32)
-        self.interactive = True
-        self.rgb, self.on_pick = rgb, on_pick
-        self.cursor = Qt.PointingHandCursor
-        self.on_click = lambda e: self._pick()
-
-    def _pick(self):
-        from PySide6.QtWidgets import QColorDialog
-        c = QColorDialog.getColor(QColor(*self.rgb), self.scene, render.tr("顏色"))
-        if c.isValid():
-            self.rgb = (c.red(), c.green(), c.blue())
-            self.on_pick(list(self.rgb))
-            self.changed()
-
-    def paint(self, p):
-        f = ui.font(13)
-        fm = ui.QFontMetricsF(f)
-        p.setPen(Qt.NoPen)
-        p.setBrush(ui.resolve(self.scene, "ink1"))
-        p.drawPath(render.text_path(QPointF(0, 0), f, render.tr("顏色"), 0, (self.h - fm.height() / 10) / 2 + fm.ascent() / 10))
-        box = QRectF(self.w - 44, 0, 44, 32)
-        p.setBrush(ui.resolve(self.scene, "input_bg"))
-        p.setPen(QPen(ui.resolve(self.scene, "input_border"), 1))
-        p.drawRoundedRect(box, 8, 8)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(*self.rgb))
-        p.drawRoundedRect(box.adjusted(3, 3, -3, -3), 5, 5)
-
-
 class DetailContent:
     """What the detail of one tile shows, as views: its name and state, the gear for the edit panel, and the
     controls of its kind of device (DETAIL) or the edit panel. The detail card window (DetailCard) holds one,
@@ -225,14 +108,17 @@ class DetailContent:
 
     host: the Scene it is drawn in (its fields, its api). prefs: a callable giving the preferences now.
     states: the host's states, by entity. rebuilt: called when what is shown must be built again.
-    on_back: when given, a back button at the top-left calls it."""
+    on_close: what the x at the top-left does. area_of: the room of an entity, said above its name."""
 
-    def __init__(self, host, prefs, states, rebuilt, on_back=None):
+    def __init__(self, host, prefs, states, rebuilt, on_close=None, area_of=None):
         self.host, self.api = host, host.api
-        self._prefs, self.states, self.rebuilt, self.on_back = prefs, states, rebuilt, on_back
+        self._prefs, self.states, self.rebuilt = prefs, states, rebuilt
+        self.on_close, self.area_of = on_close, area_of
         self.tile = None
         self.edit = False
         self.history_token = 0
+        self.choice = None                  # the mode card whose choices are open
+        self.light_view = "brightness"      # what a light's tall slider sets: brightness or "temp"
 
     @property
     def prefs(self):
@@ -265,7 +151,17 @@ class DetailContent:
         """Show this tile (False when there is no such tile)."""
         self.tile = self.find_tile(tile_id)
         self.edit = False
+        self.choice = None
+        self.light_view = "brightness"
         return self.tile is not None
+
+    def set_choice(self, key):
+        self.choice = None if self.choice == key else key
+        self.rebuilt()
+
+    def set_light_view(self, view):
+        self.light_view = view
+        self.rebuilt()
 
     def prefs_changed(self):
         """The preferences were replaced: the tile is read again. True when it should be built again (not
@@ -301,18 +197,21 @@ class DetailContent:
         out = View(0, 0, CARD_W, 0)
         state = self.states.get(tile["entity"])
         title = tile.get("room") or ((state or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
+        # the header: close, where it is and what it is, the edit panel
         left = 18
-        if self.on_back is not None:
-            back = Button("‹", x=12, y=16 + (40.8 - 32) / 2, w=32, h=32, size=20, on_click=lambda e: self.on_back())
-            out.add(back)
-            left = 12 + 32 + 8
-        out.add(Label(title, 19.5, QFont.Bold, "ink1", x=left, y=16, w=CARD_W - left - 16 - 32 - 8,
-                      overflow="ellipsis"))
-        out.add(Label(state["state"] if state else "無法連線", 14.5, QFont.Normal, "ink2", x=left, y=16 + 23.4))
-        out.add(Button(x=CARD_W - 16 - 32, y=16 + (40.8 - 32) / 2, w=32, h=32, icon=ICON_GEAR, icon_size=18,
-                       on_click=lambda e: self.set_edit(not self.edit), active=self.edit, active_fill="btn_fill_strong",
-                       active_color="btn_text"))
-        top = 16 + 40.8 + 10
+        if self.on_close is not None:
+            out.add(Button(x=10, y=12, w=36, h=36, icon="mdi:close", icon_size=22, fill=None, hover_fill="btn_fill",
+                           on_click=lambda e: self.on_close()))
+            left = 10 + 36 + 6
+        area = self.area_of(tile["entity"]) if self.area_of else ""
+        tw = CARD_W - left - 10 - 36 - 8
+        if area:
+            out.add(Label(area, 12.5, QFont.Normal, "ink2", x=left, y=10, w=tw, overflow="ellipsis"))
+        out.add(Label(title, 19.5, QFont.Bold, "ink1", x=left, y=26 if area else 18, w=tw, overflow="ellipsis"))
+        out.add(Button(x=CARD_W - 10 - 36, y=12, w=36, h=36, icon="mdi:cog", icon_size=20, fill=None,
+                       hover_fill="btn_fill", on_click=lambda e: self.set_edit(not self.edit), active=self.edit,
+                       active_fill="btn_fill_strong", active_color="btn_text"))
+        top = 60
         body = View(0, 0, BODY_W, 0)
         stack = Stack(body, 0, 4, BODY_W)
         if self.edit:
@@ -329,31 +228,6 @@ class DetailContent:
         out.h = top + shown_h
         self.body_scroll = scroll
         return out
-
-    # -- helpers for the builders ----------------------------------------------------------------------------
-    def slider_block(self, stack, label, value, lo, hi, unit, on_commit, step=1):
-        block = View(0, 0, BODY_W, 20 + 6 + 12)
-        value_label = Label("%s%s" % (trim_number(value), unit), 15, QFont.Normal, "ink2", w=BODY_W, align="r")
-        block.add(Label(label, 15, QFont.Normal, "ink2", w=BODY_W))
-        block.add(value_label)
-        for lab in block.children:
-            lab.y = 0
-        slider = Slider(0, 20 + 6 - 5, BODY_W, value, lo, hi, step,
-                        on_input=lambda v: setattr(value_label, "text", "%s%s" % (trim_number(v), unit)),
-                        on_commit=on_commit)
-        block.add(slider)
-        stack.place(block, 14, 14)
-
-    def seg_row(self, stack, items):
-        """items: [(label, on_click, active)]: equal capsules in a row."""
-        n = len(items)
-        gap = 8
-        w = (BODY_W - gap * (n - 1)) / n
-        row = View(0, 0, BODY_W, 38)
-        for i, (label, click, active) in enumerate(items):
-            row.add(Button(label, x=i * (w + gap), y=0, w=w, h=38, size=15.5, weight=QFont.Normal, active=active,
-                           on_click=lambda e, c=click: c()))
-        stack.place(row, 10, 10)
 
     # -- the edit panel ----------------------------------------------------------------------------------------
     def set_edit(self, on):
@@ -456,7 +330,7 @@ class DetailCard(OverlayScene):
         self.lensed = False                       # the lens belongs to the widget: this is a quiet pane
         self.prefs = api._prefs()
         self.states = {}
-        self.content = DetailContent(self, lambda: self.prefs, self.states, self.rebuild)
+        self.content = DetailContent(self, lambda: self.prefs, self.states, self.rebuild, on_close=self.close_card)
         self.owner = None
         self.seq = 0
         self.arm_event = None
@@ -621,147 +495,341 @@ class DetailCard(OverlayScene):
 
 
 # ------------------------------------------------------------------------------------------------------------
-# what each kind of device shows
+# what each kind of device shows (after Home Assistant's more-info dialogs)
 # ------------------------------------------------------------------------------------------------------------
+
+STATE_TEXT = {
+    "lock": {"locked": "已上鎖", "unlocked": "已解鎖", "jammed": "卡住了", "locking": "上鎖中", "unlocking": "解鎖中",
+             "open": "已開啟", "opening": "開啟中"},
+    "cover": {"open": "開啟", "closed": "關閉", "opening": "開啟中", "closing": "關閉中"},
+    "vacuum": {"cleaning": "清掃中", "docked": "已回充", "returning": "回充中", "paused": "已暫停", "idle": "待命",
+               "error": "錯誤"},
+}
+TALL_W, TALL_H = 120, 220
+
 
 def _attrs(state):
     return (state or {}).get("attributes") or {}
 
 
+def centered(stack, view, mt=0, mb=0):
+    """A view in the middle of the body's width."""
+    row = View(0, 0, BODY_W, view.h)
+    view.x, view.y = (BODY_W - view.w) / 2, 0
+    row.add(view)
+    return stack.place(row, mt, mb)
+
+
+def big_value(stack, text, state, mt=6):
+    """The state, large, and how long ago it changed; the label is returned to follow a slider."""
+    label = Label(text, 40, QFont.Normal, "ink1", w=BODY_W, align="c")
+    stack.place(label, mt, 2)
+    since = controls.ago((state or {}).get("last_changed"))
+    if since:
+        stack.place(Label(since, 13.5, QFont.DemiBold, "ink2", w=BODY_W, align="c"), 0, 14)
+    return label
+
+
+def cards(card, stack, items):
+    """Mode cards two to a row; the open one lists its choices under them.
+    items: [(key, icon, title, current label, [(value, label)], on_pick)]."""
+    if not items:
+        return
+    gap = 10
+    w = (BODY_W - gap) / 2 if len(items) > 1 else min(BODY_W, 190)
+    for i in range(0, len(items), 2):
+        row = View(0, 0, BODY_W, 62)
+        pair = items[i:i + 2]
+        left = (BODY_W - (len(pair) * w + (len(pair) - 1) * gap)) / 2
+        for j, (key, icon, title, value, options, pick) in enumerate(pair):
+            mc = controls.ModeCard(w, icon, title, value, lambda k=key: card.set_choice(k), open_=card.choice == key)
+            mc.x = left + j * (w + gap)
+            row.add(mc)
+        stack.place(row, 8, 8)
+        for key, icon, title, value, options, pick in pair:
+            if card.choice != key:
+                continue
+            wrap = View(0, 0, BODY_W, 0)
+            x = y = 0
+            for val, lab in options:
+                b = Button(lab, size=14, weight=QFont.Medium, h=36, pad=14, active=lab == value,
+                           on_click=lambda e, v=val: (card.set_choice(None), pick(v)))
+                if x and x + b.w > BODY_W:
+                    x, y = 0, y + 36 + 8
+                b.x, b.y = x, y
+                wrap.add(b)
+                x += b.w + 8
+            wrap.h = y + 36
+            stack.place(wrap, 4, 10)
+
+
 def _toggle(domain):
     def build(card, stack, tile, state):
         on = bool(state) and state.get("state") == "on"
-        icon = render.icon_name(tile, state)
-        slab = ToggleSlab(BODY_W, icon, on, lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
-                                                    card.call(domain, "toggle", tile["entity"])))
-        stack.place(slab, 8, 16)
+        big_value(stack, "開啟" if on else "關閉", state)
+        centered(stack, controls.TallSwitch(TALL_W, TALL_H, on, "accent_yellow", render.icon_name(tile, state),
+                                            lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
+                                                     card.call(domain, "toggle", tile["entity"]))), 4, 16)
     return build
 
 
 def build_light(card, stack, tile, state):
     attrs = _attrs(state)
     on = bool(state) and state.get("state") == "on"
-    pct = round(attrs["brightness"] / 255 * 100) if attrs.get("brightness") is not None else 100
-    color = "rgb(%d,%d,%d)" % tuple(attrs["rgb_color"][:3]) if isinstance(attrs.get("rgb_color"), list) else "accent_yellow"
-    icon = tile.get("icon") or render.DEFAULT_ICON["light"]
-    stack.place(AccessoryTile(BODY_W, icon, on, pct, color, ("%d%%" % pct) if on else "關閉",
-                              lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
-                                       card.call("light", "toggle", tile["entity"]))), 8, 16)
-    if not on:
-        return
-    if attrs.get("brightness") is not None:
-        card.slider_block(stack, "亮度", pct, 1, 100, "%",
-                          lambda v: card.call("light", "turn_on", tile["entity"], {"brightness_pct": int(v)}))
+    entity = tile["entity"]
+    pct = round(attrs["brightness"] / 255 * 100) if attrs.get("brightness") is not None else (100 if on else 0)
     modes = attrs.get("supported_color_modes") or []
-    if "color_temp" in modes:
-        try:
-            lo, hi = float(attrs["min_color_temp_kelvin"]), float(attrs["max_color_temp_kelvin"])
-        except (KeyError, TypeError, ValueError):
-            lo = hi = 0
-        if lo > 0 and hi > lo:
-            cur = attrs.get("color_temp_kelvin")
-            val = cur if isinstance(cur, (int, float)) and lo <= cur <= hi else round((lo + hi) / 2)
-            card.slider_block(stack, "色溫", val, lo, hi, "K",
-                              lambda v: card.call("light", "turn_on", tile["entity"], {"color_temp_kelvin": int(v)}))
+    rgb = attrs.get("rgb_color") if isinstance(attrs.get("rgb_color"), list) else None
+    color = "rgb(%d,%d,%d)" % tuple(rgb[:3]) if rgb else "accent_yellow"
+    temps = "color_temp" in modes
+    try:
+        lo_k, hi_k = float(attrs["min_color_temp_kelvin"]), float(attrs["max_color_temp_kelvin"])
+    except (KeyError, TypeError, ValueError):
+        lo_k = hi_k = 0.0
+    temps = temps and lo_k > 0 and hi_k > lo_k
+    view = card.light_view if (card.light_view != "temp" or (temps and on)) else "brightness"
+    label = big_value(stack, ("%d%%" % pct) if on else "關閉", state)
+    if view == "temp":
+        cur = attrs.get("color_temp_kelvin")
+        val = cur if isinstance(cur, (int, float)) and lo_k <= cur <= hi_k else round((lo_k + hi_k) / 2)
+        warm, cool = kelvin_css(lo_k), kelvin_css(hi_k)
+        slider = controls.TallSlider(TALL_W, TALL_H, val, lo_k, hi_k, color, step=50,
+                                     gradient=[(0, warm), (1, cool)],
+                                     on_input=lambda v: setattr(label, "text", "%dK" % v),
+                                     on_commit=lambda v: card.call("light", "turn_on", entity, {"color_temp_kelvin": int(v)}))
+    else:
+        def commit(v):
+            if v <= 0:
+                card.optimistic(entity, {"state": "off"})
+                card.call("light", "turn_off", entity)
+            else:
+                card.call("light", "turn_on", entity, {"brightness_pct": int(v)})
+        slider = controls.TallSlider(TALL_W, TALL_H, pct if on else 0, 0, 100, color,
+                                     on_input=lambda v: setattr(label, "text", ("%d%%" % v) if v else render.tr("關閉")),
+                                     on_commit=commit)
+    centered(stack, slider, 4, 14)
+    bar = [("mdi:power", False, lambda: (card.optimistic(entity, {"state": "off" if on else "on"}),
+                                        card.call("light", "toggle", entity))),
+           ("mdi:brightness6", view == "brightness", lambda: card.set_light_view("brightness"))]
+    if temps and on:
+        bar.append(("mdi:thermometer", view == "temp", lambda: card.set_light_view("temp")))
+    centered(stack, controls.ModeBar(bar), 4, 14)
+    swatches = []
+    if temps:
+        for k in (2700, 3500, 4500, 6000):
+            k = max(lo_k, min(hi_k, k))
+            swatches.append((kelvin_css(k), ("k", int(k))))
     if any(m in modes for m in ("hs", "rgb", "rgbw", "rgbww", "xy")):
-        rgb = tuple(attrs.get("rgb_color") or (255, 255, 255))[:3]
-        stack.place(ColorRow(BODY_W, rgb, lambda c: card.call("light", "turn_on", tile["entity"], {"rgb_color": c})), 10, 10)
+        swatches.append(("rainbow", ("pick", None)))
+
+    def pick(value):
+        kind, v = value
+        if kind == "k":
+            card.call("light", "turn_on", entity, {"color_temp_kelvin": v})
+        else:
+            from PySide6.QtWidgets import QColorDialog
+            c = QColorDialog.getColor(QColor(*(tuple(rgb[:3]) if rgb else (255, 255, 255))), card.host,
+                                      render.tr("顏色"))
+            if c.isValid():
+                card.call("light", "turn_on", entity, {"rgb_color": [c.red(), c.green(), c.blue()]})
+    if swatches:
+        stack.place(controls.Swatches(BODY_W, swatches, pick), 4, 14)
+    effects = attrs.get("effect_list") or []
+    if effects and on:
+        cards(card, stack, [("effect", "mdi:auto-fix", "特效", attrs.get("effect") or "無",
+                             [(e, e) for e in effects],
+                             lambda v: card.call("light", "turn_on", entity, {"effect": v}))])
+
+
+def kelvin_css(k):
+    return "rgb(%d,%d,%d)" % controls.kelvin_rgb(k)
 
 
 def build_fan(card, stack, tile, state):
     attrs = _attrs(state)
     on = bool(state) and state.get("state") == "on"
-    pct = attrs.get("percentage") if attrs.get("percentage") is not None else 100
-    icon = tile.get("icon") or render.DEFAULT_ICON["fan"]
-    stack.place(AccessoryTile(BODY_W, icon, on, pct, "accent_blue", ("%d%%" % pct) if on else "關閉",
-                              lambda: (card.optimistic(tile["entity"], {"state": "off" if on else "on"}),
-                                       card.call("fan", "toggle", tile["entity"]))), 8, 16)
-    if on and attrs.get("percentage") is not None:
-        card.slider_block(stack, "風速", attrs["percentage"], 0, 100, "%",
-                          lambda v: card.call("fan", "set_percentage", tile["entity"], {"percentage": int(v)}), 10)
+    entity = tile["entity"]
+    if attrs.get("percentage") is None:
+        return _toggle("fan")(card, stack, tile, state)
+    pct = attrs["percentage"] if on else 0
+    label = big_value(stack, ("%d%%" % pct) if on else "關閉", state)
+
+    def commit(v):
+        if v <= 0:
+            card.optimistic(entity, {"state": "off"})
+            card.call("fan", "turn_off", entity)
+        else:
+            card.call("fan", "set_percentage", entity, {"percentage": int(v)})
+    step = attrs.get("percentage_step") or 1
+    centered(stack, controls.TallSlider(TALL_W, TALL_H, pct, 0, 100, "accent_blue", step=step,
+                                        on_input=lambda v: setattr(label, "text", ("%d%%" % v) if v else render.tr("關閉")),
+                                        on_commit=commit), 4, 14)
+    centered(stack, controls.ModeBar([("mdi:power", on, lambda: (card.optimistic(entity, {"state": "off" if on else "on"}),
+                                                                 card.call("fan", "toggle", entity)))]), 4, 14)
+    presets = attrs.get("preset_modes") or []
+    if presets:
+        cards(card, stack, [("preset", "mdi:fan", "預設模式", attrs.get("preset_mode") or "無",
+                             [(p, p) for p in presets],
+                             lambda v: card.call("fan", "set_preset_mode", entity, {"preset_mode": v}))])
 
 
 def build_lock(card, stack, tile, state):
-    open_ = render.is_unlocked(state)
-    slab = ToggleSlab(BODY_W, render.icon_name(tile, state), open_,
-                      lambda: (card.optimistic(tile["entity"], {"state": "locked" if open_ else "unlocked"}),
-                               card.call("lock", "lock" if open_ else "unlock", tile["entity"])))
-    stack.place(slab, 8, 16)
+    s = (state or {}).get("state")
+    locked = s == "locked"
+    big_value(stack, STATE_TEXT["lock"].get(s, s or "無法連線"), state)
+    centered(stack, controls.TallSwitch(TALL_W, TALL_H, locked, "accent_green",
+                                        "mdi:lock" if locked else "mdi:lock-open-variant",
+                                        lambda: (card.optimistic(tile["entity"], {"state": "unlocked" if locked else "locked"}),
+                                                 card.call("lock", "unlock" if locked else "lock", tile["entity"]))), 4, 16)
 
 
 def build_climate(card, stack, tile, state):
     attrs = _attrs(state)
-    modes = attrs.get("hvac_modes") or ["off", "cool", "heat", "auto"]
+    entity = tile["entity"]
+    mode = (state or {}).get("state") or "off"
     target, current = attrs.get("temperature"), attrs.get("current_temperature")
-    big = Label("%s°" % (trim_number(target) if target is not None else "--"), 40, QFont.Bold, "ink1", w=BODY_W, align="c")
-    stack.place(big, 4, 4)
-    stack.place(Label(("目前 %s°" % trim_number(current)) if current is not None else "", 12.5, QFont.Normal, "ink2",
-                      w=BODY_W, align="c"), 0, 10)
-    step = float(tile.get("temp_step") or 1)
+    humidity = attrs.get("current_humidity")
+    # the room: temperature and humidity, side by side
+    readings = [(lab, val) for lab, val in (("目前溫度", None if current is None else "%s°" % trim_number(current)),
+                                            ("目前濕度", None if humidity is None else "%s%%" % trim_number(humidity)))
+                if val is not None]
+    if readings:
+        row = View(0, 0, BODY_W, 44)
+        w = BODY_W / len(readings)
+        for i, (lab, val) in enumerate(readings):
+            row.add(Label(lab, 13, QFont.Medium, "ink2", x=i * w, y=0, w=w, align="c"))
+            row.add(Label(val, 19, QFont.Bold, "ink1", x=i * w, y=18, w=w, align="c"))
+        stack.place(row, 2, 8)
+    step = float(attrs.get("target_temp_step") or tile.get("temp_step") or 1)
+    lo, hi = float(attrs.get("min_temp") or 7), float(attrs.get("max_temp") or 35)
+
+    def commit(v):
+        card.optimistic(entity, {"attributes": dict(attrs, temperature=v)})
+        card.call("climate", "set_temperature", entity, {"temperature": v})
+    dial = controls.Dial(236, target, lo, hi, step, current, HVAC_LABELS.get(mode, mode),
+                         None if mode == "off" else render.HVAC_COLORS.get(mode, "accent_cyan"), on_commit=commit)
+    centered(stack, dial, 0, 0)
 
     def stepper(delta):
-        if target is None:
-            return
-        nxt = round((target + delta) * 10) / 10
-        card.optimistic(tile["entity"], {"attributes": dict(attrs, temperature=nxt)})
-        card.call("climate", "set_temperature", tile["entity"], {"temperature": nxt})
-    row = View(0, 0, BODY_W, 46)
-    row.add(Button("−", x=BODY_W / 2 - 11 - 46, w=46, h=46, size=22, on_click=lambda e: stepper(-step)))
-    row.add(Button("+", x=BODY_W / 2 + 11, w=46, h=46, size=22, on_click=lambda e: stepper(step)))
-    stack.place(row, 8, 16)
-    card.seg_row(stack, [(HVAC_LABELS.get(m, m),
-                          (lambda m=m: (card.optimistic(tile["entity"], {"state": m}),
-                                        card.call("climate", "set_hvac_mode", tile["entity"], {"hvac_mode": m}))),
-                          bool(state) and state.get("state") == m) for m in modes])
+        if target is not None:
+            commit(max(lo, min(hi, round((target + delta) * 10) / 10)))
+    row = View(0, 0, BODY_W, 52)
+    for i, (sign, delta) in enumerate((("mdi:minus", -step), ("mdi:plus", step))):
+        b = Button(x=BODY_W / 2 + (-12 - 52 if i == 0 else 12), y=0, w=52, h=52, icon=sign, icon_size=22,
+                   fill=None, ring="ink2", hover_fill="btn_fill", on_click=lambda e, d=delta: stepper(d))
+        row.add(b)
+    stack.place(row, 0, 14)
+    items = [("hvac", "mdi:power" if mode == "off" else "mdi:thermostat", "模式", HVAC_LABELS.get(mode, mode),
+              [(m, HVAC_LABELS.get(m, m)) for m in (attrs.get("hvac_modes") or ["off", "cool", "heat", "auto"])],
+              lambda m: (card.optimistic(entity, {"state": m}),
+                         card.call("climate", "set_hvac_mode", entity, {"hvac_mode": m})))]
+    if attrs.get("fan_modes"):
+        items.append(("fan", "mdi:fan", "風速模式", FAN_LABELS.get(attrs.get("fan_mode"), attrs.get("fan_mode") or "無"),
+                      [(m, FAN_LABELS.get(m, m)) for m in attrs["fan_modes"]],
+                      lambda m: card.call("climate", "set_fan_mode", entity, {"fan_mode": m})))
+    if attrs.get("preset_modes"):
+        items.append(("preset", "mdi:tune-variant", "預設模式", attrs.get("preset_mode") or "無",
+                      [(m, m) for m in attrs["preset_modes"]],
+                      lambda m: card.call("climate", "set_preset_mode", entity, {"preset_mode": m})))
+    cards(card, stack, items)
+
+
+FAN_LABELS = {"auto": "自動", "low": "低", "medium": "中", "high": "高", "middle": "中", "silent": "靜音",
+              "quiet": "靜音", "turbo": "強力", "strong": "強"}
 
 
 def build_cover(card, stack, tile, state):
     attrs = _attrs(state)
-    s = state.get("state") if state else ""
-    card.seg_row(stack, [
-        ("開", lambda: card.call("cover", "open_cover", tile["entity"]), s == "open"),
-        ("停", lambda: card.call("cover", "stop_cover", tile["entity"]), False),
-        ("關", lambda: card.call("cover", "close_cover", tile["entity"]), s == "closed")])
-    if attrs.get("current_position") is not None:
-        card.slider_block(stack, "開合程度", attrs["current_position"], 0, 100, "%",
-                          lambda v: card.call("cover", "set_cover_position", tile["entity"], {"position": int(v)}))
+    entity = tile["entity"]
+    s = (state or {}).get("state") or ""
+    pos = attrs.get("current_position")
+    label = big_value(stack, ("%d%%" % pos) if pos is not None else STATE_TEXT["cover"].get(s, s or "無法連線"), state)
+    if pos is not None:
+        centered(stack, controls.TallSlider(TALL_W, TALL_H, pos, 0, 100, "accent_blue",
+                                            on_input=lambda v: setattr(label, "text", "%d%%" % v),
+                                            on_commit=lambda v: card.call("cover", "set_cover_position", entity,
+                                                                         {"position": int(v)})), 4, 14)
+    centered(stack, controls.ModeBar([
+        ("mdi:arrow-up", s == "open", lambda: card.call("cover", "open_cover", entity)),
+        ("mdi:stop", False, lambda: card.call("cover", "stop_cover", entity)),
+        ("mdi:arrow-down", s == "closed", lambda: card.call("cover", "close_cover", entity))]), 4, 14)
 
 
 def build_media(card, stack, tile, state):
     attrs = _attrs(state)
-    if attrs.get("media_title"):
-        stack.place(Label(" · ".join(x for x in (attrs.get("media_title"), attrs.get("media_artist")) if x),
-                          12.5, QFont.Normal, "ink2", w=BODY_W, align="c", wrap=True), 0, 10)
-    playing = bool(state) and state.get("state") == "playing"
-    row = View(0, 0, BODY_W, 56)
-    centre = BODY_W / 2
-    row.add(Button(x=centre - 28 - 18 - 40, y=8, w=40, h=40, icon=ICON_PREV, icon_size=20,
-                   on_click=lambda e: card.call("media_player", "media_previous_track", tile["entity"])))
-    row.add(Button(x=centre - 28, y=0, w=56, h=56, icon=ICON_PAUSE if playing else ICON_PLAY, icon_size=24,
-                   on_click=lambda e: card.call("media_player", "media_play_pause", tile["entity"])))
-    row.add(Button(x=centre + 28 + 18, y=8, w=40, h=40, icon=ICON_NEXT, icon_size=20,
-                   on_click=lambda e: card.call("media_player", "media_next_track", tile["entity"])))
-    stack.place(row, 8, 16)
+    entity = tile["entity"]
+    s = (state or {}).get("state") or ""
+    playing = s == "playing"
+    art = attrs.get("entity_picture")
+    centered(stack, controls.Picture(196, 196, art, card.api.get_picture, card.run_on_ui_thread), 4, 16)
+    title = attrs.get("media_title") or STATE_TEXT.get("media", {}).get(s) or s
+    stack.place(Label(title, 19, QFont.Bold, "ink1", w=BODY_W, overflow="ellipsis"), 0, 2)
+    artist = attrs.get("media_artist") or attrs.get("app_name") or ""
+    if artist:
+        stack.place(Label(artist, 14, QFont.Normal, "ink2", w=BODY_W, overflow="ellipsis"), 0, 10)
+    if attrs.get("media_duration"):
+        stack.place(controls.Progress(BODY_W, attrs.get("media_position"), attrs.get("media_position_updated_at"),
+                                      attrs.get("media_duration"), playing), 6, 6)
+    row = View(0, 0, BODY_W, 64)
+    buttons = []
+    if "shuffle" in attrs:
+        buttons.append((40, "mdi:shuffle-variant" if attrs.get("shuffle") else "mdi:shuffle-disabled",
+                        lambda: card.call("media_player", "shuffle_set", entity, {"shuffle": not attrs.get("shuffle")})))
+    buttons.append((44, "mdi:skip-previous", lambda: card.call("media_player", "media_previous_track", entity)))
+    buttons.append((64, "mdi:pause" if playing else "mdi:play",
+                    lambda: (card.optimistic(entity, {"state": "paused" if playing else "playing"}),
+                             card.call("media_player", "media_play_pause", entity))))
+    buttons.append((44, "mdi:skip-next", lambda: card.call("media_player", "media_next_track", entity)))
+    if "repeat" in attrs:
+        nxt = {"off": "all", "all": "one", "one": "off"}.get(attrs.get("repeat"), "off")
+        buttons.append((40, {"one": "mdi:repeat-once", "all": "mdi:repeat"}.get(attrs.get("repeat"), "mdi:repeat-off"),
+                        lambda: card.call("media_player", "repeat_set", entity, {"repeat": nxt})))
+    gap = 12
+    x = (BODY_W - (sum(b[0] for b in buttons) + gap * (len(buttons) - 1))) / 2
+    for size, icon, click in buttons:
+        big = size == 64
+        row.add(Button(x=x, y=(64 - size) / 2, w=size, h=size, icon=icon, icon_size=28 if big else 22,
+                       fill="accent_blue" if big else None, hover_fill="accent_blue" if big else "btn_fill",
+                       color="white" if big else "ink1", on_click=lambda e, c=click: c()))
+        x += size + gap
+    stack.place(row, 8, 8)
     if attrs.get("volume_level") is not None:
-        card.slider_block(stack, "音量", round(attrs["volume_level"] * 100), 0, 100, "%",
-                          lambda v: card.call("media_player", "volume_set", tile["entity"], {"volume_level": v / 100}))
+        vol = View(0, 0, BODY_W, 30)
+        muted = attrs.get("is_volume_muted")
+        vol.add(Button(x=0, y=0, w=30, h=30, icon="mdi:volume-off" if muted else "mdi:volume-high", icon_size=18, fill=None,
+                       hover_fill="btn_fill",
+                       on_click=lambda e: card.call("media_player", "volume_mute", entity, {"is_volume_muted": not muted})))
+        vol.add(Slider(40, 4, BODY_W - 40, round(attrs["volume_level"] * 100), 0, 100, 1,
+                       on_commit=lambda v: card.call("media_player", "volume_set", entity, {"volume_level": v / 100})))
+        stack.place(vol, 6, 10)
+    items = []
+    if attrs.get("source_list"):
+        items.append(("source", "mdi:import", "來源", attrs.get("source") or "無", [(x, x) for x in attrs["source_list"]],
+                      lambda v: card.call("media_player", "select_source", entity, {"source": v})))
+    off = s in ("off", "standby", "")
+    items.append(("power", "mdi:power", "電源", "關閉" if off else "開啟", [("on", "開啟"), ("off", "關閉")],
+                  lambda v: card.call("media_player", "turn_on" if v == "on" else "turn_off", entity)))
+    cards(card, stack, items)
 
 
 def build_vacuum(card, stack, tile, state):
     s = state.get("state") if state else ""
     cleaning = s == "cleaning"
-    card.seg_row(stack, [
-        ("暫停" if cleaning else "開始",
-         lambda: card.call("vacuum", "pause" if cleaning else "start", tile["entity"]), cleaning),
-        ("回充", lambda: card.call("vacuum", "return_to_base", tile["entity"]), s == "returning")])
+    big_value(stack, STATE_TEXT["vacuum"].get(s, s or "無法連線"), state)
+    centered(stack, controls.ModeBar([
+        ("mdi:pause" if cleaning else "mdi:play", cleaning,
+         lambda: card.call("vacuum", "pause" if cleaning else "start", tile["entity"])),
+        ("mdi:home-import-outline", s == "returning", lambda: card.call("vacuum", "return_to_base", tile["entity"]))]),
+        8, 14)
 
 
 def build_readout(card, stack, tile, state):
     """Devices with no controls: the reading, large, and its history when it is a number."""
     text = (render.value_text(tile["domain"], state) or state["state"]) if state else "無法連線"
     stack.place(Label(text, 38, QFont.Bold, "ink1", w=BODY_W - 8, align="c", wrap=True, any_break=True), 22, 0)
-    stack.place(Label(tile["entity"], 13, QFont.Normal, "ink2", w=BODY_W - 8, align="c", wrap=True, any_break=True), 6, 8)
-    stack.y += 0
+    since = controls.ago((state or {}).get("last_changed"))
+    stack.place(Label(since or tile["entity"], 13, QFont.Normal, "ink2", w=BODY_W - 8, align="c", wrap=True,
+                      any_break=True), 6, 8)
     try:
         numeric = bool(state) and float(state["state"]) == float(state["state"])
     except (TypeError, ValueError):

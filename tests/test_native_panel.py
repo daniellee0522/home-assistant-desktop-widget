@@ -80,6 +80,9 @@ class FakeApi:
         self.calls.append(a)
         return {"ok": True}
 
+    def get_picture(self, path):
+        return None
+
     def get_history(self, e, h):
         return {"ok": True, "points": [[i, 20 + i] for i in range(10)]}
 
@@ -250,7 +253,7 @@ class Card(unittest.TestCase):
         sliders = []
 
         def walk(v):
-            if v.__class__.__name__ == "Slider":
+            if v.__class__.__name__ == "TallSlider":
                 sliders.append(v)
             for c in v.children:
                 walk(c)
