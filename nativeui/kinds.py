@@ -397,18 +397,28 @@ def _on_ring(points, cx, cy, angle):
     return cx + dx * best, cy + dy * best
 
 
-_has_sf = None
+# The clock's faces, best first: (family, weight). Apple's, so used only where installed (they may not be
+# shipped with the app); else the app's own face, black, as the clock first had.
+CLOCK_FACES = (("SF Pro Display", QFont.Medium), ("SF Compact Rounded", QFont.Normal))
+_clock_face = False
 
 
 def clock_font(px):
-    """The clock's digits: SF Compact Rounded Regular where it is installed (Apple's, which may not be shipped
-    with the app), else the app's own face, black, as the clock first had."""
-    global _has_sf
-    f = render.font(px, QFont.Normal)
-    f.setFamilies(["SF Compact Rounded"])
-    if _has_sf is None:                                 # (asked once: installing it takes a restart to show)
-        _has_sf = QFontInfo(f).family().startswith("SF Compact Rounded")
-    return f if _has_sf else render.font(px, QFont.Black)
+    """The clock's digits in the first of CLOCK_FACES that is installed."""
+    global _clock_face
+    if _clock_face is False:                            # (asked once: installing one takes a restart to show)
+        _clock_face = None
+        for family, weight in CLOCK_FACES:
+            f = render.font(px, weight)
+            f.setFamilies([family])
+            if QFontInfo(f).family() == family:
+                _clock_face = (family, weight)
+                break
+    if _clock_face is None:
+        return render.font(px, QFont.Black)
+    f = render.font(px, _clock_face[1])
+    f.setFamilies([_clock_face[0]])
+    return f
 
 
 def draw_clock(p, W, H, ink, ink2, now, radius=84):
