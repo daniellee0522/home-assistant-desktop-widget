@@ -178,8 +178,6 @@ class GlassMixin:
                 # The tray panel, while it is open, gets as many looks as it can take (the cost of one, about
                 # 25 ms, sets the pace); the widgets keep their own 30 a second whatever else is open.
                 pace = 1 / 60 if kind == "flyout" else 1 / 30
-                if getattr(self, "dim_target", False):
-                    pace = 1 / 6                 # dimmed: nobody is at the desktop; its glass need not keep pace
                 wait = pace - (time.monotonic() - last)
                 if wait > 0:
                     time.sleep(wait)
