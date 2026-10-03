@@ -16,7 +16,7 @@ from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiAp
                            QLinearGradient, QPainter, QPainterPath, QPen)
 from PySide6.QtWidgets import QLineEdit, QWidget
 
-from . import render
+from . import render, style
 from .glass import GlassMixin
 
 # ---------------------------------------------------------------------------------------
@@ -529,9 +529,10 @@ class Slider(View):
 
 
 class ScrollView(View):
-    """A clipped box whose content scrolls: the wheel, and scroll_to; no scroll bars."""
+    """A clipped box whose content scrolls: the wheel, and scroll_to; no scroll bars. Its ends fade out where
+    there is more beyond them (style.SCROLL_FADE px, or `fade`; 0 for none, as under glass drawn per tile)."""
 
-    def __init__(self, x, y, w, h, horizontal=False, fade=0):
+    def __init__(self, x, y, w, h, horizontal=False, fade=None):
         super().__init__(x, y, w, h)
         self.clip = True
         self.content = View(0, 0, w, h)
@@ -569,8 +570,13 @@ class ScrollView(View):
         self.scroll_to(self.offset - delta / 120.0 * 100)
         return True
 
+    def fade_px(self):
+        if self.fade is not None:
+            return self.fade
+        return style.SCROLL_FADE if self.max_offset() > 0 else 0
+
     def paint_tree(self, p):
-        if self.fade and self.visible:
+        if self.fade_px() and self.visible and self.alpha > 0:
             self.scene.paint_faded(self, p)
         else:
             super().paint_tree(p)
@@ -937,6 +943,8 @@ class Scene(GlassMixin, QWidget):
 
     def __init__(self, api, kind):
         super().__init__()
+        import qtshell
+        qtshell.ensure_marshal()                # (calls from other threads come to this, the GUI thread)
         self.api, self.kind = api, kind
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1091,9 +1099,12 @@ class Scene(GlassMixin, QWidget):
     def paint_blurred(self, view, p):
         """A view drawn through a blur: the subtree goes to a picture, the picture is blurred."""
         from PIL import Image, ImageFilter
-        s = p.transform().m11()                 # device px to one of the parent's: the picture is made at that
+        dev = p.transform().m11()               # device px to one of the parent's
+        # what is blurred by r px loses nothing made at 1/(r/2) of the resolution, and costs that squared less
+        s = dev / max(1.0, min(4.0, view.blur * dev / 2.5))
         pad = math.ceil(view.blur * 2)
         ox, oy, fx, fy = on_pixels(p, view.x + view.dx - pad, view.y + view.dy - pad)
+        fx, fy = fx * s / dev, fy * s / dev
         w, h = math.ceil((view.w + 2 * pad) * s) + 1, math.ceil((view.h + 2 * pad) * s) + 1
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
@@ -1110,7 +1121,13 @@ class Scene(GlassMixin, QWidget):
         pil = Image.frombuffer("RGBA", (w, h), bytes(img.constBits()), "raw", "BGRA", img.bytesPerLine(), 1)
         pil = pil.filter(ImageFilter.GaussianBlur(view.blur * s))
         out = QImage(pil.tobytes("raw", "BGRA"), w, h, QImage.Format_ARGB32_Premultiplied).copy()
-        draw_device_image(p, out, ox, oy)
+        if abs(s - dev) < 1e-3:
+            draw_device_image(p, out, ox, oy)
+        else:
+            p.save()
+            p.resetTransform()
+            p.drawImage(QRectF(ox, oy, w * dev / s, h * dev / s), out)
+            p.restore()
 
     def paint_faded(self, view, p):
         """A scrolling row whose ends fade out (the capsule rows). Made at the device's resolution and put on
@@ -1125,12 +1142,12 @@ class Scene(GlassMixin, QWidget):
         q.translate(fx, fy)
         q.scale(s, s)
         q.translate(-view.x - view.dx, -view.y - view.dy)
-        saved = view.fade
+        saved, fade = view.fade, view.fade_px()
         view.fade = 0
         view.paint_tree(q)
         view.fade = saved
         q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-        edge = min(0.45, view.fade / max(1.0, view.w if view.horizontal else view.h))
+        edge = min(0.45, fade / max(1.0, view.w if view.horizontal else view.h))
         left = view.offset > 0.5
         right = view.offset < view.max_offset() - 0.5
         q.resetTransform()
@@ -1179,8 +1196,10 @@ class Scene(GlassMixin, QWidget):
 
     def close_popup(self):
         if self.popup is not None:
-            self.layer.remove(self.popup)
-            self.popup = None
+            popup, self.popup = self.popup, None
+            self.layer.remove(popup)
+            if getattr(popup, "on_closed", None):
+                popup.on_closed()
             self.request_paint()
 
     def toast(self, text):

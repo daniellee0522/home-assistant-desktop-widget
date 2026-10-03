@@ -162,6 +162,7 @@ def create_overlay(api, title, make_scene, x=200, y=200):
         win = NativeOverlay(api, title, make_scene)
         win._native.move(int(x), int(y))
         return win
+    qtshell.ensure_marshal()
     win = qtshell._invoke(None, make, wait=True)
     if win is None:
         raise RuntimeError("native window could not be created")

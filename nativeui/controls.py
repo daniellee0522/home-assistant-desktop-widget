@@ -13,7 +13,7 @@ import time
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QPainterPath, QPen
 
-from . import render, ui
+from . import render, style, ui
 from .ui import View
 
 
@@ -31,6 +31,10 @@ def ago(iso):
             n = int(s // size)
             return ("%d %s ago" % (n, one if n == 1 else many)) if en else "%d %s前" % (n, zh)
     return "just now" if en else "剛剛"
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def kelvin_rgb(k):
@@ -331,14 +335,16 @@ class Swatches(View):
 
 class ModeCard(View):
     """A small card with an icon, what it sets and what it is set to (a thermostat's mode, a fan speed,
-    a light's effect). Pressed, its choices open in a menu over it (ChoiceMenu); the screen stays as it is."""
+    a light's effect). Pressed, its choices open in a menu over it (ChoiceMenu); the screen stays as it is.
+    `key` names it, so a menu open over it stays open over the card that replaces it when the screen is
+    built again (reattach_menu)."""
     cursor = Qt.PointingHandCursor
 
     def __init__(self, w, icon, title, value, options=None, on_pick=None, current=None):
         """options: [(value, label)]; on_pick(value) when one is chosen; current: the value chosen now."""
         super().__init__(0, 0, w, 62)
         self.interactive = True
-        self.icon, self.title, self.value = icon, title, value
+        self.icon, self.title, self.value, self.key = icon, title, value, title
         self.options, self.on_pick, self.current = options or [], on_pick, current
         self.open = False
         self.on_press = lambda e: True
@@ -347,14 +353,8 @@ class ModeCard(View):
         self.on_leave = lambda e: self.changed()
 
     def show_menu(self):
-        if not self.options or self.scene is None:
-            return
-
-        def closed():
-            self.open = False
-            self.changed()
-        self.open = True
-        open_menu(self, self.options, self.current, self.on_pick, closed)
+        if self.options and self.scene is not None:
+            open_menu(self, self.options, self.current, self.on_pick)
 
     def paint(self, p):
         fill = "btn_fill_strong" if (self.hovered or self.open) else "btn_fill"
@@ -363,19 +363,21 @@ class ModeCard(View):
         p.drawRoundedRect(QRectF(0, 0, self.w, self.h), 16, 16)
         render.draw_icon(p, self.icon, ui.resolve(self.scene, "ink1").name(), QRectF(14, (self.h - 24) / 2, 24, 24))
         x = 14 + 24 + 12
-        _text(p, render.tr(self.title), ui.font(13, QFont.Medium), ui.resolve(self.scene, "ink2"), x, 11)
-        f = ui.font(16, QFont.DemiBold)
-        _text(p, ui.ellipsize(render.tr(self.value), f, self.w - x - 10), f, ui.resolve(self.scene, "ink1"), x, 31)
+        size, weight, color = style.TEXT["label"]
+        _text(p, render.tr(self.title), ui.font(size, weight), ui.resolve(self.scene, color), x, 11)
+        size, weight, color = style.TEXT["value"]
+        f = ui.font(size, weight)
+        _text(p, ui.ellipsize(render.tr(self.value), f, self.w - x - 10), f, ui.resolve(self.scene, color), x, 31)
 
 
 class ChoiceMenu(View):
-    """The choices of a mode card, as iOS shows a menu: a rounded pane over everything, a row for each choice
-    and a tick by the one chosen now; long lists scroll."""
+    """The choices of a mode card, as iOS shows a menu: a floating pane over everything, a row for each choice
+    and a tick by the one chosen now; long lists scroll (fading at their ends, as every scrolling box does)."""
     ROW = 42
     MAX_ROWS = 7
 
-    def __init__(self, options, current, w, on_pick):
-        f = ui.font(15)
+    def __init__(self, options, current, w, on_pick, key=None):
+        f = style.font("menu")
         widest = max([ui.text_width(render.tr(lab), f) for _, lab in options] or [0])
         w = max(w, min(320, widest + 16 + 40))
         shown = min(len(options), self.MAX_ROWS)
@@ -383,7 +385,9 @@ class ChoiceMenu(View):
         self.interactive = True
         self.on_press = lambda e: True
         self.on_click = lambda e: True
-        self.on_closed = None
+        self.options, self.current, self.on_pick, self.key = options, current, on_pick, key
+        self.anchor = None
+        self.on_closed = None                     # called by the scene when it closes it
         sv = ui.ScrollView(0, 6, w, shown * self.ROW)
         for i, (val, lab) in enumerate(options):
             sv.add(_ChoiceRow(i, w, lab, val == current, lambda v=val: on_pick(v), i < len(options) - 1))
@@ -393,14 +397,7 @@ class ChoiceMenu(View):
         self.add(sv)
 
     def paint(self, p):
-        p.setPen(Qt.NoPen)
-        for spread in (24, 18, 12, 6):                # a soft shadow, a little below
-            p.setBrush(QColor(0, 0, 0, 9))
-            p.drawRoundedRect(QRectF(-spread / 2, -spread / 2 + 6, self.w + spread, self.h + spread),
-                              16 + spread / 2, 16 + spread / 2)
-        p.setBrush(ui.resolve(self.scene, "panel_solid"))
-        p.setPen(QPen(ui.resolve(self.scene, "input_border"), 1))
-        p.drawRoundedRect(QRectF(0.5, 0.5, self.w - 1, self.h - 1), 16, 16)
+        style.popup_pane(p, self.scene, self.w, self.h)
 
 
 class _ChoiceRow(View):
@@ -419,53 +416,145 @@ class _ChoiceRow(View):
             p.setPen(Qt.NoPen)
             p.setBrush(ui.resolve(self.scene, "btn_fill"))
             p.drawRoundedRect(QRectF(0, 1, self.w, self.h - 2), 11, 11)
-        f = ui.font(15, QFont.DemiBold if self.chosen else QFont.Normal)
+        size, weight, color = style.TEXT["menu"]
+        f = ui.font(size, QFont.DemiBold if self.chosen else weight)
         fm = ui.QFontMetricsF(f)
         _text(p, ui.ellipsize(render.tr(self.label), f, self.w - 12 - 34), f,
-              ui.resolve(self.scene, "accent_blue" if self.chosen else "ink1"), 12, (self.h - fm.height() / 10) / 2)
+              ui.resolve(self.scene, "accent_blue" if self.chosen else color), 12, (self.h - fm.height() / 10) / 2)
         if self.chosen:
             render.draw_icon(p, "mdi:check", ui.resolve(self.scene, "accent_blue").name(),
                              QRectF(self.w - 10 - 20, (self.h - 20) / 2, 20, 20))
         if self.line and not self.hovered:
-            c = ui.resolve(self.scene, "input_border")
             p.setPen(Qt.NoPen)
-            p.setBrush(c)
+            p.setBrush(ui.resolve(self.scene, "input_border"))
             p.drawRect(QRectF(12, self.h - 0.5, self.w - 24, 0.5))
 
 
-def open_menu(anchor, options, current, on_pick, closed=None):
-    """A ChoiceMenu for `anchor`, under it (over it when there is no room below), as large as the anchor is
-    drawn; choosing closes it and then calls on_pick."""
+class ColorMenu(View):
+    """A light's colours to choose from, in a floating pane (in place of a colour dialog, which would take
+    the panel's focus and leave it waiting)."""
+    COLORS = ("#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#5ac8fa",
+              "#007aff", "#5856d6", "#af52de", "#ff2d55", "#ffd6a5", "#ffffff")
+    SIZE, GAP, PAD = 40, 12, 14
+
+    def __init__(self, current, on_pick, key=None):
+        cols = 6
+        rows = (len(self.COLORS) + cols - 1) // cols
+        w = 2 * self.PAD + cols * self.SIZE + (cols - 1) * self.GAP
+        super().__init__(0, 0, w, 2 * self.PAD + rows * self.SIZE + (rows - 1) * self.GAP)
+        self.interactive = True
+        self.on_press = lambda e: True
+        self.on_click = self._click
+        self.current, self.on_pick, self.key = current, on_pick, key
+        self.anchor = self.on_closed = None
+        self.cursor = Qt.PointingHandCursor
+
+    def _cells(self):
+        for i, c in enumerate(self.COLORS):
+            r, k = divmod(i, 6)
+            yield c, QRectF(self.PAD + k * (self.SIZE + self.GAP), self.PAD + r * (self.SIZE + self.GAP),
+                            self.SIZE, self.SIZE)
+
+    def _click(self, e):
+        for c, rect in self._cells():
+            if rect.adjusted(-4, -4, 4, 4).contains(QPointF(e.x, e.y)):
+                q = QColor(c)
+                self.on_pick((q.red(), q.green(), q.blue()))
+        return True
+
+    def paint(self, p):
+        style.popup_pane(p, self.scene, self.w, self.h)
+        cur = QColor(*self.current).name() if self.current else None
+        for c, rect in self._cells():
+            p.setPen(QPen(ui.resolve(self.scene, "input_border"), 1))
+            p.setBrush(QColor(c))
+            p.drawEllipse(rect)
+            if c == cur:
+                p.setPen(QPen(ui.resolve(self.scene, "ink1"), 2.5))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(rect.adjusted(-4, -4, 4, 4))
+
+
+def _place(anchor, pane):
+    """A floating pane under its anchor (over it when there is no room below), as large as the anchor is
+    drawn, inside the window."""
     scene = anchor.scene
     ax, ay, k = anchor.in_scene()
-
-    def pick(value):
-        scene.close_popup()
-        on_pick(value)
-    menu = ChoiceMenu(options, current, anchor.w, pick)
-    menu.scale = k
-    mw, mh = menu.w * k, menu.h * k
+    pane.scale = k
+    mw, mh = pane.w * k, pane.h * k
     x = min(max(6.0, ax + (anchor.w * k - mw) / 2), scene.css_w - mw - 6)
     y = ay + (anchor.h + 6) * k
     if y + mh > scene.css_h - 6:
         y = ay - 6 * k - mh
-    menu.x, menu.y = x, max(6.0, min(y, scene.css_h - mh - 6))
-    menu.alpha, menu.dy = 0.0, -6.0
-    scene.open_popup(menu)
-    menu.animate(160, "out", alpha=1.0, dy=0.0)
-    if closed is not None:
-        _when_gone(scene, menu, closed)
-    return menu
+    pane.x, pane.y = x, max(6.0, min(y, scene.css_h - mh - 6))
 
 
-def _when_gone(scene, menu, closed):
-    """closed() once the menu is no longer the scene's popup (chosen, pressed outside, Escape)."""
-    def check():
-        if scene.popup is menu:
-            QTimer.singleShot(120, check)
-        else:
-            closed()
-    QTimer.singleShot(120, check)
+def _unopen(pane):
+    """The menu was closed: its card no longer looks open."""
+    if pane.anchor is not None:
+        pane.anchor.open = False
+        pane.anchor.changed()
+
+
+def _show(anchor, pane):
+    scene = anchor.scene
+    pane.anchor, pane.on_closed = anchor, lambda: _unopen(pane)
+    anchor.open = True
+    _place(anchor, pane)
+    pane.alpha, pane.dy = 0.0, -6.0
+    scene.open_popup(pane)
+    pane.animate(160, "out", alpha=1.0, dy=0.0)
+    return pane
+
+
+def open_menu(anchor, options, current, on_pick):
+    """A ChoiceMenu for `anchor` (a ModeCard); choosing closes it and then calls on_pick."""
+    scene = anchor.scene
+
+    def pick(value):
+        scene.close_popup()
+        on_pick(value)
+    return _show(anchor, ChoiceMenu(options, current, anchor.w, pick, getattr(anchor, "key", None)))
+
+
+def open_colors(anchor, current, on_pick):
+    """A ColorMenu for `anchor`; choosing closes it and then calls on_pick((r, g, b))."""
+    scene = anchor.scene
+
+    def pick(rgb):
+        scene.close_popup()
+        on_pick(rgb)
+    return _show(anchor, ColorMenu(current, pick, getattr(anchor, "key", "colors")))
+
+
+def reattach_menu(scene, tree):
+    """The screen was built again under a menu that is open: it stays, over the card that took the old one's
+    place (marked open), and shows the choices as they are now. With no such card it closes."""
+    pane = scene.popup
+    if not isinstance(pane, (ChoiceMenu, ColorMenu)) or pane.key is None:
+        return
+    found = []
+
+    def walk(v):
+        if getattr(v, "key", None) == pane.key and v is not pane and not isinstance(v, (ChoiceMenu, ColorMenu)):
+            found.append(v)
+        for c in v.children:
+            walk(c)
+    walk(tree)
+    if not found:
+        scene.close_popup()
+        return
+    card = found[0]
+    if isinstance(pane, ChoiceMenu) and (card.options != pane.options or card.current != pane.current):
+        new = ChoiceMenu(card.options, card.current, card.w, pane.on_pick, pane.key)
+        new.on_closed = lambda: _unopen(new)
+        scene.layer.remove(pane)
+        scene.layer.add(new)
+        scene.popup = pane = new
+    pane.anchor = card
+    card.open = True
+    _place(card, pane)
+    scene.request_paint()
 
 
 class Picture(View):
@@ -528,41 +617,80 @@ def _clock(s):
 
 
 class Progress(View):
-    """Where a song is: a thin bar with a dot, the time gone and the length; it moves on by itself while
-    playing (the position comes with the time it was taken)."""
+    """Where a song is: a bar with a knob, the time gone and the length; it moves on by itself while playing
+    (the position comes with the time it was taken). With on_seek it can be dragged, or pressed anywhere along
+    it: the time shown follows, and on_seek(seconds) is called when it is let go. The knob stays inside."""
+    cursor = Qt.PointingHandCursor
+    KNOB = 7
 
-    def __init__(self, w, position, updated_at, duration, playing):
-        super().__init__(0, 0, w, 40)
+    def __init__(self, w, position, updated_at, duration, playing, on_seek=None):
+        super().__init__(0, 0, w, 44)
         self.position, self.duration, self.playing = position or 0.0, duration or 0.0, playing
         try:
             self.taken = datetime.datetime.fromisoformat(str(updated_at).replace("Z", "+00:00")).timestamp()
         except (TypeError, ValueError):
             self.taken = time.time()
         self._ticking = False
+        self.seeking = None                      # seconds, while dragged
+        self.on_seek = on_seek
+        self.interactive = on_seek is not None and self.duration > 0
+        self.on_press = self._press
+        self.on_move = self._move
+        self.on_release = self._release
 
     def now(self):
+        if self.seeking is not None:
+            return self.seeking
         pos = self.position + ((time.time() - self.taken) if self.playing else 0.0)
         return max(0.0, min(self.duration or pos, pos))
 
+    def _at(self, x):
+        k = self.KNOB
+        return max(0.0, min(1.0, (x - k) / max(1.0, self.w - 2 * k))) * self.duration
+
+    def _press(self, e):
+        self.seeking = self._at(e.x)
+        self.changed()
+        return True
+
+    def _move(self, e):
+        if self.seeking is not None:
+            self.seeking = self._at(e.x)
+            self.changed()
+        return True
+
+    def _release(self, e):
+        if self.seeking is None:
+            return True
+        at, self.seeking = self._at(e.x), None
+        self.position, self.taken = at, time.time()
+        self.changed()
+        self.on_seek(at)
+        return True
+
     def _tick(self):
         self._ticking = False
-        if self.scene is not None:
+        if self.scene is not None and self.scene.isVisible():
             self.changed()
 
     def paint(self, p):
         pos = self.now()
         t = pos / self.duration if self.duration else 0.0
+        k = self.KNOB
+        track = QRectF(k, 10 - 2, self.w - 2 * k, 4)
         p.setPen(Qt.NoPen)
         p.setBrush(ui.resolve(self.scene, "btn_fill_strong"))
-        p.drawRoundedRect(QRectF(0, 8, self.w, 4), 2, 2)
+        p.drawRoundedRect(track, 2, 2)
         accent = ui.resolve(self.scene, "accent_blue")
         p.setBrush(accent)
-        p.drawRoundedRect(QRectF(0, 8, self.w * t, 4), 2, 2)
-        p.drawEllipse(QPointF(self.w * t, 10), 7, 7)
-        f, ink2 = ui.font(12), ui.resolve(self.scene, "ink2")
-        _text(p, _clock(pos), f, ink2, 0, 22)
+        p.drawRoundedRect(QRectF(k, 8, track.width() * t, 4), 2, 2)
+        r = k + (2 if self.seeking is not None else 0)
+        p.drawEllipse(QPointF(k + track.width() * t, 10), r, r)
+        size, weight, color = style.TEXT["caption"]
+        f, ink2 = ui.font(size, weight), ui.resolve(self.scene, color)
+        _text(p, _clock(pos), f, ink2, k - 2, 24)
         if self.duration:
-            _text(p, _clock(self.duration), f, ink2, 0, 22, "r", self.w)
-        if self.playing and not self._ticking:
+            _text(p, _clock(self.duration), f, ink2, 0, 24, "r", self.w - k + 2)
+        if self.playing and self.seeking is None and not self._ticking:
             self._ticking = True
             QTimer.singleShot(1000, self._tick)

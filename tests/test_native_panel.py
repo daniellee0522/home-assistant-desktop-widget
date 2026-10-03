@@ -396,6 +396,58 @@ class DetailOverThePanel(unittest.TestCase):
         self.assertEqual(content.body_scroll.offset, 0)
         win.dispose()
 
+    def test_a_menu_open_while_a_new_state_comes_stays_open_over_the_new_card(self):
+        api = FakeApi("grid", [{"id": "ac", "entity": "climate.ac", "domain": "climate", "room": "冷氣", "label": ""}])
+        win, sc = make_panel(api)
+        st = {"state": "off", "attributes": {"temperature": 24, "hvac_modes": ["off", "cool"], "fan_modes": ["auto", "low"],
+                                             "fan_mode": "auto"}}
+        sc.push_states([("climate.ac", st)])
+        sc.open_detail("ac")
+        pump(400)
+        self.find(sc.detail_view, "ModeCard")[1].show_menu()             # the fan speeds
+        pump(200)
+        sc.push_states([("climate.ac", dict(st, attributes=dict(st["attributes"], fan_mode="low")))])
+        pump(300)
+        cards = self.find(sc.detail_view, "ModeCard")
+        self.assertIsNotNone(sc.popup)
+        self.assertEqual([c.open for c in cards], [False, True])        # the new card looks open
+        self.assertEqual(sc.popup.current, "low")                        # and the menu says what is chosen now
+        sc.close_popup()
+        self.assertFalse(cards[1].open)
+        win.dispose()
+
+    def test_the_song_can_be_dragged_to_a_new_place(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        api = FakeApi("grid", [{"id": "sp", "entity": "media_player.s", "domain": "media_player", "room": "喇叭",
+                                "label": ""}])
+        win, sc = make_panel(api)
+        sc.push_states([("media_player.s", {"state": "paused", "attributes": {
+            "media_title": "T", "media_duration": 200, "media_position": 0, "supported_features": 2}})])
+        sc.open_detail("sp")
+        pump(500)
+        bar = self.find(sc.detail_view, "Progress")[0]
+        x, y, k = bar.in_scene()
+        s = sc.scale / sc.devicePixelRatioF()
+        QTest.mousePress(sc, Qt.LeftButton, pos=QPoint(round((x + 20 * k) * s), round((y + 10 * k) * s)))
+        QTest.mouseMove(sc, QPoint(round((x + bar.w / 2 * k) * s), round((y + 10 * k) * s)))
+        pump(50)
+        self.assertAlmostEqual(bar.now(), 100, delta=4)                 # the time shown follows
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=QPoint(round((x + bar.w / 2 * k) * s), round((y + 10 * k) * s)))
+        pump(100)
+        seek = [c for c in api.calls if c[:2] == ("media_player", "media_seek")]
+        self.assertTrue(seek)
+        self.assertAlmostEqual(seek[-1][3]["seek_position"], 100, delta=4)
+        win.dispose()
+
+    def test_its_words_stand_on_a_backing_that_keeps_them_readable(self):
+        api = FakeApi("grid", [{"id": "l", "entity": "light.l", "domain": "light", "room": "燈", "label": ""}])
+        win, sc = make_panel(api)
+        sc.open_detail("l")
+        pump(400)
+        self.assertEqual(type(sc.detail_view).__name__, "Backing")
+        win.dispose()
+
     def test_a_small_panel_grows_for_it_and_shrinks_back(self):
         api, win, sc = self.open_speaker(n=2)
         base = sc.base_css

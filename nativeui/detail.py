@@ -10,11 +10,11 @@ import time
 import traceback
 
 from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainterPath, QPen
 
-from . import controls, render, ui
+from . import controls, render, style, ui
 from .overlay import OverlayScene, create_overlay
-from .ui import Button, Label, ScrollView, Slider, TextField, View
+from .ui import Button, ScrollView, Slider, TextField, View
 
 CARD_W = 320
 BODY_X, BODY_W = 14, 292
@@ -155,6 +155,7 @@ class DetailContent:
         self.edit = False
         self.light_view = "brightness"
         self._built_for = None
+        self.tall_fit = TALL_H
         self.host.close_popup()
         return self.tile is not None
 
@@ -194,15 +195,17 @@ class DetailContent:
         """The content, CARD_W wide and as tall as it needs up to max_h: the rest scrolls, or, with `fit`, the
         tall controls are made shorter until it all fits (and it is as tall as it needs: the tray panel scales
         it to its room). Built again for the same tile, it keeps where it was scrolled to."""
-        self.tall = TALL_H
         if not fit:
+            self.tall = TALL_H
             return self._build(max_h)
+        self.tall = getattr(self, "tall_fit", TALL_H)
         out = self._build(float("inf"))
         for _ in range(3):                      # (a control or two follow the tall one's height loosely)
             if out.h <= max_h + 0.01 or self.tall <= TALL_MIN:
                 break
             self.tall = max(TALL_MIN, self.tall - (out.h - max_h))
             out = self._build(float("inf"))
+        self.tall_fit = self.tall               # no taller again while this device is shown: no jumping
         return out
 
     def _build(self, max_h):
@@ -222,8 +225,8 @@ class DetailContent:
         area = self.area_of(tile["entity"]) if self.area_of else ""
         tw = CARD_W - left - 10 - 36 - 8
         if area:
-            out.add(Label(area, 12.5, QFont.Normal, "ink2", x=left, y=10, w=tw, overflow="ellipsis"))
-        out.add(Label(title, 19.5, QFont.Bold, "ink1", x=left, y=26 if area else 18, w=tw, overflow="ellipsis"))
+            out.add(style.label("eyebrow", area, x=left, y=10, w=tw, overflow="ellipsis"))
+        out.add(style.label("title", title, x=left, y=26 if area else 18, w=tw, overflow="ellipsis"))
         out.add(Button(x=CARD_W - 10 - 36, y=12, w=36, h=36, icon="mdi:cog", icon_size=20, fill=None,
                        hover_fill="btn_fill", on_click=lambda e: self.set_edit(not self.edit), active=self.edit,
                        active_fill="btn_fill_strong", active_color="btn_text"))
@@ -253,7 +256,7 @@ class DetailContent:
 
     def build_edit(self, stack):
         tile = self.tile
-        stack.place(Label("圖示", 14.5, QFont.Bold, "ink2", w=BODY_W, spacing=0.4), 0, 8)
+        stack.place(style.label("section", "圖示", w=BODY_W, spacing=0.4), 0, 8)
         # the swatches
         picker = View(0, 0, BODY_W, 0)
         current = tile.get("icon") or render.DEFAULT_ICON.get(tile["domain"], "sensor")
@@ -287,7 +290,7 @@ class DetailContent:
 
     def field(self, stack, label, value, placeholder, on_done, max_length=40):
         block = View(0, 0, BODY_W, 20 + 4 + 38)
-        block.add(Label(label, 14.5, QFont.Normal, "ink2", w=BODY_W))
+        block.add(style.label("section", label, w=BODY_W))
         block.add(TextField(0, 24, BODY_W, 38, value, placeholder, 15.5, on_done, max_length))
         stack.place(block, 0, 10)
 
@@ -506,6 +509,7 @@ class DetailCard(OverlayScene):
             self.fields.remove(f)
         view = self.content.build()
         self.root.add(view)
+        controls.reattach_menu(self, view)      # a menu open over it stays, over the new card
         self.body_scroll = self.content.body_scroll
         self.set_css_size(CARD_W, view.h)
         self.request_size()
@@ -543,11 +547,11 @@ def centered(stack, view, mt=0, mb=0):
 
 def big_value(stack, text, state, mt=6):
     """The state, large, and how long ago it changed; the label is returned to follow a slider."""
-    label = Label(text, 40, QFont.Normal, "ink1", w=BODY_W, align="c")
+    label = style.label("display", text, w=BODY_W, align="c")
     stack.place(label, mt, 2)
     since = controls.ago((state or {}).get("last_changed"))
     if since:
-        stack.place(Label(since, 13.5, QFont.DemiBold, "ink2", w=BODY_W, align="c"), 0, 14)
+        stack.place(style.label("meta", since, w=BODY_W, align="c"), 0, 14)
     return label
 
 
@@ -634,13 +638,12 @@ def build_light(card, stack, tile, state):
         if kind == "k":
             card.call("light", "turn_on", entity, {"color_temp_kelvin": v})
         else:
-            from PySide6.QtWidgets import QColorDialog
-            c = QColorDialog.getColor(QColor(*(tuple(rgb[:3]) if rgb else (255, 255, 255))), card.host,
-                                      render.tr("顏色"))
-            if c.isValid():
-                card.call("light", "turn_on", entity, {"rgb_color": [c.red(), c.green(), c.blue()]})
+            controls.open_colors(sw, tuple(rgb[:3]) if rgb else None,
+                                 lambda c: card.call("light", "turn_on", entity, {"rgb_color": list(c)}))
     if swatches:
-        stack.place(controls.Swatches(BODY_W, swatches, pick), 4, 14)
+        sw = controls.Swatches(BODY_W, swatches, pick)
+        sw.key, sw.open = "colors", False
+        stack.place(sw, 4, 14)
     effects = attrs.get("effect_list") or []
     if effects and on:
         cards(card, stack, [("mdi:auto-fix", "特效", attrs.get("effect") or "無",
@@ -704,8 +707,8 @@ def build_climate(card, stack, tile, state):
         row = View(0, 0, BODY_W, 44)
         w = BODY_W / len(readings)
         for i, (lab, val) in enumerate(readings):
-            row.add(Label(lab, 13, QFont.Medium, "ink2", x=i * w, y=0, w=w, align="c"))
-            row.add(Label(val, 19, QFont.Bold, "ink1", x=i * w, y=18, w=w, align="c"))
+            row.add(style.label("label", lab, x=i * w, y=0, w=w, align="c"))
+            row.add(style.label("headline", val, x=i * w, y=18, w=w, align="c"))
         stack.place(row, 2, 8)
     step = float(attrs.get("target_temp_step") or tile.get("temp_step") or 1)
     lo, hi = float(attrs.get("min_temp") or 7), float(attrs.get("max_temp") or 35)
@@ -771,13 +774,18 @@ def build_media(card, stack, tile, state):
     side = card.tall - 24
     centered(stack, controls.Picture(side, side, art, card.api.get_picture, card.run_on_ui_thread), 4, 16)
     title = attrs.get("media_title") or STATE_TEXT.get("media", {}).get(s) or s
-    stack.place(Label(title, 19, QFont.Bold, "ink1", w=BODY_W, overflow="ellipsis"), 0, 2)
+    stack.place(style.label("headline", title, w=BODY_W, overflow="ellipsis"), 0, 2)
     artist = attrs.get("media_artist") or attrs.get("app_name") or ""
     if artist:
-        stack.place(Label(artist, 14, QFont.Normal, "ink2", w=BODY_W, overflow="ellipsis"), 0, 10)
+        stack.place(style.label("secondary", artist, w=BODY_W, overflow="ellipsis"), 0, 10)
     if attrs.get("media_duration"):
+        def seek(s):
+            card.optimistic(entity, {"attributes": dict(attrs, media_position=s,
+                                                        media_position_updated_at=controls.now_iso())})
+            card.call("media_player", "media_seek", entity, {"seek_position": round(s, 1)})
+        can_seek = int(attrs.get("supported_features") or 0) & 2      # MediaPlayerEntityFeature.SEEK
         stack.place(controls.Progress(BODY_W, attrs.get("media_position"), attrs.get("media_position_updated_at"),
-                                      attrs.get("media_duration"), playing), 6, 6)
+                                      attrs.get("media_duration"), playing, on_seek=seek if can_seek else None), 6, 6)
     row = View(0, 0, BODY_W, 64)
     buttons = []
     if "shuffle" in attrs:
@@ -834,9 +842,9 @@ def build_vacuum(card, stack, tile, state):
 def build_readout(card, stack, tile, state):
     """Devices with no controls: the reading, large, and its history when it is a number."""
     text = (render.value_text(tile["domain"], state) or state["state"]) if state else "無法連線"
-    stack.place(Label(text, 38, QFont.Bold, "ink1", w=BODY_W - 8, align="c", wrap=True, any_break=True), 22, 0)
+    stack.place(style.label("display", text, w=BODY_W - 8, align="c", wrap=True, any_break=True), 22, 0)
     since = controls.ago((state or {}).get("last_changed"))
-    stack.place(Label(since or tile["entity"], 13, QFont.Normal, "ink2", w=BODY_W - 8, align="c", wrap=True,
+    stack.place(style.label("meta", since or tile["entity"], w=BODY_W - 8, align="c", wrap=True,
                       any_break=True), 6, 8)
     try:
         numeric = bool(state) and float(state["state"]) == float(state["state"])
@@ -844,8 +852,8 @@ def build_readout(card, stack, tile, state):
         numeric = False
     if numeric:
         block = View(0, 0, BODY_W, 16 + 4 + 64)
-        block.add(Label("過去 %d 小時" % HISTORY_HOURS, 12, QFont.Normal, "ink2", w=BODY_W))
-        rng = Label("", 12, QFont.Normal, "ink2", w=BODY_W, align="r")
+        block.add(style.label("caption", "過去 %d 小時" % HISTORY_HOURS, w=BODY_W))
+        rng = style.label("caption", "", w=BODY_W, align="r")
         block.add(rng)
         chart = Chart(BODY_W)
         chart.y = 20
@@ -880,17 +888,17 @@ def build_weather(card, stack, tile, state):
     attrs = _attrs(state)
     icon, text = kinds.condition(state)
     centered(stack, ui.IconView(icon, "ink1", size=52), 4, 0)
-    stack.place(Label("%s°" % trim_number(attrs["temperature"]) if attrs.get("temperature") is not None else "--",
-                      52, QFont.Light, "ink1", w=BODY_W, align="c"), 0, 0)
-    stack.place(Label(text, 17, QFont.DemiBold, "ink1", w=BODY_W, align="c"), 2, 4)
+    stack.place(style.label("hero", "%s°" % trim_number(attrs["temperature"]) if attrs.get("temperature") is not None
+                            else "--", w=BODY_W, align="c"), 0, 0)
+    stack.place(style.label("headline", text, w=BODY_W, align="c"), 2, 4)
     extra = " · ".join(x for x in (("%s %s%%" % (render.tr("濕度"), trim_number(attrs["humidity"])))
                                    if attrs.get("humidity") is not None else "",
                                    controls.ago((state or {}).get("last_changed"))) if x)
     if extra:
-        stack.place(Label(extra, 13, QFont.Medium, "ink2", w=BODY_W, align="c"), 0, 14)
+        stack.place(style.label("meta", extra, w=BODY_W, align="c"), 0, 14)
     kept = getattr(card, "forecast", None)
     if not kept or kept[0] != tile["entity"]:
-        stack.place(Label("載入中…", 13, QFont.Normal, "ink2", w=BODY_W, align="c"), 6, 8)
+        stack.place(style.label("meta", "載入中…", w=BODY_W, align="c"), 6, 8)
         entity = tile["entity"]
 
         def load():
@@ -908,17 +916,17 @@ def build_weather(card, stack, tile, state):
         return
     days = kept[1][:7]
     if not days:
-        stack.place(Label("沒有預報", 13, QFont.Normal, "ink2", w=BODY_W, align="c"), 6, 8)
+        stack.place(style.label("meta", "沒有預報", w=BODY_W, align="c"), 6, 8)
     for i, d in enumerate(days):
         r = View(0, 0, BODY_W, 40)
-        r.add(Label(kinds._day(d.get("datetime"), i), 15, QFont.DemiBold, "ink1", x=4, y=10, w=80))
+        r.add(style.label("body", kinds._day(d.get("datetime"), i), x=4, y=10, w=80))
         r.add(ui.IconView("mdi:" + kinds.CONDITIONS.get(d.get("condition"), ("weather-cloudy",))[0], "ink1",
                           x=96, y=7, size=26))
         lo = d.get("templow")
-        r.add(Label(("%s°" % trim_number(lo)) if lo is not None else "", 15, QFont.Medium, "ink2", x=BODY_W - 120,
+        r.add(style.label("body", ("%s°" % trim_number(lo)) if lo is not None else "", color="ink2", x=BODY_W - 120,
                     y=10, w=50, align="r"))
-        r.add(Label("%s°" % trim_number(d.get("temperature")) if d.get("temperature") is not None else "--", 15,
-                    QFont.DemiBold, "ink1", x=BODY_W - 60, y=10, w=56, align="r"))
+        r.add(style.label("body", "%s°" % trim_number(d.get("temperature")) if d.get("temperature") is not None else "--",
+                                 x=BODY_W - 60, y=10, w=56, align="r"))
         stack.place(r, 0, 2)
 
 
@@ -930,7 +938,7 @@ def build_camera(card, stack, tile, state):
     stack.place(controls.Picture(BODY_W, round(BODY_W * 9 / 16), url, card.api.get_picture, card.run_on_ui_thread,
                                  icon="mdi:cctv"), 4, 10)
     since = controls.ago((state or {}).get("last_changed"))
-    stack.place(Label(" · ".join(x for x in ((state or {}).get("state") or "", since) if x), 13, QFont.Medium, "ink2",
+    stack.place(style.label("meta", " · ".join(x for x in ((state or {}).get("state") or "", since) if x),
                       w=BODY_W, align="c"), 0, 10)
 
 

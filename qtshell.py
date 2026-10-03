@@ -218,6 +218,14 @@ def choose_image_file(title):
     return _invoke(None, ask, wait=True) or ""
 
 
+def ensure_marshal():
+    """The GUI thread's queue of calls from other threads, made (on the GUI thread) if start() has not made
+    it: windows made without start(), as in the tests, would otherwise be built from worker threads."""
+    global _marshal
+    if _marshal is None and QApplication.instance() is not None             and threading.current_thread() is threading.main_thread():
+        _marshal = _Marshal()
+
+
 def _invoke(widget, fn, wait=False):
     """Marshal fn onto the GUI thread."""
     app = QApplication.instance()

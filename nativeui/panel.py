@@ -13,6 +13,7 @@ from PySide6.QtGui import QCursor, QImage
 
 from . import render, screens
 from .actions import TileActions
+from . import controls, style
 from .detail import CARD_W, DetailContent
 from .homemodel import HomeModel
 from .overlay import OverlayScene, create_overlay
@@ -191,7 +192,7 @@ class PanelScene(OverlayScene):
         w = cols * CELL_W + (cols - 1) * GAP + 2 * PAD
         view_h = rows_shown * CELL_H + (rows_shown - 1) * GAP
         h = view_h + 2 * PAD
-        sv = ScrollView(PAD, PAD, w - 2 * PAD, view_h)
+        sv = ScrollView(PAD, PAD, w - 2 * PAD, view_h, fade=0)   # (each tile's own glass would not fade)
         sv.row = CELL_H + GAP
         content_h = rows_total * CELL_H + (rows_total - 1) * GAP
         sv.content.w, sv.content.h = w - 2 * PAD, content_h
@@ -296,6 +297,7 @@ class PanelScene(OverlayScene):
         if not self.detail.open(tile_id):
             return
         opening = self.detail_view is None
+        self.detail_k = DETAIL_SCALE
         self.layout_detail()
         if opening:
             # the tiles recede and the detail comes forward, as a capsule's devices do
@@ -315,10 +317,12 @@ class PanelScene(OverlayScene):
         base_w, base_h = self.base_css or (self.css_w, self.css_h)
         room = max(base_h, DETAIL_MAX_H) - 2 * m
         content = self.detail.build(max_h=room / k, fit=True)
-        k = min(k, room / content.h)
+        # as large as fits, and no larger than it was while this device is shown: a new state (a longer
+        # song title) does not make it jump
+        k = self.detail_k = min(getattr(self, "detail_k", k), k, room / content.h)
         w = max(base_w, CARD_W * k + 2 * m)
         h = max(base_h, content.h * k + 2 * m)
-        overlay = View(0, 0, w, h)
+        overlay = Backing(0, 0, w, h, self)
         overlay.interactive = True                # the empty space around it goes back
         overlay.on_press = lambda e: True
         overlay.on_click = lambda e: self.close_detail()
@@ -336,6 +340,7 @@ class PanelScene(OverlayScene):
         self.layer.add(overlay)
         self.detail_view = overlay
         self.detail_css = (w, h)
+        controls.reattach_menu(self, overlay)    # a menu open over it stays, over the new card
         if (w, h) != (self.css_w, self.css_h):
             self.set_css_size(w, h)
             self.request_size()
@@ -577,6 +582,19 @@ class PanelScene(OverlayScene):
         else:
             self.close_detail()
 
+
+
+class Backing(View):
+    """What a detail stands on in the panel: the panel's shape, tinted so its words read over any desktop."""
+
+    def __init__(self, x, y, w, h, panel):
+        super().__init__(x, y, w, h)
+        self.panel = panel
+
+    def paint(self, p):
+        p.setPen(Qt.NoPen)
+        p.setBrush(style.readable_backing(self.scene.theme))
+        p.drawPath(render.squircle(0, 0, self.w, self.h, self.panel.card_radius()))
 
 
 def create_panel(api):
