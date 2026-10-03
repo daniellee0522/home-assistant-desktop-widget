@@ -47,6 +47,7 @@ class Lens:
         self.mesh = self._build_mesh()
         self.alpha, self.line = self._build_masks()
         self.white = Image.new("RGB", (w, h), (255, 255, 255))
+        self._soft = None
         self.tile_masks = {}
 
     # -- the shader, per point --------------------------------------------
@@ -171,16 +172,27 @@ class Lens:
                 "L", (w, h), bytes(img.constBits()), "raw", "L", img.bytesPerLine(), 1)
         return m
 
-    def frame(self, picture, card_mask, tiles=(), blur=12.0):
+    def frame(self, picture, card_mask, tiles=(), blur=12.0, frost=0.0):
         """The glass for a new picture: `picture` (the small blurred one, RGB)
         stretched over the card, the lens round its edge, and the tiles' own
         blur. Returns an RGBA image the size of the window.
 
-        tiles: [(x, y, w, h, radius)] in device pixels."""
-        base = picture.resize((self.w, self.h), Image.BICUBIC)
-        lens = base.transform((self.w, self.h), Image.MESH, self.mesh, Image.BILINEAR)
+        tiles: [(x, y, w, h, radius)] in device pixels. frost: the blur of the card's glass, in device pixels."""
+        sharp = picture.resize((self.w, self.h), Image.BICUBIC)
+        base = sharp
+        if frost > 0.05:
+            # the card's own glass is frosted; the lens at its edge keeps bending the clear picture
+            base = picture.filter(ImageFilter.GaussianBlur(frost * picture.width / self.w)).resize(
+                (self.w, self.h), Image.BICUBIC)
+        lens = sharp.transform((self.w, self.h), Image.MESH, self.mesh, Image.BILINEAR)
         lens = Image.composite(self.white, lens, self.line)
-        lens.putalpha(self.alpha)
+        if frost > 0.05:
+            # frosted glass inside: the clear lens fades out into it rather than ending on a line
+            if self._soft is None or self._soft[0] != round(frost):
+                self._soft = (round(frost), self.alpha.filter(ImageFilter.GaussianBlur(max(2.0, frost * 0.35))))
+            lens.putalpha(self._soft[1])
+        else:
+            lens.putalpha(self.alpha)
         out = base.convert("RGBA")
         out.alpha_composite(lens)
         for x, y, w, h, radius in tiles:

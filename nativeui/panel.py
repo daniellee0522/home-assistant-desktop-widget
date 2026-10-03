@@ -337,7 +337,7 @@ class PanelScene(OverlayScene):
             self.make_bg()
 
     # -- coming in and going away --------------------------------------------------------------------------------------
-    def request_size(self):
+    def request_size(self, sync=False):
         self.update_metrics()
         # The window is that size at once; Api.resize_flyout_window then puts it at its tray corner. Until
         # then it would be Qt's default, many times too big, and open showing that.
@@ -345,7 +345,10 @@ class PanelScene(OverlayScene):
         self.resize(max(1, round(self.pw / ratio)), max(1, round(self.ph / ratio)))
         self.seq += 1
         seq, pw, ph = self.seq, self.pw, self.ph
-        threading.Thread(target=lambda: self.api.resize_flyout_window(pw, ph, seq), daemon=True).start()
+        if sync:
+            self.api.resize_flyout_window(pw, ph, seq)
+        else:
+            threading.Thread(target=lambda: self.api.resize_flyout_window(pw, ph, seq), daemon=True).start()
 
     def origin(self):
         anchor = getattr(self.api, "_flyout_anchor", None)
@@ -361,9 +364,11 @@ class PanelScene(OverlayScene):
         if self.mode == "home":
             if self.home is None:
                 self.rebuild()
+            self.request_size(sync=True)         # it is put at its tray corner before it is shown
             self.home.load()
         else:
             self.rebuild(keep_scroll=True)
+            self.request_size(sync=True)
         self.start_glass()
         if self.custom_bg():
             self.make_bg()

@@ -850,7 +850,7 @@ def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False):
 
 
 def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=False, style="classic",
-                ui=None, raw_theme=None, form=None):
+                ui=None, raw_theme=None, form=None, message=True):
     """The whole widget at (0, 0). `backdrop` is the small blurred picture of
     the desktop behind it (a QImage), stretched over the card. `ui`: what the pointer is
     doing - {"hover": i, "pressed": i, "flash": {i: 1..0}, "scroll": px}."""
@@ -870,7 +870,8 @@ def draw_widget(p, size, tiles, states, theme, backdrop=None, scale=1.0, dim=Fal
     draw_card_bg(p, W, H, tcol, style, theme)
     button = None
     if not tiles:
-        button = draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim)
+        # (the editor's preview shows an empty widget as the bare card: its message is for the desktop)
+        button = draw_empty(p, W, H, SIZES.get(size, (4, 2)) == (1, 1), theme, raw_theme or theme, dim) if message else None
     else:
         p.save()
         p.setClipRect(QRectF(PAD, PAD, W - 2 * PAD, H - 2 * PAD))

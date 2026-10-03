@@ -177,7 +177,8 @@ class GlassMixin:
                         lens = liquid.Lens(pw, ph, radius * self.scale)
                         card = lens.card_mask()
                         key = want
-                    out = lens.frame(picture, card, self.glass_tiles(), (8 + 4 * t) * self.scale)
+                    out = lens.frame(picture, card, self.glass_tiles(), (8 + 4 * t) * self.scale,
+                                     frost=22.0 * t * self.scale)
                     self.latest = QImage(out.tobytes(), out.width, out.height, out.width * 4,
                                          QImage.Format_RGBA8888).copy()
                     self.latest.setDevicePixelRatio(self.dpi)

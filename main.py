@@ -1593,7 +1593,9 @@ class Api:
             # stripes, so the lens's picture is blurred at half size, before
             # it is sampled, to remove what the grid cannot represent.
             level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
-            scale, pre_blur, post_blur = _liquid_params(level) if liquid else (8, 0, 2)
+            # The lens refracts this picture, so it stays detailed whatever the blur setting: that is applied to
+            # the glass under the lens by the window itself (nativeui/glass.py), not here.
+            scale, pre_blur, post_blur = _liquid_params(min(level, _LIQUID_PICTURE_MAX)) if liquid else (8, 0, 2)
             small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
             if liquid:
                 small = (small.reduce(2) if not (w % 2 or h % 2) else
@@ -2630,6 +2632,9 @@ def snap_rect(rect, others, areas, threshold, gap):
     return int(x), int(y)
 
 
+_LIQUID_PICTURE_MAX = 0.3
+
+
 def _liquid_params(level):
     """How the liquid glass's picture is made for a blur level, 0 (the clearest:
     half the window's detail, hardly blurred) to 1 (as frosted as the classic glass):
@@ -3355,8 +3360,9 @@ def main():
                     w.run_on_ui_thread(lambda i=i: w.native.grab().save(
                         os.path.join(folder, "p%02d_%04d.png" % (i, ms))))
                     rect = _window_rect(_get_hwnd(w))
-                    webview.log("probe: %d ms rect=%s scene=%dx%d opacity=%.2f" % (
-                        ms, rect, w.native.pw, w.native.ph, w.native.windowOpacity()))
+                    webview.log("probe: %d ms rect=%s want=%s scene=%dx%d opacity=%.2f" % (
+                        ms, rect, api._flyout_origin(rect[2] - rect[0], rect[3] - rect[1]) if rect else None,
+                        w.native.pw, w.native.ph, w.native.windowOpacity()))
                     try:
                         ImageGrab.grab(all_screens=True).save(os.path.join(folder, "s%02d_%04d.png" % (i, ms)))
                     except Exception:

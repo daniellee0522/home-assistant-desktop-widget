@@ -327,7 +327,7 @@ class Preview(View):
             q = QPainter(img)
             q.scale(s * self.zoom_k, s * self.zoom_k)
             render.draw_widget(q, self.size_key, self.widget["tiles"], self.editor.states, self.scene.theme, None, 1.0,
-                               False, self.scene.style, None, self.scene.theme_raw, self.form_override)
+                               False, self.scene.style, None, self.scene.theme_raw, self.form_override, False)
             q.end()
             pix = QPixmap.fromImage(img)
             pix.setDevicePixelRatio(s)
@@ -685,7 +685,9 @@ class EditorMixin:
         y += 12 + 14.4 + 8
         self.minimap_host = View(LEFT_X, y, LEFT_W, 120)
         body.add(self.minimap_host)
+        self.mm_built = None
         self.fill_minimap()
+        self.mm_built = self.minimap_host.h              # what the rows below were placed for
         y += self.minimap_host.h + 10
         lock = CheckRow("鎖定位置 (桌面上無法拖曳移動)", bool(self.prefs.get("lock_position")), LEFT_W,
                         lambda on: self.save_pref({"lock_position": on}))
@@ -787,9 +789,7 @@ class EditorMixin:
         mm = Minimap(self, self.layout, LEFT_W)
         host.add(mm)
         host.h = mm.h
-        # the rest of the left column follows it: build again when the map's height differs
-        if getattr(self, "_mm_h", None) not in (None, mm.h):
-            self._mm_h = mm.h
+        # the rest of the left column follows it: when the layout arrives after the page was built, build again
+        if self.mm_built is not None and self.mm_built != mm.h:
             QTimer.singleShot(0, self.build)
-        self._mm_h = mm.h
         self.request_paint()
