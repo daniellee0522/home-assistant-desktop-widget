@@ -46,6 +46,7 @@ class GlassMixin:
         self.glass_queued = threading.Event()
         self.sample_now = threading.Event()
         self.force = threading.Event()    # the next picture must not be taken for the last one
+        self._glass_fit = None            # what the glass was made for: see fit_glass
         self.dragging = False
         self._stop = threading.Event()
         self._glass_thread = None
@@ -67,9 +68,30 @@ class GlassMixin:
         self.sample_now.set()
 
     def reset_glass(self):
-        """The size or the shape changed: what was made no longer fits."""
+        """The style changed: nothing made before fits, not even the last picture."""
         self.mask = None
         self.glass = None
+        self.latest = None
+        self._glass_fit = None
+
+    def fit_glass(self):
+        """The card was measured again (every rebuild does it). Nothing happens unless its size or shape
+        changed; then the glass is made again at once from the last picture (the classic glass is that
+        picture stretched over the card), and a new picture is asked for.
+
+        It used to be dropped at every measurement, and on a still desktop no new picture came to replace
+        it: a detail card lost its blur each time the device it shows changed (the volume moved, a light
+        went on), and the tray panel each time the preferences did."""
+        key = (self.pw, self.ph, self.dpi, self.glass_card()[2], self._liquid_glass())
+        if key == self._glass_fit:
+            return
+        self._glass_fit = key
+        self.mask = None
+        if self.latest is not None and not self._liquid_glass() and self._make_glass():
+            self.update()
+        else:
+            self.glass = None             # the lens is made for one size only
+        self.invalidate_glass()
 
     # -- the picture -----------------------------------------------------------------
     def _card_mask(self):
@@ -90,9 +112,14 @@ class GlassMixin:
 
     def _on_glass(self):
         self.glass_queued.clear()
+        if self._make_glass():
+            self.glass_changed()
+
+    def _make_glass(self):
+        """self.glass from the last picture. False when there is none."""
         img = self.latest
         if img is None:
-            return
+            return False
         if self._liquid_glass():
             self.glass = img
         else:
@@ -109,7 +136,7 @@ class GlassMixin:
             f.end()
             out.setDevicePixelRatio(self.dpi)
             self.glass = out
-        self.glass_changed()
+        return True
 
     def glass_changed(self):
         """A new picture is in self.glass."""

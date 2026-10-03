@@ -282,6 +282,79 @@ class Card(unittest.TestCase):
         win.dispose()
 
 
+class GlassStaysOnAStillDesktop(unittest.TestCase):
+    """A window rebuilt at the same size keeps its glass even when no new picture of the desktop comes
+    (a still desktop): the detail card lost its blur each time the volume of the speaker it shows moved."""
+
+    def still_desktop(self, api):
+        frame = {"blur_raw": bytes([90, 120, 160]) * (12 * 10), "blur_w": 12, "blur_h": 10, "hash": 7, "paced": True}
+        shots = []
+
+        def backdrop(kind, last_hash, pw, ph, *a, **k):
+            shots.append(last_hash)
+            if last_hash is None:                  # the first look, or one that was forced
+                return dict(frame, w=pw, h=ph)
+            time.sleep(0.05)
+            return {"unchanged": True, "hash": 7, "paced": True}
+        api.get_desktop_backdrop = backdrop
+        return shots
+
+    def test_card_keeps_its_glass_when_the_volume_changes(self):
+        api = FakeApi()
+        t = {"id": "t1", "entity": "media_player.s", "domain": "media_player", "room": "喇叭", "label": ""}
+        api.tiles = [t]
+        self.still_desktop(api)
+        win = detail.create_popover(api)
+        card = win.native
+        pump(100)
+        card.push_states([("media_player.s", {"state": "playing", "attributes": {"volume_level": 0.3}})])
+        card.open_tile("t1")
+        card.show()
+        card.start_glass()
+        pump(400)
+        self.assertIsNotNone(card.glass)
+        size = (card.pw, card.ph)
+        for level in (0.35, 0.4, 0.45):            # Home Assistant answering the slider
+            card.push_states([("media_player.s", {"state": "playing", "attributes": {"volume_level": level}})])
+            pump(150)
+            self.assertEqual((card.pw, card.ph), size)
+            self.assertIsNotNone(card.glass)
+        win.dispose()
+
+    def test_resized_card_is_given_glass_at_once_and_a_new_picture(self):
+        api = FakeApi()
+        t = {"id": "t1", "entity": "light.a", "domain": "light", "room": "燈", "label": ""}
+        api.tiles = [t]
+        shots = self.still_desktop(api)
+        win = detail.create_popover(api)
+        card = win.native
+        pump(100)
+        card.push_states([("light.a", {"state": "on", "attributes": {"brightness": 128}})])
+        card.open_tile("t1")
+        card.show()
+        card.start_glass()
+        pump(400)
+        looks = shots.count(None)
+        card.set_edit(True)                        # a taller card
+        self.assertIsNotNone(card.glass)           # the last picture, stretched, until the new one
+        self.assertEqual((card.glass.width(), card.glass.height()), (card.pw, card.ph))
+        pump(400)
+        self.assertGreater(shots.count(None), looks)   # and a new picture was taken for the new size
+        win.dispose()
+
+    def test_panel_keeps_its_glass_when_the_preferences_are_pushed(self):
+        api = FakeApi("grid", tiles_of(8))
+        self.still_desktop(api)
+        win, sc = make_panel(api)
+        sc.start_glass()
+        pump(400)
+        self.assertIsNotNone(sc.glass)
+        sc.apply_prefs(dict(api._prefs()))         # another window saved something
+        pump(200)
+        self.assertIsNotNone(sc.glass)
+        win.dispose()
+
+
 class FitsItsMonitor(unittest.TestCase):
     """The panel takes about the same share of any monitor, and never more than its work area."""
 

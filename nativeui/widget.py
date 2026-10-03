@@ -221,9 +221,9 @@ class _Surface(GlassMixin, QWidget):
         self.scroll = max(0.0, min(self.scroll, self.scroll_max))
         if hwnd:
             _user32.SetWindowPos(hwnd, None, 0, 0, self.pw, self.ph, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
-        self.reset_glass()
+        self.fit_glass()
         self.rebuild()
-        self.facade.invalidate_backdrop()
+        self.facade.invalidate_backdrop()             # the tiles may have moved: the liquid glass blurs behind each
 
     def rebuild(self):
         self.theme = self._resolve_theme()

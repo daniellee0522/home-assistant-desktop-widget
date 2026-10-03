@@ -971,7 +971,7 @@ class Scene(GlassMixin, QWidget):
         self.dpi = ((_dpi(hwnd) / 96.0) if hwnd else (self.devicePixelRatioF() or 1.0)) or 1.0
         self.scale = self.zoom_css * self.dpi
         self.pw, self.ph = max(1, round(self.css_w * self.scale)), max(1, round(self.css_h * self.scale))
-        self.reset_glass()
+        self.fit_glass()
         for f in self.fields:
             f.restyle()
             f.place()
