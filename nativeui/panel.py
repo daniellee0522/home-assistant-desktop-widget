@@ -367,14 +367,16 @@ class PanelScene(OverlayScene):
             self.make_bg()
             threading.Thread(target=self.api.backdrop_armed, daemon=True).start()
             return
-        self.glass = None
+        # What it showed last time is kept (same size, same place) and stands in for a moment; only a window with
+        # no picture yet waits for one.
+        patient = 0.3 if self.glass is None else 0.05
         self.invalidate_glass()
         done = threading.Event()
         self.arm_event = done
 
         def wait():
             time.sleep(0.04)
-            done.wait(0.3)
+            done.wait(patient)
             self.api.backdrop_armed()
         threading.Thread(target=wait, daemon=True).start()
 

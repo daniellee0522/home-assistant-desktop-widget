@@ -3320,6 +3320,33 @@ def main():
             t0 = time.time()
             api.toggle_flyout()
             webview.log("probe: toggle returned after %.2fs" % (time.time() - t0))
+            if os.environ.get("HA_WIDGET_PROBE_CYCLES"):
+                # opens and closes it again and again, timing each (no pictures)
+                def timed(name):
+                    inner = getattr(api, name)
+
+                    def run(*a, **k):
+                        t = time.time()
+                        try:
+                            return inner(*a, **k)
+                        finally:
+                            webview.log("probe:   %s %.3fs" % (name, time.time() - t))
+                    setattr(api, name, run)
+                for name in ("close_popover", "_sync_client_entities", "_apply_capture_exclusion",
+                             "_ensure_overlay", "_place_flyout", "_arm_backdrop", "_apply_system_glass",
+                             "_tray_corner"):
+                    timed(name)
+                for n in range(3):
+                    t1 = time.time()
+                    api.toggle_flyout()
+                    t2 = time.time()
+                    time.sleep(1.5)
+                    t3 = time.time()
+                    api.toggle_flyout()
+                    t4 = time.time()
+                    time.sleep(1.5)
+                    webview.log("probe: cycle %d open call %.2fs close call %.2fs" % (n, t2 - t1, t4 - t3))
+                os._exit(0)
             from PIL import ImageGrab
             for i in range(32):
                 w = api._flyout_window

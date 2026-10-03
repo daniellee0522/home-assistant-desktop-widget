@@ -147,7 +147,8 @@ class GlassMixin:
                     continue
                 if shot.get("skip"):
                     taken = False
-                    time.sleep((shot.get("retry_ms") or 500) / 1000.0)
+                    # Hidden or covered: asked again later, but at once when the window is shown or must look again.
+                    self.sample_now.wait((shot.get("retry_ms") or 500) / 1000.0)
                     continue
                 if not shot.get("paced"):
                     time.sleep(max(0.016, (shot.get("ms") or 0) * 4 / 1000.0) if quiet < 4 else 3.0)
