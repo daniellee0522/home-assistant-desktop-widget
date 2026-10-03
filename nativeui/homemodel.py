@@ -186,6 +186,13 @@ class HomeModel:
         return w, h
 
     @staticmethod
+    def cat_span(rec):
+        """A capsule screen's own size for a tile; the rooms' sizes (w, h) do not reach it."""
+        w = 2 if rec and rec.get("cat_w") == 2 else 1
+        h = 2 if rec and rec.get("cat_h") == 2 and w == 2 else 1
+        return w, h
+
+    @staticmethod
     def form(span):
         return "big" if span[1] == 2 else "bar" if span[0] == 2 else "small"
 

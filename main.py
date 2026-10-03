@@ -267,6 +267,7 @@ class Api:
                     window = native_detail.create_popover(
                         self, x=first.get("x", 200), y=first.get("y", 200))
                     ready.set()                      # drawn natively: nothing to wait for
+                window.events.showing += lambda: _apply_window_shape(window)
                 window.events.shown += lambda: (
                     self._apply_capture_exclusion(), _set_noactivate(window, True),
                     self._apply_system_glass())
@@ -284,6 +285,7 @@ class Api:
                 else:
                     window = native_panel.create_panel(self)
                     ready.set()
+                window.events.showing += lambda: _apply_window_shape(window)
                 window.events.shown += self._apply_capture_exclusion
                 window.events.deactivated += lambda: threading.Thread(
                     target=self.dismiss_flyout, daemon=True).start()
@@ -1265,6 +1267,7 @@ class Api:
                     self, "HA Widgets Settings", "settings", 420, 640, rehide=False)
             else:
                 window = native_settings.create_settings(self)
+            window.events.showing += lambda: _apply_window_shape(window)
             window.events.shown += self._apply_capture_exclusion
             self._bind_settings_window(window)
             return window
@@ -3317,11 +3320,20 @@ def main():
             t0 = time.time()
             api.toggle_flyout()
             webview.log("probe: toggle returned after %.2fs" % (time.time() - t0))
+            from PIL import ImageGrab
             for i in range(32):
                 w = api._flyout_window
                 if w:
+                    ms = int((time.time() - t0) * 1000)
                     w.run_on_ui_thread(lambda i=i: w.native.grab().save(
-                        os.path.join(folder, "p%02d_%04d.png" % (i, int((time.time() - t0) * 1000)))))
+                        os.path.join(folder, "p%02d_%04d.png" % (i, ms))))
+                    rect = _window_rect(_get_hwnd(w))
+                    webview.log("probe: %d ms rect=%s scene=%dx%d opacity=%.2f" % (
+                        ms, rect, w.native.pw, w.native.ph, w.native.windowOpacity()))
+                    try:
+                        ImageGrab.grab(all_screens=True).save(os.path.join(folder, "s%02d_%04d.png" % (i, ms)))
+                    except Exception:
+                        pass
                 time.sleep(0.25)
             os._exit(0)
         threading.Thread(target=probe, daemon=True).start()

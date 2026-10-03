@@ -110,5 +110,16 @@ class Model(unittest.TestCase):
         self.assertEqual((rec["x"], rec["y"], rec["w"], rec["h"]), (0, 0, 1, 1))
 
 
+class CapsuleSizes(unittest.TestCase):
+    def test_capsule_shape_is_apart_from_the_room_shape(self):
+        import config
+        rec = {"id": "home:light.a", "w": 2, "h": 2, "cat_w": 2}
+        self.assertEqual(HomeModel.span(rec), (2, 2))
+        self.assertEqual(HomeModel.cat_span(rec), (2, 1))
+        self.assertEqual(HomeModel.cat_span({"w": 2, "h": 2}), (1, 1))
+        kept = config.tile_layout(rec)
+        self.assertEqual((kept.get("cat_w"), kept.get("cat_h")), (2, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -143,6 +143,42 @@ class EditMixin:
         self.apply_category_state(animate=False)
         return True
 
+    # -- a capsule screen's own sizes: apart from the rooms' ---------------------------------------------------
+    def add_cat_handle(self, tv, e):
+        z = render.BIG_ZOOM if tv.form == "big" else 1.0
+        handle = ResizeHandle(z)
+        handle.x, handle.y = tv.w - 10 * z - handle.w, tv.h - 10 * z - handle.h
+        handle.on_press = lambda ev, tv=tv, e=e: self.cat_resize_press(tv, e, ev)
+        handle.on_move = lambda ev: self.resize_move(tv, ev)
+        handle.on_release = lambda ev, e=e: self.cat_resize_release(e)
+        tv.add(handle)
+
+    def cat_resize_press(self, tv, e, ev):
+        span = self.m.cat_span(self.m.record(e["entity_id"]))
+        ghost = Ghost(tv.w, tv.h, self.panel.t["radius_tile"])
+        ghost.x, ghost.y = tv.x, tv.y
+        tv.parent.add(ghost)
+        self.resizing = {"tv": tv, "e": e, "span": span, "ghost": ghost, "origin": tv.abs_pos(), "grid": tv.parent}
+        return True
+
+    def cat_resize_release(self, e):
+        r = getattr(self, "resizing", None)
+        self.resizing = None
+        if not r:
+            return True
+        rec = self.m.ensure_record(e["entity_id"])
+        span = r["span"]
+        for key in ("cat_w", "cat_h"):
+            rec.pop(key, None)
+        if span[0] == 2:
+            rec["cat_w"] = 2
+        if span[1] == 2:
+            rec["cat_h"] = 2
+        self.persist()
+        self.build()
+        self.apply_category_state(animate=False)
+        return True
+
     # -- dragging a tile -----------------------------------------------------------------------------------------
     def drag_press(self, tv, e, ev):
         self.drag = {"tv": tv, "e": e, "start": (ev.gx, ev.gy), "lifted": False}

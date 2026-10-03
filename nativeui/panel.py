@@ -48,6 +48,7 @@ class PanelScene(OverlayScene):
         self.home = None
         self.configure()
         self.retheme()
+        self.rebuild()                       # so it has its size before it is ever shown
         threading.Thread(target=self._load_states, daemon=True).start()
 
     # -- preferences ---------------------------------------------------------------------------------
@@ -337,6 +338,10 @@ class PanelScene(OverlayScene):
     # -- coming in and going away --------------------------------------------------------------------------------------
     def request_size(self):
         self.update_metrics()
+        # The window is that size at once; Api.resize_flyout_window then puts it at its tray corner. Until
+        # then it would be Qt's default, many times too big, and open showing that.
+        ratio = self.devicePixelRatioF() or 1.0
+        self.resize(max(1, round(self.pw / ratio)), max(1, round(self.ph / ratio)))
         self.seq += 1
         seq, pw, ph = self.seq, self.pw, self.ph
         threading.Thread(target=lambda: self.api.resize_flyout_window(pw, ph, seq), daemon=True).start()

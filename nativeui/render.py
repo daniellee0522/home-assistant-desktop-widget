@@ -790,25 +790,32 @@ def draw_empty(p, W, H, small, theme, raw_theme, dim):
     if dim:
         title_c, sub_c = tcol["off_text1"], tcol["off_text2"]
     width = W - 40
-    blocks = [([chr(0x2302)], font(60 if small else 80, QFont.Normal), ACCENT["blue"], 60 if small else 80)]
-    tf = font(26 if small else 40, QFont.Bold)
-    blocks.append((wrap_text(tr("尚未設定任何配件"), tf, width), tf, title_c, (26 if small else 40) * 1.2))
-    if not small:
-        sf = font(26, QFont.Normal)
-        blocks.append((wrap_text(tr("按這裡開始設定 Home Assistant"), sf, width), sf, sub_c, 26 * 1.25))
-    btn_h = 26 * 1.33 + 28
-    total = sum(len(lines) * h for lines, _, _, h in blocks) + 8 * (len(blocks) - 1) + (0 if small else 8 + 8 + btn_h)
+    k = 1.0
+    while True:                                   # smaller until the message and its button sit inside the card
+        icon = (60 if small else 80) * k
+        blocks = [([chr(0x2302)], font(icon, QFont.Normal), ACCENT["blue"], icon)]
+        tf = font((26 if small else 40) * k, QFont.Bold)
+        blocks.append((wrap_text(tr("尚未設定任何配件"), tf, width), tf, title_c, (26 if small else 40) * k * 1.2))
+        if not small:
+            sf = font(26 * k, QFont.Normal)
+            blocks.append((wrap_text(tr("按這裡開始設定 Home Assistant"), sf, width), sf, sub_c, 26 * k * 1.25))
+        btn_h = 26 * k * 1.33 + 28 * k
+        gap = 8 * k
+        total = sum(len(lines) * h for lines, _, _, h in blocks) + gap * (len(blocks) - 1)             + (0 if small else 2 * gap + btn_h)
+        if total <= H - 40 or k < 0.45:
+            break
+        k *= 0.94
     y = (H - total) / 2
     for lines, f, color, h in blocks:
         for line in lines:
             draw_centred(p, line, f, color, QRectF(20, y, width, h))
             y += h
-        y += 8
+        y += gap
     if small:
         return None
-    f = font(26, QFont.DemiBold)
+    f = font(26 * k, QFont.DemiBold)
     tw = QFontMetricsF(f).horizontalAdvance(tr("開啟設定")) / 10 * HSCALE
-    rect = QRectF((W - tw - 72) / 2, y + 8, tw + 72, btn_h)
+    rect = QRectF((W - tw - 72 * k) / 2, y + gap, tw + 72 * k, btn_h)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(ACCENT["blue"]))
     p.drawPath(squircle_pill(rect))

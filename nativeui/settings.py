@@ -213,6 +213,20 @@ class SettingsScene(EditorMixin, OverlayScene):
             f.place()
         self.request_paint()
 
+    def mousePressEvent(self, e):
+        gx, gy = self._css(e)
+        if self.popup is None and isinstance(self.view_at(gx, gy), ui.ScrollView):
+            self.pressed_nothing(gx, gy, e)            # the page's own background, between its controls
+            return
+        super().mousePressEvent(e)
+
+    def pressed_nothing(self, gx, gy, e):
+        """The window has no title bar of its own: it is carried by whatever is not a control."""
+        if e.button() == Qt.LeftButton:
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.startSystemMove()
+
     def request_size(self):
         self.update_metrics()
         self.seq = getattr(self, "seq", 0) + 1

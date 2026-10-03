@@ -460,9 +460,10 @@ class HomeView(EditMixin, View):
         from .homemodel import home_layout
         return home_layout(self.m.items(entities))
 
-    def make_tile(self, e, editing, plain=False):
+    def make_tile(self, e, editing, plain=False, cat=False):
         tile = self.m.tile_for(e)
-        span = self.m.span(self.m.record(e["entity_id"]))
+        rec = self.m.record(e["entity_id"])
+        span = self.m.cat_span(rec) if cat else self.m.span(rec)
         form = self.m.form(span)
         w = span[0] * TILE_W + (span[0] - 1) * GAP
         h = span[1] * TILE_H + (span[1] - 1) * GAP
@@ -476,9 +477,10 @@ class HomeView(EditMixin, View):
 
     # -- the capsule's own screen -----------------------------------------------------------------------------------------
     def category_node(self, e):
-        tv = self.make_tile(e, False, plain=self.m.cat_editing)
+        tv = self.make_tile(e, False, plain=self.m.cat_editing, cat=True)
         if not self.m.cat_editing:
             return tv
+        self.add_cat_handle(tv, e)
         chosen = self.m.category_chosen(e)
         tv.interactive = True
         tv.on_press = lambda ev: True
@@ -538,7 +540,7 @@ class HomeView(EditMixin, View):
         from .homemodel import home_layout
         items = []
         for i, e in enumerate(entities):
-            w, h = self.m.span(self.m.record(e["entity_id"]))
+            w, h = self.m.cat_span(self.m.record(e["entity_id"]))
             items.append({"id": e["entity_id"], "w": w, "h": h, "order": i, "x": None, "y": None})
         return home_layout(items)
 

@@ -125,6 +125,11 @@ def tile_layout(t):
         out["w"] = 2 if t.get("w") == 2 else 1
     if "h" in t:
         out["h"] = 2 if t.get("h") == 2 else 1
+    # The shape inside a capsule is its own; the room's shape does not reach it.
+    if t.get("cat_w") == 2:
+        out["cat_w"] = 2
+    if t.get("cat_h") == 2:
+        out["cat_h"] = 2
     for axis in ("x", "y"):
         value = t.get(axis)
         if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 200:
