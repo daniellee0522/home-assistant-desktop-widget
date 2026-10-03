@@ -276,7 +276,14 @@
  "+ 新增感測器": "+ Add sensors",
  "預覽": "Preview",
  "尚無配件，按下方「%s」": "Nothing yet: press “%s” below",
- "天氣、攝影機與圖表": "Weather, cameras and charts",
  "按這裡加入配件": "Press here to add devices",
- "編輯 Widget": "Edit widget"
+ "編輯 Widget": "Edit widget",
+ "時鐘": "Clock",
+ "日曆": "Calendar",
+ "播放器": "Player",
+ "選擇播放器": "Choose a player",
+ "更換播放器": "Change player",
+ "未在播放": "Not playing",
+ "書房": "Study",
+ "時鐘、日曆、天氣、攝影機、圖表與播放器": "Clocks, calendars, weather, cameras, charts and players"
 }

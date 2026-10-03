@@ -610,7 +610,7 @@ class Api:
     def _first_of_kind(self, kind):
         """What a new widget of this kind starts with: a weather or a camera shows the first there is (the
         editor changes it); the others start empty."""
-        domain = {"weather": "weather", "camera": "camera"}.get(kind)
+        domain = {"weather": "weather", "camera": "camera", "media": "media_player"}.get(kind)
         if not domain or not self._cfg.get("ha_token"):
             return []
         try:

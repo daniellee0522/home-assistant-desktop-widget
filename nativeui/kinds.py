@@ -1,13 +1,14 @@
-"""The other kinds of desktop widget, after iOS's own: the weather, a camera, a chart of sensors and a
-A widget of the tiles kind is render.draw_widget's (scenes and scripts are tiles there).
+"""The other kinds of desktop widget, after iOS's own: a clock, a calendar, the weather, a camera, a chart of
+sensors and a player. A widget of the tiles kind is render.draw_widget's (scenes and scripts are tiles there).
 
 A widget is made of its kind, dragged from the editor's palette, and keeps it. Its devices (its tiles) say
-what it shows: a weather entity, a camera, or two sensors. Each kind has one size of its own
+what it shows: a weather entity, a camera, two sensors or a player; a clock and a calendar need none. Each kind has one size of its own
 (KIND_SIZE, as config.KIND_SIZE); the drawing still works in every size.
 What comes from elsewhere than the states (the forecast, the camera's picture, the sensors' history) is in
 `extras`, fetched by the widget (nativeui/widget.py).
 """
 import datetime
+import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -15,15 +16,18 @@ from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath
 
 from . import render
 
-KINDS = ("tiles", "weather", "camera", "chart")
-KIND_LABELS = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "圖表"}
-KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4"}
-KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "chart": "mdi:chart-line"}
+KINDS = ("tiles", "clock", "calendar", "weather", "camera", "chart", "media")
+KIND_LABELS = {"tiles": "配件", "clock": "時鐘", "calendar": "日曆", "weather": "天氣", "camera": "攝影機",
+               "chart": "圖表", "media": "播放器"}
+KIND_SIZE = {"clock": "2x2", "calendar": "2x2", "weather": "2x4", "camera": "2x4", "chart": "2x4", "media": "2x4"}
+KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "chart": "mdi:chart-line",
+              "media": "mdi:music"}
 # what an empty one asks for
-KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器"}
-# which devices each kind takes, and how many (None: any number)
-KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",),}
-KIND_MAX = {"weather": 1, "camera": 1, "chart": 2}
+KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器", "media": "選擇播放器"}
+# which devices each kind takes, and how many (None: any number); a clock and a calendar take none
+KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",), "media": ("media_player",)}
+KIND_MAX = {"weather": 1, "camera": 1, "chart": 2, "media": 1}
+NO_DEVICES = ("clock", "calendar")
 
 CONDITIONS = {
     "sunny": ("weather-sunny", "晴", "Sunny"), "clear-night": ("weather-night", "晴朗", "Clear"),
@@ -50,6 +54,8 @@ def compatible(kind, tile):
 
 def shown(kind, tiles):
     """The devices a widget of this kind shows."""
+    if kind in NO_DEVICES:
+        return []
     out = [t for t in tiles if compatible(kind, t)]
     return out[:KIND_MAX[kind]] if kind in KIND_MAX else out
 
@@ -334,6 +340,185 @@ def draw_chart(p, W, H, cols, rows, tiles, states, history, tcol):
             _spark(p, rect, (history or {}).get(tile["entity"]), color)
 
 
+# ---------------------------------------------------------------------------------- a clock, a calendar
+
+def _face(p, W, H, card, theme, dim, tcol, style):
+    """The face of a clock or a calendar, as iOS's: solid white (or black in the dark), or clear glass while
+    dimmed. Returns (ink, ink2) for what is drawn on it."""
+    if dim:
+        render.draw_card_bg(p, W, H, tcol, style, theme)
+        return QColor(255, 255, 255, 235), QColor(255, 255, 255, 150)
+    dark = theme == "dark"
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(28, 28, 30, 238) if dark else QColor(255, 255, 255, 242))
+    p.drawPath(card)
+    render.inner_shadow(p, card, QColor(255, 255, 255, 30) if dark else QColor(0, 0, 0, 18))
+    return (QColor(245, 245, 247), QColor(245, 245, 247, 140)) if dark else (QColor(17, 17, 19), QColor(17, 17, 19, 120))
+
+
+def _squircle_at(W, H, inset, angle, n=5.0):
+    """Where a ray from the middle at `angle` meets a squircle `inset` inside the card."""
+    a, b = W / 2 - inset, H / 2 - inset
+    c, s = math.cos(angle), math.sin(angle)
+    r = (abs(c / a) ** n + abs(s / b) ** n) ** (-1 / n)
+    return W / 2 + r * c, H / 2 + r * s
+
+
+def draw_clock(p, W, H, ink, ink2, now):
+    """The time, large and narrow, inside a ring of minute ticks (longer and bolder at the hours); the day
+    above it."""
+    for i in range(60):
+        hour = i % 5 == 0
+        ang = -math.pi / 2 + i / 60 * 2 * math.pi
+        x1, y1 = _squircle_at(W, H, 18, ang)
+        x2, y2 = _squircle_at(W, H, 18 + (22 if hour else 12), ang)
+        p.setPen(QPen(ink if hour else ink2, 4.5 if hour else 2.5, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    day = (now.strftime("%a %m/%d") if render._language == "en" else
+           "週%s %d/%d" % ("一二三四五六日"[now.weekday()], now.month, now.day))
+    _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 76, "c", W)
+    text = now.strftime("%H:%M")
+    f = _font(124, QFont.Black)
+    narrow = 0.74                                      # a condensed face, as iOS's clock
+    tw = render.QFontMetricsF(f).horizontalAdvance(text) / 10 * render.HSCALE * narrow
+    k = min(1.0, (W - 110) / max(1.0, tw))
+    p.save()
+    p.translate(W / 2, H / 2 + 16)
+    p.scale(narrow * k, k)
+    fm = render.QFontMetricsF(f)
+    p.setPen(Qt.NoPen)
+    p.setBrush(ink)
+    full = fm.horizontalAdvance(text) / 10 * render.HSCALE
+    p.drawPath(render.text_path(QPointF(0, 0), f, text, -full / 2, -fm.height() / 20 + fm.ascent() / 10))
+    p.restore()
+
+
+def draw_calendar(p, W, H, ink, ink2, today, accent):
+    """The month: its name, the days of the week, and its days with today in a filled circle."""
+    pad = 26
+    month = today.strftime("%B") if render._language == "en" else "%d月" % today.month
+    _text(p, month, _font(22, QFont.Bold), accent, pad + 4, pad - 2)
+    names = "SMTWTFS" if render._language == "en" else "日一二三四五六"
+    first = today.replace(day=1)
+    lead = (first.weekday() + 1) % 7                  # Sunday first
+    days = (first.replace(month=first.month % 12 + 1, year=first.year + first.month // 12) - first).days
+    rows = (lead + days + 6) // 7
+    cw = (W - 2 * pad) / 7
+    top = pad + 40
+    _f = _font(15, QFont.DemiBold)
+    for i, n in enumerate(names):
+        _text(p, n, _f, ink2, pad + i * cw, top, "c", cw)
+    top += 30
+    rh = (H - pad - 8 - top) / rows
+    df = _font(17, QFont.DemiBold)
+    for d in range(1, days + 1):
+        cell = lead + d - 1
+        r, c = divmod(cell, 7)
+        x, y = pad + c * cw, top + r * rh
+        if d == today.day:
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink)
+            p.drawEllipse(QPointF(x + cw / 2, y + 11), 15, 15)
+            col = QColor(255, 255, 255) if ink.lightness() < 128 else QColor(17, 17, 19)
+        else:
+            col = ink2 if c in (0, 6) else ink
+        _text(p, str(d), df, col, x, y, "c", cw)
+
+
+# ---------------------------------------------------------------------------------- a player
+
+def _when(iso):
+    try:
+        return datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return time.time()
+
+
+def media_position(state):
+    """Where the song is now (seconds), and its length."""
+    attrs = (state or {}).get("attributes") or {}
+    dur = attrs.get("media_duration") or 0
+    pos = attrs.get("media_position") or 0
+    if (state or {}).get("state") == "playing":
+        pos += time.time() - _when(attrs.get("media_position_updated_at"))
+    return max(0.0, min(dur or pos, pos)), dur
+
+
+def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme):
+    """Now playing, as iOS's Music widget: the cover on the left, the song, its artist and where it is on the
+    right, and previous / play-pause / next. The card takes the cover's colour. Returns the buttons as
+    [(rect, action)] (action: "previous", "play_pause", "next")."""
+    attrs = (state or {}).get("attributes") or {}
+    s = (state or {}).get("state") or ""
+    playing = s == "playing"
+    white, soft = QColor(255, 255, 255), QColor(255, 255, 255, 190)
+    if dim:
+        render.draw_card_bg(p, W, H, tcol, style, theme)
+    else:
+        base = QColor("#e8344e")                       # (Music's own red, until a cover gives its colour)
+        if art is not None and not art.isNull():
+            avg = art.scaled(1, 1, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).pixelColor(0, 0)
+            h, sat, v, _ = avg.getHsvF()
+            base = QColor.fromHsvF(max(0.0, h), min(1.0, max(0.35, sat)), min(0.62, max(0.32, v)))
+        g = QLinearGradient(0, 0, 0, H)
+        g.setColorAt(0, base.lighter(118))
+        g.setColorAt(1, base.darker(118))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawPath(card)
+    pad = 24
+    side = H - 2 * pad
+    box = QRectF(pad, pad, side, side)
+    clip = render.squircle(box.x(), box.y(), side, side, 26)
+    p.save()
+    p.setClipPath(clip)
+    if art is not None and not art.isNull():
+        k = max(side / art.width(), side / art.height())
+        p.drawImage(QRectF(box.x() + (side - art.width() * k) / 2, box.y() + (side - art.height() * k) / 2,
+                           art.width() * k, art.height() * k), art)
+    else:
+        p.fillRect(box, QColor(255, 255, 255, 46))
+        render.draw_icon(p, "mdi:music", "#ffffff", QRectF(box.center().x() - 34, box.center().y() - 34, 68, 68))
+    p.restore()
+    x = pad + side + 26
+    tw = W - x - pad
+    render.draw_icon(p, "mdi:music", (255, 255, 255, 0.75), QRectF(W - pad - 26, pad, 26, 26))
+    name = tile.get("room") or attrs.get("friendly_name") or tile["entity"]
+    _text(p, _fit(name, _font(16, QFont.DemiBold), tw - 36), _font(16, QFont.DemiBold), soft, x, pad + 2)
+    title = attrs.get("media_title") or (render.tr("未在播放") if s in ("off", "idle", "standby", "") else s)
+    tf = _font(27, QFont.Bold)
+    _text(p, _fit(title, tf, tw), tf, white, x, pad + 40)
+    artist = attrs.get("media_artist") or attrs.get("app_name") or ""
+    if artist:
+        _text(p, _fit(artist, _font(20, QFont.Medium), tw), _font(20, QFont.Medium), soft, x, pad + 78)
+    pos, dur = media_position(state)
+    if dur:
+        y = pad + 124
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawRoundedRect(QRectF(x, y, tw, 6), 3, 3)
+        p.setBrush(white)
+        p.drawRoundedRect(QRectF(x, y, max(6.0, tw * pos / dur), 6), 3, 3)
+    # the buttons, along the bottom
+    buttons = []
+    big, small = 76, 58
+    cy = H - pad - big / 2
+    cx = x + tw / 2
+    for action, icon, size, dx in (("previous", "mdi:skip-previous", small, -(big / 2 + 22 + small / 2)),
+                                   ("play_pause", "mdi:pause" if playing else "mdi:play", big, 0),
+                                   ("next", "mdi:skip-next", small, big / 2 + 22 + small / 2)):
+        r = QRectF(cx + dx - size / 2, cy - size / 2, size, size)
+        if action == "play_pause":
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 235))
+            p.drawEllipse(r)
+            render.draw_icon(p, icon, "#1d1d1f", r.adjusted(18, 18, -18, -18))
+        else:
+            render.draw_icon(p, icon, "#ffffff", r.adjusted(10, 10, -10, -10))
+        buttons.append((r, action))
+    return buttons
+
+
 # ---------------------------------------------------------------------------------- empty, and the samples
 
 def draw_kind_empty(p, W, H, kind, tcol, dim):
@@ -357,6 +542,11 @@ def draw_kind_empty(p, W, H, kind, tcol, dim):
 def sample(kind):
     """(tiles, states, extras) that show a kind in the editor's palette."""
     t = lambda e, d, name: {"id": e, "entity": e, "domain": d, "room": name, "label": "", "icon": ""}
+    if kind == "media":
+        return ([t("media_player.study", "media_player", render.tr("書房"))],
+                {"media_player.study": {"state": "playing", "attributes": {
+                    "media_title": "Tiny Giant", "media_artist": "HOYO-MiX", "media_duration": 177,
+                    "media_position": 60, "media_position_updated_at": "2000-01-01T00:00:00+00:00"}}}, {})
     if kind == "weather":
         days = [{"datetime": "2026-01-0%dT04:00:00+00:00" % (i + 1), "condition": c, "temperature": hi}
                 for i, (c, hi) in enumerate((("sunny", 27), ("partlycloudy", 26), ("rainy", 23), ("cloudy", 24),
@@ -390,7 +580,16 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
     card = render.squircle(0, 0, W, H, tcol["radius_panel"])
     button = None
-    if kind == "chart" or not mine or dim:     # dimmed, every kind is clear glass, as the tiles are
+    if kind in NO_DEVICES:
+        ink, ink2 = _face(p, W, H, card, theme, dim, tcol, style)
+        now = datetime.datetime.now()
+        if kind == "clock":
+            draw_clock(p, W, H, ink, ink2, now)
+        else:
+            draw_calendar(p, W, H, ink, ink2, now.date(), QColor(255, 255, 255) if dim else QColor("#ff3b30"))
+        p.restore()
+        return None
+    if (kind == "chart" or not mine or dim) and kind != "media":   # dimmed, clear glass, as the tiles are
         render.draw_card_bg(p, W, H, tcol, style, theme)
     if not mine:
         button = draw_kind_empty(p, W, H, kind, tcol, dim) if message else None
@@ -402,7 +601,10 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
                     extras.get("picture_at"), card, dim)
     elif kind == "chart":
         draw_chart(p, W, H, cols, rows, mine, states, extras.get("history"), tcol)
-    if kind in ("weather", "camera") and mine and not dim:
+    elif kind == "media":
+        button = draw_media(p, W, H, mine[0], states.get(mine[0]["entity"]), extras.get("art"), card, tcol, dim,
+                            style, theme)
+    if kind in ("weather", "camera", "media") and mine and not dim:
         render.inner_shadow(p, card, QColor(255, 255, 255, 40))
     p.restore()
     return button

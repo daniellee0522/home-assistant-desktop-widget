@@ -23,8 +23,9 @@ RIGHT_X = LEFT_X + LEFT_W + 22
 RIGHT_W = EDITOR_W - 18 - RIGHT_X
 ROW_STEP = 46                    # a device row and the space under it
 # what the list of devices is called, and its button, by the widget's kind
-LIST_TITLE = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "感測器"}
-ADD_TEXT = {"tiles": "+ 新增配件", "weather": "選擇天氣", "camera": "選擇攝影機", "chart": "+ 新增感測器"}
+LIST_TITLE = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "感測器", "media": "播放器"}
+ADD_TEXT = {"tiles": "+ 新增配件", "weather": "選擇天氣", "camera": "選擇攝影機", "chart": "+ 新增感測器",
+            "media": "選擇播放器"}
 
 
 def new_tile_id():
@@ -108,16 +109,17 @@ class Palette(View):
                 x += bw + 16
             y += lh + 14
         if on_press_kind is not None:
-            self.add(style.label("hint", "天氣、攝影機與圖表", x=0, y=y - 4))
+            self.add(style.label("hint", "時鐘、日曆、天氣、攝影機、圖表與播放器", x=0, y=y - 4))
             y += 14 + 8
             gap = 12
             kw = (LEFT_W - gap) / 2
             others = kinds.KINDS[1:]
-            for i, kind in enumerate(others):
-                item = KindItem(kind, kw, on_press_kind)
-                item.x, item.y = (i % 2) * (kw + gap), y + (i // 2) * (item.h + 14)
-                self.add(item)
-            y += ((len(others) + 1) // 2) * (item.h + 14)
+            for i in range(0, len(others), 2):      # two to a row, each row as tall as its tallest
+                row = [KindItem(kind, kw, on_press_kind) for kind in others[i:i + 2]]
+                for j, item in enumerate(row):
+                    item.x, item.y = j * (kw + gap), y
+                    self.add(item)
+                y += max(item.h for item in row) + 14
         self.h = y - 14
 
 
@@ -433,7 +435,8 @@ class Preview(View):
         whole = self.kind != "tiles"
         key = (sc.theme, sc.style, self.kind, self.zoom_k, p.transform().m11(), render._language,
                repr(tiles) if whole else None,
-               repr({t["entity"]: self.editor.states.get(t["entity"]) for t in tiles}) if whole else None)
+               repr({t["entity"]: self.editor.states.get(t["entity"]) for t in tiles}) if whole else None,
+               time.strftime("%Y%m%d%H%M") if self.kind in kinds.NO_DEVICES else None)   # a clock's minute
         if self.cache is None or self.cache[0] != key:
             z = self.zoom_k
 
@@ -952,7 +955,7 @@ class EditorMixin:
             prev.x, prev.y = RIGHT_X + (RIGHT_W - prev.w) / 2, y + 18
             body.add(prev)
             self.preview = prev
-            if not widget["tiles"]:
+            if not widget["tiles"] and kind not in kinds.NO_DEVICES:
                 body.add(style.label("empty", "尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
             y += box_h
         # the tools
@@ -986,6 +989,9 @@ class EditorMixin:
             fo.x, fo.y = tx, ty
             body.add(fo)
         y = ty + 28 + 10
+        if kind in kinds.NO_DEVICES:             # a clock, a calendar: nothing to choose
+            body.h = max(left_h, y) + 18
+            return body
         # the devices
         tiles = widget["tiles"] if widget else []
         cap = kinds.KIND_MAX.get(kind)
@@ -994,7 +1000,7 @@ class EditorMixin:
                        spacing=0.36))
         text = ADD_TEXT[kind]
         if cap == 1 and tiles:
-            text = {"weather": "更換天氣", "camera": "更換攝影機"}[kind]
+            text = {"weather": "更換天氣", "camera": "更換攝影機", "media": "更換播放器"}[kind]
         add = Button(text, size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue", hover_fill="accent_blue",
                      color="white", on_click=lambda e: self.open_picker())
         if not self.can_add():                   # a chart: two sensors

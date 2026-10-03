@@ -249,7 +249,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             body, max_h, width = self.build_editor_body(), 640, 800
         elif self.page == "picker":
             kind = self.current_kind()
-            title = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "新增感測器"}
+            title = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "新增感測器", "media": "選擇播放器"}
             top = self.header(title.get(kind, "新增配件"),
                               "選擇一個實體" if self.picker_single() else "可複選，選好後按「加入」",
                               back=lambda e: self.go(self.return_page), dot=True)

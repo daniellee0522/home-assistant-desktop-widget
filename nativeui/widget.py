@@ -34,7 +34,9 @@ _user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
 
 HOLD_MS = 420                 # how long a press is held to open the detail card
 # How often what a widget of another kind shows besides states is fetched again (seconds).
-EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300}
+EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300, "media": 3}
+# the kinds whose detail a tap opens
+DETAIL_KINDS = ("weather", "camera", "chart", "media")
 HOLD_SLOP_PX = 8              # moving further than this cancels the hold
 DRAG_PX = 5                   # moving further than this drags the widget
 SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
@@ -95,6 +97,11 @@ class _Surface(GlassMixin, QWidget):
         self.extras_timer = QTimer(self)
         self.extras_timer.setInterval(5000)
         self.extras_timer.timeout.connect(self.refresh_extras)
+        self.kind_buttons = []                    # a player's buttons: [(rect, action)]
+        # a clock is drawn again on the minute, a playing song's place every second
+        self.tick_timer = QTimer(self)
+        self.tick_timer.setSingleShot(True)
+        self.tick_timer.timeout.connect(self._tick)
         self.scroll, self.scroll_max = 0.0, 0.0
         self.tcol = render.tokens("light")
         # What is drawn.
@@ -263,8 +270,10 @@ class _Surface(GlassMixin, QWidget):
             self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
                                                    self.scale, dim, self.style, self._ui(), self.theme_raw)
         else:
-            self.empty_button = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
-                                                  self.scale, dim, self.style, self._ui(), self.theme_raw, self.extras)
+            got = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
+                                    self.scale, dim, self.style, self._ui(), self.theme_raw, self.extras)
+            self.kind_buttons = got if isinstance(got, list) else []
+            self.empty_button = None if isinstance(got, list) else got
         p.end()
         pix = QPixmap.fromImage(img)
         pix.setDevicePixelRatio(self.dpi)
@@ -320,6 +329,8 @@ class _Surface(GlassMixin, QWidget):
     def push_states(self, items):
         for entity, state in items:
             self.states[entity] = state
+        if self.wkind == "media" and self.tiles and any(e == self.tiles[0]["entity"] for e, _ in items):
+            QTimer.singleShot(0, self.refresh_extras)    # a new song: its cover
         self._schedule_redraw()
 
     def _schedule_redraw(self):
@@ -331,6 +342,23 @@ class _Surface(GlassMixin, QWidget):
         self._redraw_pending = False
         self.overlay = self.overlay_dim = None
         self.update()
+        self._schedule_tick()
+
+    def _schedule_tick(self):
+        if self.wkind in ("clock", "calendar"):
+            ms = (60 - time.time() % 60) * 1000 + 30
+        elif self.wkind == "media" and self.tiles and not self.dim_target and \
+                (self.states.get(self.tiles[0]["entity"]) or {}).get("state") == "playing":
+            ms = 1000
+        else:
+            return
+        self.tick_timer.start(int(ms))
+
+    def _tick(self):
+        if self.isVisible():
+            self._redraw_tiles()
+        else:
+            self._schedule_tick()
 
     def optimistic(self, entity, patch):
         st = self.states.get(entity)
@@ -414,8 +442,8 @@ class _Surface(GlassMixin, QWidget):
         cursor = _cursor()
         if i < 0:
             self._press = {"tile": -1, "cursor": cursor, "drag": None, "moved": False, "pos": (px, py),
-                           "button": self._button_at(x, y)}
-            if not self.locked and not self._press["button"]:
+                           "button": self._button_at(x, y), "action": self._action_at(x, y)}
+            if not self.locked and not self._press["button"] and not self._press["action"]:
                 rect = _rect(self._hwnd)
                 if rect:
                     self._press["drag"] = (rect[0], rect[1])
@@ -434,6 +462,13 @@ class _Surface(GlassMixin, QWidget):
     def _button_at(self, x, y):
         r = self.empty_button
         return bool(r and not self.tiles and r.contains(QPointF(x, y)))
+
+    def _action_at(self, x, y):
+        """A player's button under (x, y): its action, or None."""
+        for rect, action in self.kind_buttons:
+            if rect.adjusted(-6, -6, 6, 6).contains(QPointF(x, y)):
+                return action
+        return None
 
     def _held(self):
         if self._press and self._press.get("tile", -1) >= 0 and not self._press.get("moved"):
@@ -492,7 +527,9 @@ class _Surface(GlassMixin, QWidget):
             if press.get("button") and self._button_at(x, y) and not moved:
                 wid = self.widget_id              # an empty widget: the editor, on it
                 threading.Thread(target=lambda: self.api.open_widget_editor(wid), daemon=True).start()
-            elif self.wkind in EXTRAS_EVERY and self.tiles and not moved:
+            elif press.get("action") and self.tiles and not moved:
+                self._play(press["action"])
+            elif self.wkind in DETAIL_KINDS and self.tiles and not moved:
                 self.facade.popover(self.tiles[0])        # a weather, a camera, a chart: its detail
             return
         if i >= len(self.tiles) or press.get("fired"):
@@ -544,6 +581,11 @@ class _Surface(GlassMixin, QWidget):
             return
         if kind == "camera" and self.dim_target:
             return
+        art_url = None
+        if kind == "media":                      # its cover, when the song changed
+            art_url = ((self.states.get(self.tiles[0]["entity"]) or {}).get("attributes") or {}).get("entity_picture")
+            if art_url == self.extras.get("art_url"):
+                return
         now = time.monotonic()
         if now - self._extras_at.get(kind, -1e9) < EXTRAS_EVERY[kind]:
             return
@@ -566,6 +608,11 @@ class _Surface(GlassMixin, QWidget):
                 elif kind == "chart":
                     got["history"] = {t["entity"]: (api.get_history(t["entity"], 24) or {}).get("points") or []
                                       for t in tiles}
+                elif kind == "media":
+                    data = api.get_picture(art_url) if art_url else None
+                    img = QImage.fromData(data) if data else None
+                    got["art"] = img if img is not None and not img.isNull() else None
+                    got["art_url"] = art_url
             except Exception:
                 traceback.print_exc()
 
@@ -575,6 +622,23 @@ class _Surface(GlassMixin, QWidget):
                     self.extras.update(got)
                     self._redraw_tiles()
             self.facade.run_on_ui_thread(done)
+        threading.Thread(target=go, daemon=True).start()
+
+    def _play(self, action):
+        """A player's button: previous, play or pause, next (shown at once, then asked of Home Assistant)."""
+        entity = self.tiles[0]["entity"]
+        st = self.states.get(entity) or {}
+        if action == "play_pause" and st:
+            self.optimistic(entity, {"state": "paused" if st.get("state") == "playing" else "playing"})
+        service = {"previous": "media_previous_track", "play_pause": "media_play_pause",
+                   "next": "media_next_track"}[action]
+        api = self.api
+
+        def go():
+            try:
+                api.call_service("media_player", service, entity, {})
+            except Exception:
+                traceback.print_exc()
         threading.Thread(target=go, daemon=True).start()
 
     # ---- flashes of the momentary tiles -------------------------------------------

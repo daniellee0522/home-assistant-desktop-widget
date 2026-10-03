@@ -173,6 +173,38 @@ class OnTheDesktop(unittest.TestCase):
             self.assertLess(out[1], 160, kind)                  # glass to see through
 
 
+class ClockCalendarPlayer(unittest.TestCase):
+    def test_a_clock_and_a_calendar_need_no_devices(self):
+        for kind in ("clock", "calendar"):
+            w, h = render.widget_size(kinds.KIND_SIZE[kind])
+            img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            p = QPainter(img)
+            button = kinds.draw_widget(p, kind, kinds.KIND_SIZE[kind], [], {}, "light")
+            p.end()
+            self.assertIsNone(button, kind)                     # not an empty widget asking for devices
+            self.assertGreater(img.pixelColor(30, h // 2).alpha(), 200, kind)   # its solid face
+
+    def test_the_player_plays_and_skips_from_the_desktop(self):
+        st = {"media_player.s": {"state": "paused", "attributes": {"media_title": "T", "media_duration": 100,
+                                                                   "media_position": 10}}}
+        api, win, surf = make([T("media_player.s", "media_player")], "media")
+        surf.push_states(list(st.items()))
+        TW.pump(200)
+        actions = {a: r for r, a in surf.kind_buttons}
+        self.assertEqual(sorted(actions), ["next", "play_pause", "previous"])
+        s = surf.scale / surf.devicePixelRatioF()
+        for action in ("play_pause", "next"):
+            c = actions[action].center()
+            QTest.mouseClick(surf, Qt.LeftButton, pos=QPoint(round(c.x() * s), round(c.y() * s)))
+            TW.pump(150)
+        services = [c[2] for c in api.calls if c[0] == "service"]
+        self.assertEqual(services, ["media_play_pause", "media_next_track"])
+        self.assertEqual(surf.states["media_player.s"]["state"], "playing")     # shown at once
+        self.assertFalse([c for c in api.calls if c[0] == "popover"])           # a button is not a tap
+        TW.done(win)
+
+
 class InTheEditor(unittest.TestCase):
     def setUp(self):
         import test_native_settings as TS
