@@ -39,6 +39,15 @@ def _seconds(span):
         return getattr(span, "duration", 0) / 1e7
 
 
+def app_name(aumid):
+    """The playing app's name from its id: "Spotify.exe" -> Spotify, "AppleInc.AppleMusicWin_8wekyb3d8bbwe!App"
+    -> AppleMusicWin."""
+    part = (aumid or "").split("!")[0]
+    if part.lower().endswith(".exe"):
+        return part[:-4].split("\\")[-1]
+    return part.split("_")[0].split(".")[-1]
+
+
 def _iso(when):
     try:
         return when.astimezone(datetime.timezone.utc).isoformat()
@@ -56,6 +65,8 @@ class LocalMedia:
         self._manager = None
         self._loop = None
         self._wake_event = None
+        self._watched = None                        # the session whose changes wake the reading
+        self._props_dirty = True                    # its song (and cover) changed since last read
         if AVAILABLE:
             threading.Thread(target=self._run, daemon=True, name="local-media").start()
 
@@ -75,7 +86,8 @@ class LocalMedia:
                 except Exception:
                     traceback.print_exc()
             try:
-                await asyncio.wait_for(self._wake_event.wait(), 4.0 if (self.slow or not self.active) else 1.0)
+                # (the session's own events wake it at once; this is the fallback)
+                await asyncio.wait_for(self._wake_event.wait(), 5.0 if (self.slow or not self.active) else 2.0)
             except asyncio.TimeoutError:
                 pass
             self._wake_event.clear()
@@ -87,7 +99,23 @@ class LocalMedia:
     async def _session(self):
         if self._manager is None:
             self._manager = await _Manager.request_async()
-        return self._manager.get_current_session()
+            # another app's session becoming the current one is read at once
+            self._manager.add_current_session_changed(lambda *a: self._changed_now(True))
+        session = self._manager.get_current_session()
+        if session is not None and (self._watched is None or
+                                    session.source_app_user_model_id != self._watched.source_app_user_model_id):
+            # its song, its playing or pausing, a jump: read at once, not at the next round
+            session.add_media_properties_changed(lambda *a: self._changed_now(True))
+            session.add_playback_info_changed(lambda *a: self._changed_now(False))
+            session.add_timeline_properties_changed(lambda *a: self._changed_now(False))
+            self._watched = session
+            self._props_dirty = True
+        return session
+
+    def _changed_now(self, song):
+        if song:
+            self._props_dirty = True
+        self._wake()
 
     async def _read(self):
         session = await self._session()
@@ -98,19 +126,25 @@ class LocalMedia:
             info = session.get_playback_info()
             line = session.get_timeline_properties()
             status = _STATES.get(info.playback_status, "idle")
-            attrs = {"friendly_name": NAME, "media_title": props.title or "", "media_artist": props.artist or "",
-                     "app_name": (session.source_app_user_model_id or "").split("!")[-1].replace(".exe", ""),
+            attrs = {"friendly_name": NAME, "media_title": props.title or "",
+                     # (Apple Music gives "artist — album"; the artist is what is shown)
+                     "media_artist": (props.artist or "").split(" — ")[0],
+                     "app_name": app_name(session.source_app_user_model_id),
                      "supported_features": 2 if info.controls.is_playback_position_enabled else 0}
             duration = _seconds(line.end_time) - _seconds(line.start_time)
             if duration > 0:
                 attrs["media_duration"] = round(duration, 1)
                 attrs["media_position"] = round(_seconds(line.position) - _seconds(line.start_time), 1)
                 attrs["media_position_updated_at"] = _iso(line.last_updated_time)
-            key = (props.title, props.artist)
-            if key != self._art_key:
-                self._art_key = key
-                self.art = await self._thumbnail(props.thumbnail)
-                self._art_n += 1
+            # The cover is read again whenever the song's details change, and kept only if it differs: an
+            # app gives the new title first and its cover a moment later.
+            if self._props_dirty or (props.title, props.artist) != self._art_key:
+                self._props_dirty = False
+                self._art_key = (props.title, props.artist)
+                art = await self._thumbnail(props.thumbnail)
+                if art != self.art:
+                    self.art = art
+                    self._art_n += 1
             if self.art:
                 attrs["entity_picture"] = "local:art/%d" % self._art_n
             state = {"state": status, "attributes": attrs}
