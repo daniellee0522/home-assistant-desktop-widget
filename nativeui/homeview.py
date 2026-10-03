@@ -273,7 +273,7 @@ class HomeView(EditMixin, View):
         self.stage.add(self.main)
         self.build_rooms_row(names, hidden)
         self.build_body()
-        self.cat_view = ScrollView(0, 0, W - 4, STAGE_H)
+        self.cat_view = ScrollView(0, 0, W - 4, STAGE_H, fade=36)
         self.cat_view.on_press = lambda e: True
         self.cat_view.on_click = lambda e: self.cat_background_click()
         self.stage.add(self.cat_view)
@@ -423,7 +423,9 @@ class HomeView(EditMixin, View):
 
     def build_body(self):
         m = self.m
-        self.body = ScrollView(12, 74, W - 4 - 24, STAGE_H - 74)
+        # its top and bottom fade while there is more that way: cut off sharp under the room buttons, a
+        # heading scrolled up looked as if it went behind them
+        self.body = ScrollView(12, 74, W - 4 - 24, STAGE_H - 74, fade=36)
         self.body.interactive = True
         self.main.add(self.body)
         self.sections = []
