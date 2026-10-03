@@ -15,10 +15,11 @@ from .homeedit import EditMixin
 from .homemodel import OTHER_ROOM, CATEGORIES
 from .ui import Button, Label, Rect, ScrollView, TextField, TileView, View
 
-W, H = 678, 604
+W, H = 678, 900                     # upright: the rooms get the height
 PAD = 14
 TILE_W, TILE_H, GAP = 152, 146, 14
-STAGE_Y, STAGE_H = PAD + 66 + 70, 440
+STAGE_Y = PAD + 66 + 70
+STAGE_H = H - STAGE_Y - PAD
 HOME_SPAN = TILE_W * 4 + GAP * 3                 # 650: a room is a grid four cells wide
 TINT = {"cyan": "accent_cyan", "yellow": "accent_yellow", "green": "accent_green", "blue": "accent_blue",
         "red": "accent_red", "teal": "accent_teal"}

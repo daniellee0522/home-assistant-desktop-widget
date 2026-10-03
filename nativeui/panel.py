@@ -19,6 +19,7 @@ from .overlay import OverlayScene, create_overlay
 from .ui import ScrollView, TileView, View
 
 PAD, CELL_W, CELL_H, GAP = 14, 152, 146, 14
+GRID_ROWS = 3                          # rows of tiles shown; more scroll
 HOLD_MS, HOLD_SLOP = 420, 8
 FLYOUT_ZOOM = 0.5
 # The panel takes about the same share of any monitor: drawn at FLYOUT_ZOOM on one whose shorter side is
@@ -34,7 +35,7 @@ BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
 # A panel too small for it (a row or two of tiles) grows while it is shown, up to DETAIL_MAX_H.
 DETAIL_SCALE = 1 / FLYOUT_ZOOM
 DETAIL_MARGIN = 14
-DETAIL_MAX_H = 604
+DETAIL_MAX_H = 900                     # as tall as the Home panel
 DETAIL_MS = 320
 
 
@@ -185,7 +186,7 @@ class PanelScene(OverlayScene):
         n = max(1, len(tiles))
         cols = max(1, min(4, n))
         rows_total = -(-n // cols)
-        rows_shown = min(2, rows_total)
+        rows_shown = min(GRID_ROWS, rows_total)
         w = cols * CELL_W + (cols - 1) * GAP + 2 * PAD
         view_h = rows_shown * CELL_H + (rows_shown - 1) * GAP
         h = view_h + 2 * PAD
