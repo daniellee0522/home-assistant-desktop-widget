@@ -388,10 +388,11 @@ def _on_ring(points, cx, cy, angle):
 
 
 def clock_font(px):
-    """The clock's digits: rounded (Arial Rounded MT Bold, with Office), else Windows 11's own Segoe UI Variable
-    Display, semibold."""
+    """The clock's digits: SF Compact Rounded where it is installed (Apple's, which may not be shipped with the
+    app), else Arial Rounded MT Bold (with Office), else Windows 11's own Segoe UI Variable Display; semibold."""
     f = render.font(px, QFont.DemiBold)
-    f.setFamilies(["Arial Rounded MT Bold", "Segoe UI Variable Display"] + render.FAMILIES)
+    f.setFamilies(["SF Compact Rounded", "SF Pro Rounded", "Arial Rounded MT Bold", "Segoe UI Variable Display"]
+                  + render.FAMILIES)
     return f
 
 

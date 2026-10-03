@@ -529,11 +529,12 @@ def tile_layout(size, count, form=None):
     form = form or form_for(cols, rows, count)
     sc, sr = FORM_SPAN[form]
     per_row = cols // sc
-    w, h = sc * CELL_W + (sc - 1) * GAP, sr * CELL_H + (sr - 1) * GAP
+    cw, ch = cell_size(size)
+    w, h = sc * cw + (sc - 1) * GAP, sr * ch + (sr - 1) * GAP
     rects = []
     for i in range(count):
-        rects.append((PAD + (i % per_row) * sc * (CELL_W + GAP),
-                      PAD + (i // per_row) * sr * (CELL_H + GAP), w, h))
+        rects.append((PAD + (i % per_row) * sc * (cw + GAP),
+                      PAD + (i // per_row) * sr * (ch + GAP), w, h))
     return form, rects
 
 
@@ -736,9 +737,27 @@ def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False,
     p.restore()
 
 
+# The space the desktop leaves between two widgets that snap together (main.py's _snap_widget).
+WIDGET_GAP = 12
+
+
 def widget_size(size):
+    """A widget's size in CSS px, as iOS sizes its widgets: from the 2x4 (four tiles by two), two of a size
+    side by side, one gap apart, are as wide as the next size, and two stacked as tall: two 2x2 make a
+    2x4, two 2x4 a 4x4, two 1x1 a 2x2."""
     cols, rows = SIZES.get(size, SIZES["2x4"])
-    return (cols * CELL_W + (cols - 1) * GAP + 2 * PAD, rows * CELL_H + (rows - 1) * GAP + 2 * PAD)
+    wide = 4 * CELL_W + 3 * GAP + 2 * PAD             # the 2x4: 678
+    high = 2 * CELL_H + GAP + 2 * PAD                 # its height: 334
+    w = {4: wide, 2: (wide - WIDGET_GAP) / 2, 1: ((wide - WIDGET_GAP) / 2 - WIDGET_GAP) / 2}[cols]
+    h = {2: high, 4: 2 * high + WIDGET_GAP, 1: (high - WIDGET_GAP) / 2}[rows]
+    return w, h
+
+
+def cell_size(size):
+    """One tile cell of a widget: its tiles share what is inside the padding."""
+    cols, rows = SIZES.get(size, SIZES["2x4"])
+    w, h = widget_size(size)
+    return (w - 2 * PAD - (cols - 1) * GAP) / cols, (h - 2 * PAD - (rows - 1) * GAP) / rows
 
 
 def _fade_gradient(h, stops):

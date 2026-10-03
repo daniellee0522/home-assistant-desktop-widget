@@ -607,12 +607,17 @@ class _Surface(GlassMixin, QWidget):
         if kind in ("camera", "media") and self.dim_target:     # the desktop is out of sight
             return
         art_url = None
-        if kind == "media":                      # its cover, when the song changed
+        now = time.monotonic()
+        if kind == "media":
+            # its cover, as soon as the song changed (no waiting out an interval: a skip shows the new
+            # cover at once), and the old one gone meanwhile, never beside the new song's title
             art_url = ((self.states.get(self.tiles[0]["entity"]) or {}).get("attributes") or {}).get("entity_picture")
             if art_url == self.extras.get("art_url"):
                 return
-        now = time.monotonic()
-        if now - self._extras_at.get(kind, -1e9) < EXTRAS_EVERY[kind]:
+            if self.extras.get("art") is not None:
+                self.extras.update(art=None, art_url=None)
+                self._redraw_tiles()
+        elif now - self._extras_at.get(kind, -1e9) < EXTRAS_EVERY[kind]:
             return
         self._extras_at[kind] = now
         self._fetching.add(kind)
@@ -646,6 +651,8 @@ class _Surface(GlassMixin, QWidget):
                 if got and kind == self.wkind:
                     self.extras.update(got)
                     self._redraw_tiles()
+                if kind == "media":               # the song changed again while its cover came: that one's
+                    QTimer.singleShot(0, self.refresh_extras)
             self.facade.run_on_ui_thread(done)
         threading.Thread(target=go, daemon=True).start()
 

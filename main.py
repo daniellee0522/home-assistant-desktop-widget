@@ -3031,9 +3031,8 @@ def _hide_own_console():
 def _widget_initial_size(size, zoom):
     """Only the size until the window's first measurement; close is better.
     Every side is a whole number of tile cells."""
-    cols, rows = cfgmod.widget_grid(size)
-    w = 2 * PAD + cols * TILE_W + (cols - 1) * GAP
-    h = 2 * PAD + rows * TILE_H + (rows - 1) * GAP
+    from nativeui import render as native_render
+    w, h = native_render.widget_size(size)
     try:
         factor = max(50, min(200, int(zoom))) / 100.0
     except Exception:
