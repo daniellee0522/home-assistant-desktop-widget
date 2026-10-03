@@ -192,7 +192,7 @@ class ClockCalendarPlayer(unittest.TestCase):
         surf.push_states(list(st.items()))
         TW.pump(200)
         actions = {a: r for r, a in surf.kind_buttons}
-        self.assertEqual(sorted(actions), ["next", "play_pause", "previous"])
+        self.assertEqual(sorted(actions), ["next", "play_pause", "previous", "source"])
         s = surf.scale / surf.devicePixelRatioF()
         for action in ("play_pause", "next"):
             c = actions[action].center()

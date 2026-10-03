@@ -237,7 +237,7 @@ def is_on(domain, st):
         return s == "open"
     if domain == "lock":
         return is_unlocked(st)
-    if domain == "media_player":
+    if domain in ("media_player", "local_media"):
         return s == "playing"
     if domain == "vacuum":
         return s in ("cleaning", "returning")
@@ -261,7 +261,7 @@ DEFAULT_ICON = {"light": "light", "switch": "mdi:toggle-switch-variant", "input_
                 "media_player": "media", "lock": "lock", "vacuum": "mdi:robot-vacuum",
                 "scene": "mdi:palette", "script": "script", "automation": "mdi:robot",
                 "sensor": "sensor", "binary_sensor": "sensor", "weather": "mdi:weather-partly-cloudy",
-                "camera": "mdi:cctv"}
+                "camera": "mdi:cctv", "local_media": "mdi:laptop"}
 
 
 def is_open(tile, st):
@@ -359,7 +359,7 @@ def state_text(tile, st):
         return STATE_WORDS[s]
     if domain in MOMENTARY:
         return {"scene": "場景", "script": "腳本", "automation": "自動化"}[domain]
-    if domain == "media_player":
+    if domain in ("media_player", "local_media"):
         return media_label(st or {})
     if domain == "climate":
         return HVAC_WORDS.get(s, s)

@@ -85,6 +85,9 @@ def main():
         '--exclude-module', f'{qt_package}.QtWebEngineCore', '--exclude-module', f'{qt_package}.QtWebEngineWidgets',
         '--exclude-module', f'{qt_package}.QtWebChannel', '--exclude-module', f'{qt_package}.QtWebEngineQuick',
         '--hidden-import', 'PIL._imagingft',
+        # this computer's player (local_media.py): WinRT's media sessions
+        '--collect-submodules', 'winrt',
+        '--collect-binaries', 'winrt',
         '--hidden-import', f'{qt_package}.QtCore',
         '--hidden-import', f'{qt_package}.QtWidgets',
         '--hidden-import', f'{qt_package}.QtGui',

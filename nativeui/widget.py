@@ -16,9 +16,9 @@ import time
 import traceback
 from ctypes import wintypes
 
-from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer, Signal, QObject
+from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 import qtshell
 
@@ -664,8 +664,54 @@ class _Surface(GlassMixin, QWidget):
                 traceback.print_exc()
         threading.Thread(target=go, daemon=True).start()
 
+    def _choose_source(self):
+        """Where it plays: this computer or one of Home Assistant's players, from a menu under its name."""
+        api = self.api
+
+        def go():
+            try:
+                sources = api.get_media_sources()
+            except Exception:
+                sources = []
+            self.facade.run_on_ui_thread(lambda: self._source_menu(sources))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _source_menu(self, sources):
+        if not sources:
+            return
+        dark = self.theme == "dark"
+        menu = QMenu(self)
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        # as the screens' floating panes (style.popup_pane): a solid pane, a hairline rim, rounded rows
+        menu.setStyleSheet(
+            "QMenu { background: %s; border: 1px solid %s; border-radius: 14px; padding: 6px;"
+            " font-family: 'Segoe UI Variable Text', 'Microsoft JhengHei UI'; font-size: 14px; }"
+            "QMenu::item { color: %s; padding: 8px 18px 8px 12px; border-radius: 9px; }"
+            "QMenu::item:selected { background: %s; }"
+            "QMenu::item:checked { color: #409cff; font-weight: 600; }"
+            "QMenu::indicator { width: 0px; }" % (
+                "#1c1f25" if dark else "#f4f6f9", "rgba(255,255,255,0.14)" if dark else "rgba(0,0,0,0.12)",
+                "#f5f5f7" if dark else "#1d1d1f", "rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.07)"))
+        current = self.tiles[0]["entity"] if self.tiles else None
+        for s in sources:
+            act = menu.addAction(("✓  " if s["entity_id"] == current else "     ") + render.tr(s["name"]))
+            act.setCheckable(True)
+            act.setChecked(s["entity_id"] == current)
+            act.setData(s["entity_id"])
+        rect = next((r for r, a in self.kind_buttons if a == "source"), None)
+        k = self.scale / (self.devicePixelRatioF() or 1.0)
+        at = self.mapToGlobal(QPoint(round(rect.x() * k), round(rect.bottom() * k))) if rect else None
+        chosen = menu.exec(at) if at is not None else menu.exec()
+        if chosen is not None and chosen.data() and chosen.data() != current:
+            api, wid, entity = self.api, self.widget_id, chosen.data()
+            threading.Thread(target=lambda: api.set_widget_source(wid, entity), daemon=True).start()
+
     def _play(self, action):
         """A player's button: previous, play or pause, next (shown at once, then asked of Home Assistant)."""
+        if action == "source":
+            self._choose_source()
+            return
         entity = self.tiles[0]["entity"]
         st = self.states.get(entity) or {}
         if action == "play_pause" and st:

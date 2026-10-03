@@ -70,6 +70,7 @@ from nativeui import settings as native_settings  # noqa: E402
 from nativeui import widget as native_widget  # noqa: E402
 
 import alerts  # noqa: E402
+import local_media  # noqa: E402
 import config as cfgmod  # noqa: E402
 import hotkey as hotkeymod  # noqa: E402
 import home  # noqa: E402
@@ -191,6 +192,11 @@ class Api:
         # Notifications about locks and safety sensors (off unless chosen), and the
         # shortcut that opens the panel (registered once the tray is up).
         self._alerts = alerts.Alerts(self._notify)
+        # What this computer plays, for a player widget that shows it (read only while one does).
+        self._local_media = (local_media.LocalMedia(lambda e, s: self._on_ha_events([[e, s]]))
+                             if local_media.AVAILABLE else None)
+        if self._local_media is None:
+            qtshell.log("This computer's player is not available (WinRT media sessions could not be loaded)")
         self._hotkey = None
         self._hotkey_ok = True
 
@@ -421,6 +427,9 @@ class Api:
                 "state": s,
             })
         out.sort(key=lambda e: (e["domain"], e["name"]))
+        if self._local_media is not None:
+            out.insert(0, {"entity_id": local_media.ENTITY, "domain": "local_media", "name": local_media.NAME,
+                           "state": self._known_states.get(local_media.ENTITY) or {"state": "off"}})
         return out
 
     # ---- the Home-style panel ----
@@ -514,11 +523,42 @@ class Api:
         if self._flyout_open and self._home_mode():
             ids = ids + list(self._home_states)
         self._client.set_entities(ids)
+        self._sync_local_media()
         # A device just added says nothing until it changes (a room's temperature, for hours): its state
         # now is read once and given to the windows.
-        unknown = [e for e in self._watched_entities() if e not in self._known_states]
+        unknown = [e for e in self._watched_entities()
+                   if e not in self._known_states and not e.startswith("local_media.")]
         if unknown and self._cfg.get("ha_token"):
             threading.Thread(target=self._read_new_states, args=(unknown,), daemon=True).start()
+
+    def _sync_local_media(self):
+        """This computer's player is read while a widget shows it, slowly while the widgets are dimmed."""
+        if self._local_media is not None:
+            self._local_media.set_active(local_media.ENTITY in self._watched_entities(), slow=bool(self._dimmed))
+
+    def get_media_sources(self):
+        """What a player widget can show: this computer, then Home Assistant's players. [{entity_id, name}]."""
+        out = [{"entity_id": local_media.ENTITY, "name": local_media.NAME}] if self._local_media else []
+        try:
+            states = self._client.get_states() if self._cfg.get("ha_token") else []
+        except Exception:
+            states = []
+        for s in sorted(states, key=lambda s: s.get("entity_id", "")):
+            eid = s.get("entity_id", "")
+            if cfgmod.domain_of(eid) == "media_player":
+                out.append({"entity_id": eid, "name": (s.get("attributes") or {}).get("friendly_name") or eid})
+        return out
+
+    def set_widget_source(self, widget_id, entity_id):
+        """A player widget shows another player (its only device)."""
+        widget = self._widget_cfg(widget_id)
+        if widget is None or widget.get("kind") != "media":
+            return False
+        name = next((s["name"] for s in self.get_media_sources() if s["entity_id"] == entity_id), entity_id)
+        widget["tiles"] = self._clean_tiles([{"id": os.urandom(4).hex(), "entity": entity_id,
+                                              "domain": cfgmod.domain_of(entity_id), "room": name}])
+        self._tiles_changed()
+        return True
 
     def _read_new_states(self, entities):
         try:
@@ -610,6 +650,9 @@ class Api:
     def _first_of_kind(self, kind):
         """What a new widget of this kind starts with: a weather or a camera shows the first there is (the
         editor changes it); the others start empty."""
+        if kind == "media" and self._local_media is not None:     # a player starts with this computer
+            return self._clean_tiles([{"id": os.urandom(4).hex(), "entity": local_media.ENTITY,
+                                       "domain": "local_media", "room": local_media.NAME}])
         domain = {"weather": "weather", "camera": "camera", "media": "media_player"}.get(kind)
         if not domain or not self._cfg.get("ha_token"):
             return []
@@ -901,12 +944,17 @@ class Api:
         """The bytes of a picture from Home Assistant (a song's cover, a camera's view), or None."""
         if not path:
             return None
+        if path.startswith("local:"):
+            return self._local_media.get_art(path) if self._local_media else None
         try:
             return self._client.get_bytes(path)
         except Exception:
             return None
 
     def call_service(self, domain, service, entity_id, extra):
+        if entity_id.startswith("local_media."):          # this computer's player
+            ok = bool(self._local_media and self._local_media.control(service, extra))
+            return {"ok": ok}
         try:
             self._client.call_service(domain, service, entity_id, extra or {})
             return {"ok": True}
@@ -1685,6 +1733,7 @@ class Api:
     def _push_dim(self):
         self._broadcast("set_dim", bool(self._dimmed),
                         windows=list(self._widgets.values()) or [self._window])
+        self._sync_local_media()
 
     def _watch_for_idle(self):
         """Dim the widget once the desktop has been out of sight for

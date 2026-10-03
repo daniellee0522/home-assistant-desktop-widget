@@ -22,7 +22,7 @@ from .ui import Button, CheckRow, Label, Rect, ScrollView, Select, Slider, TextF
 CARD_W, BODY_X, BODY_W = 340, 16, 308
 BODY_MAX = 520
 SOLID = {"light": (240, 245, 250), "dark": (26, 29, 34)}
-DOMAIN_LABELS = {"light": "燈光", "switch": "開關/插座", "input_boolean": "虛擬開關", "climate": "空調", "fan": "風扇",
+DOMAIN_LABELS = {"local_media": "本機播放", "light": "燈光", "switch": "開關/插座", "input_boolean": "虛擬開關", "climate": "空調", "fan": "風扇",
                  "cover": "窗簾/百葉", "media_player": "媒體播放器", "lock": "門鎖", "vacuum": "掃地機", "scene": "場景",
                  "script": "腳本", "automation": "自動化", "sensor": "感測器", "binary_sensor": "感測器 (開關型)",
                  "camera": "攝影機", "weather": "天氣"}

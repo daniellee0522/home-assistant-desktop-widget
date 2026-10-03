@@ -41,6 +41,7 @@ DOMAINS = {
     "switch": ("switch", ON_OFF), "input_boolean": ("switch", ON_OFF),
     "light": ("light", ("light",)), "fan": ("fan", ("fan",)), "lock": ("lock", ("lock",)),
     "climate": ("climate", ("climate",)), "media_player": ("media", ("media",)), "cover": ("cover", ("cover",)),
+    "local_media": ("media", ("media",)),
     "vacuum": ("vacuum", ("vacuum",)), "sensor": ("sensor", ("sensor",)), "binary_sensor": ("detector", ("detector",)),
     "scene": ("scene", ("scene",)), "script": ("scene", ("scene",)), "automation": ("scene", ("scene",)),
     "camera": ("camera", ("camera",)), "weather": ("weather", ("weather",)),

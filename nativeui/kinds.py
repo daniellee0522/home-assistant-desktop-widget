@@ -25,7 +25,8 @@ KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "cha
 # what an empty one asks for
 KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器", "media": "選擇播放器"}
 # which devices each kind takes, and how many (None: any number); a clock and a calendar take none
-KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",), "media": ("media_player",)}
+KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",),
+                "media": ("local_media", "media_player")}
 KIND_MAX = {"weather": 1, "camera": 1, "chart": 2, "media": 1}
 NO_DEVICES = ("clock", "calendar")
 
@@ -356,12 +357,34 @@ def _face(p, W, H, card, theme, dim, tcol, style):
     return (QColor(245, 245, 247), QColor(245, 245, 247, 140)) if dark else (QColor(17, 17, 19), QColor(17, 17, 19, 120))
 
 
-def _squircle_at(W, H, inset, angle, n=5.0):
-    """Where a ray from the middle at `angle` meets a squircle `inset` inside the card."""
-    a, b = W / 2 - inset, H / 2 - inset
-    c, s = math.cos(angle), math.sin(angle)
-    r = (abs(c / a) ** n + abs(s / b) ** n) ** (-1 / n)
-    return W / 2 + r * c, H / 2 + r * s
+_rings = {}
+
+
+def _ring(W, H, radius, inset):
+    """The card's own outline drawn `inset` inside it (its corners as round as the card's), as points."""
+    key = (W, H, radius, inset)
+    if key not in _rings:
+        path = render.squircle(inset, inset, W - 2 * inset, H - 2 * inset, max(1.0, radius - inset), steps=48)
+        poly = path.toFillPolygon()
+        _rings[key] = [(poly.at(i).x(), poly.at(i).y()) for i in range(poly.size())]
+    return _rings[key]
+
+
+def _on_ring(points, cx, cy, angle):
+    """Where a ray from (cx, cy) at `angle` leaves the outline."""
+    dx, dy = math.cos(angle), math.sin(angle)
+    best = None
+    for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]):
+        ex, ey = x2 - x1, y2 - y1
+        den = dx * ey - dy * ex
+        if abs(den) < 1e-9:
+            continue
+        t = ((x1 - cx) * ey - (y1 - cy) * ex) / den
+        u = ((x1 - cx) * dy - (y1 - cy) * dx) / den
+        if t > 0 and 0 <= u <= 1 and (best is None or t > best):
+            best = t
+    best = best or 0.0
+    return cx + dx * best, cy + dy * best
 
 
 def clock_font(px):
@@ -374,14 +397,14 @@ def clock_font(px):
     return f
 
 
-def draw_clock(p, W, H, ink, ink2, now):
+def draw_clock(p, W, H, ink, ink2, now, radius=84):
     """The time, large, narrow and tall, inside a ring of minute ticks all alike: this minute's the darkest,
     the next one's the lightest, and those between fading from one to the other around the ring; the day
     above it."""
     for i in range(60):
         ang = -math.pi / 2 + i / 60 * 2 * math.pi
-        x1, y1 = _squircle_at(W, H, 20, ang)
-        x2, y2 = _squircle_at(W, H, 20 + 16, ang)
+        x1, y1 = _on_ring(_ring(W, H, radius, 18), W / 2, H / 2, ang)
+        x2, y2 = _on_ring(_ring(W, H, radius, 18 + 17), W / 2, H / 2, ang)
         ago = (now.minute - i) % 60                      # 0: this minute ... 59: the next one
         c = QColor(ink)
         c.setAlphaF(ink.alphaF() * (1.0 - 0.88 * ago / 59))
@@ -389,21 +412,22 @@ def draw_clock(p, W, H, ink, ink2, now):
         p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
     day = (now.strftime("%a %m/%d") if render._language == "en" else
            "週%s %d/%d" % ("一二三四五六日"[now.weekday()], now.month, now.day))
-    _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 72, "c", W)
-    text = now.strftime("%H:%M")
-    f = clock_font(118)
-    tall = 1.22                                        # drawn taller than it is wide, as iOS's clock
-    fm = render.QFontMetricsF(f)
-    full = fm.horizontalAdvance(text) / 10 * render.HSCALE
-    k = min(1.0, (W - 104) / max(1.0, full))
+    _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 58, "c", W)
+    # The digits fill what the ring leaves under the day: as wide as it, and stretched to its height.
+    # The digits, by their drawn outline (not the font's metrics), fill the room under the day and inside the
+    # ticks: as wide as it, stretched up to 1.8 times their height.
+    path = render.text_path(QPointF(0, 0), clock_font(118), now.strftime("%H:%M"), 0, 0)
+    br = path.boundingRect()
+    left, right, top, bottom = 54, W - 54, 96, H - 52
+    sx = (right - left) / max(1.0, br.width())
+    sy = min((bottom - top) / max(1.0, br.height()), sx * 1.8)
     p.save()
-    p.translate(W / 2, H / 2 + 18)
-    p.scale(k, k * tall)
+    p.translate((left + right) / 2, (top + bottom) / 2)
+    p.scale(sx, sy)
+    p.translate(-br.center().x(), -br.center().y())
     p.setPen(Qt.NoPen)
     p.setBrush(ink)
-    # (the digits' own height, not the line's: centred on the cap height)
-    cap = fm.capHeight() / 10
-    p.drawPath(render.text_path(QPointF(0, 0), f, text, -full / 2, cap / 2))
+    p.drawPath(path)
     p.restore()
 
 
@@ -458,6 +482,48 @@ def media_position(state):
     return max(0.0, min(dur or pos, pos)), dur
 
 
+_cover_colors = {}
+
+
+def cover_color(art):
+    """The card's colour from its cover, as Apple Music takes it: the hue that most of the cover's coloured
+    part has (not the average of all of it, which turns muddy), made deep enough for white words; a grey
+    cover gives a grey card. No cover: Music's own red."""
+    if art is None or art.isNull():
+        return QColor("#e8344e")
+    key = art.cacheKey()
+    if key in _cover_colors:
+        return _cover_colors[key]
+    small = art.scaled(24, 24, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    bins, grey, weight = [0.0] * 24, 0.0, 0.0
+    sums = [[0.0, 0.0, 0.0] for _ in range(24)]
+    for y in range(small.height()):
+        for x in range(small.width()):
+            h, s, v, _ = small.pixelColor(x, y).getHsvF()
+            weight += 1
+            if s < 0.18 or v < 0.12 or h < 0:
+                grey += v
+                continue
+            b = int(h * 24) % 24
+            w = s * v                                      # the vivid count for more
+            bins[b] += w
+            sums[b][0] += h * w
+            sums[b][1] += s * w
+            sums[b][2] += v * w
+    best = max(range(24), key=lambda b: bins[b])
+    if bins[best] < 0.06 * weight:                         # hardly any colour: a grey card
+        level = grey / max(1.0, weight)
+        color = QColor.fromHsvF(0.0, 0.0, min(0.42, max(0.22, level * 0.6)))
+    else:
+        w = bins[best]
+        h, s, v = (sums[best][0] / w, sums[best][1] / w, sums[best][2] / w)
+        color = QColor.fromHsvF(h, min(0.9, max(0.45, s)), min(0.62, max(0.38, v * 0.8)))
+    if len(_cover_colors) > 32:
+        _cover_colors.clear()
+    _cover_colors[key] = color
+    return color
+
+
 def play_pause_patch(state):
     """What a player is at once when play/pause is pressed (before Home Assistant says so): playing or
     paused, and its place taken now, so the bar neither jumps on (the time since it was last told counted
@@ -472,8 +538,8 @@ def play_pause_patch(state):
 def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to=None):
     """Now playing, as iOS's Music widget: the cover on the left, the song, its artist and where it is on the
     right, and previous / play-pause / next. The card takes the cover's colour. Returns the buttons as
-    [(rect, action)] (action: "previous", "play_pause", "next", and "seek": the bar, where the player can
-    seek; seek_to is where it is being dragged to, in seconds)."""
+    [(rect, action)] (action: "previous", "play_pause", "next", "source": where it plays, and "seek": the bar,
+    where the player can seek; seek_to is where it is being dragged to, in seconds)."""
     attrs = (state or {}).get("attributes") or {}
     s = (state or {}).get("state") or ""
     playing = s == "playing"
@@ -481,11 +547,7 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
     if dim:
         render.draw_card_bg(p, W, H, tcol, style, theme)
     else:
-        base = QColor("#e8344e")                       # (Music's own red, until a cover gives its colour)
-        if art is not None and not art.isNull():
-            avg = art.scaled(1, 1, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).pixelColor(0, 0)
-            h, sat, v, _ = avg.getHsvF()
-            base = QColor.fromHsvF(max(0.0, h), min(1.0, max(0.35, sat)), min(0.62, max(0.32, v)))
+        base = cover_color(art)
         g = QLinearGradient(0, 0, 0, H)
         g.setColorAt(0, base.lighter(118))
         g.setColorAt(1, base.darker(118))
@@ -509,8 +571,13 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
     x = pad + side + 26
     tw = W - x - pad
     render.draw_icon(p, "mdi:music", (255, 255, 255, 0.75), QRectF(W - pad - 26, pad, 26, 26))
+    # where it plays, with a chevron: pressed, the player to show is chosen
     name = tile.get("room") or attrs.get("friendly_name") or tile["entity"]
-    _text(p, _fit(name, _font(16, QFont.DemiBold), tw - 36), _font(16, QFont.DemiBold), soft, x, pad + 2)
+    nf = _font(16, QFont.DemiBold)
+    name = _fit(name, nf, tw - 36 - 24)
+    nw = _text(p, name, nf, soft, x, pad + 2)
+    render.draw_icon(p, "mdi:chevron-down", (255, 255, 255, 0.75), QRectF(x + nw + 2, pad + 1, 20, 20))
+    source = QRectF(x - 8, pad - 8, nw + 40, 36)
     title = attrs.get("media_title") or (render.tr("未在播放") if s in ("off", "idle", "standby", "") else s)
     tf = _font(27, QFont.Bold)
     _text(p, _fit(title, tf, tw), tf, white, x, pad + 40)
@@ -518,8 +585,12 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
     if artist:
         _text(p, _fit(artist, _font(20, QFont.Medium), tw), _font(20, QFont.Medium), soft, x, pad + 78)
     pos, dur = media_position(state)
-    buttons = []
-    if dur:
+    buttons = [(source, "source")]
+    if dur and dim:                                  # dimmed: the bar, faint, and not where the song is
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 46))
+        p.drawRoundedRect(QRectF(x, pad + 124, tw, 6), 3, 3)
+    elif dur:
         if seek_to is not None:
             pos = max(0.0, min(dur, seek_to))
         y = pad + 124
@@ -616,7 +687,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
         ink, ink2 = _face(p, W, H, card, theme, dim, tcol, style)
         now = datetime.datetime.now()
         if kind == "clock":
-            draw_clock(p, W, H, ink, ink2, now)
+            draw_clock(p, W, H, ink, ink2, now, tcol["radius_panel"])
         else:
             draw_calendar(p, W, H, ink, ink2, now.date(), QColor(255, 255, 255) if dim else QColor("#ff3b30"))
         p.restore()
