@@ -228,6 +228,44 @@ class GlassTests(unittest.TestCase):
         self.assertEqual(result.getpixel((1, 0))[:3], (20, 40, 60))
         self.assertEqual(result.getpixel((2, 0))[:3], (110, 20, 30))
 
+    def test_windows_over_a_widget_are_those_above_it_that_can_be_seen(self):
+        # z-order top first: 1 ours, 2 click-through, 3 cloaked, 4 a window over the widget, 5 elsewhere,
+        # 9 the widget, 6 below it.
+        user = Mock()
+        user.IsWindowVisible.return_value = True
+        user.IsIconic.return_value = False
+        user.GetWindowLongW.side_effect = lambda h, i: 0x20 if h == 2 else 0
+        rects = {2: (0, 0, 50, 50), 3: (0, 0, 50, 50), 4: (40, 40, 90, 90),
+                 5: (500, 500, 600, 600), 6: (0, 0, 50, 50)}
+        dwm = Mock()
+
+        def cloak(h, attr, ref, size):
+            ctypes.cast(ref, ctypes.POINTER(ctypes.c_uint)).contents.value = 1 if h == 3 else 0
+            return 0
+        dwm.DwmGetWindowAttribute.side_effect = cloak
+
+        def enum(proc, _):
+            for h in (1, 2, 3, 4, 5, 9, 6):
+                if not proc(h, 0):
+                    return
+        user.EnumWindows.side_effect = enum
+        scope = definitions('_windows_over', '_rects_overlap', _user32=user, _dwmapi=dwm,
+                            _ENUM_WINDOWS_PROC=lambda f: f, _window_rect=rects.get, _SHADOW_PX=0,
+                            GWL_EXSTYLE=-20, WS_EX_TRANSPARENT=0x20, WS_EX_LAYERED=0x80000, LWA_ALPHA=2,
+                            DWMWA_CLOAKED=14)
+        self.assertEqual(scope['_windows_over'](9, (0, 0, 100, 100), {1}), [(40, 40, 90, 90)])
+
+    def test_a_window_over_a_widget_shows_the_desktop_last_seen_there(self):
+        from PIL import Image
+        scope = definitions('_patch_covered')
+        rect = (100, 100, 4, 2)
+        clean = Image.new('RGBA', (4, 2), (10, 20, 30, 255)).tobytes()
+        shot = Image.new('RGBA', (4, 2), (200, 200, 200, 255))
+        raw = scope['_patch_covered'](shot.tobytes(), rect, [(102, 90, 200, 200)], clean)
+        out = Image.frombytes('RGBA', (4, 2), raw)
+        self.assertEqual([out.getpixel((x, 0))[:3] for x in range(4)],
+                         [(200, 200, 200)] * 2 + [(10, 20, 30)] * 2)
+
     def test_worker_timeout_restarts_without_blocking_next_capture(self):
         with patch('capture_worker._serve', test_worker):
             worker = CaptureWorker(timeout=0.15)

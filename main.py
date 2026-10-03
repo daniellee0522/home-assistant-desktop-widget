@@ -141,6 +141,9 @@ class Api:
         # over an excluded widget restores this region instead of a black
         # hole; _popover_owner says which widget the popover belongs to.
         self._widget_frames = {}
+        # Each widget's last picture of the desktop with nothing over it, by kind: (rect, BGRA). Where another
+        # program's window lies over a widget, its glass shows this instead of that window.
+        self._clean_backdrops = {}
         self._popover_owner = None
         # Overlay windows currently open. While any overlaps the widget, the
         # widget stays capturable so it appears in the overlay's backdrop.
@@ -1435,6 +1438,11 @@ class Api:
             widget = None
             raw = None
             paced = False
+            # Other programs' windows over a widget show in a picture of the screen; looked for on both sides
+            # of the wait for a frame, as one moving could be anywhere between the two.
+            look_over = _is_widget_kind(window_kind) and can_read_screen and not compose_widget
+            ours = self._own_hwnds() if look_over else ()
+            covers = _windows_over(hwnd, (x, y, x + w, y + h), ours) if look_over else []
             if can_read_screen or compose_widget:
                 # Answered when the screen under the window changes, at the
                 # display's own rate; GDI only if duplication is unavailable.
@@ -1484,6 +1492,8 @@ class Api:
                 return None
             if capture_epoch != self._capture_epoch:
                 return {"skip": True, "retry_ms": 80}
+            if look_over:
+                raw = self._without_windows_over(window_kind, hwnd, (x, y, w, h), raw, covers, ours)
             if _is_widget_kind(window_kind) and can_read_screen:
                 self._widget_frames[window_kind] = (x, y, w, h, raw)
             liquid = (self._cfg.get("glass_style") == "liquid"
@@ -1559,6 +1569,20 @@ class Api:
             }
         except Exception:
             return None
+
+    def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours):
+        """A widget's picture of the screen with other programs' windows over it replaced by the desktop:
+        from its last clean picture, or the wallpaper when it has none yet. The picture becomes the clean one."""
+        x, y, w, h = rect
+        covers = covers + _windows_over(hwnd, (x, y, x + w, y + h), ours)
+        if covers:
+            kept = self._clean_backdrops.get(kind)
+            clean = kept[1] if kept and kept[0] == rect else _compat_capture.grab(x, y, w, h)
+            if not clean or len(clean) != len(raw):
+                return raw                        # nothing clean to show: not kept as clean either
+            raw = _patch_covered(raw, rect, covers, clean)
+        self._clean_backdrops[kind] = (rect, raw)
+        return raw
 
     @staticmethod
     def _capture_rect(hwnd, want_w=0, want_h=0, at_x=None, at_y=None):
@@ -1964,6 +1988,9 @@ def _startup_command():
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOPMOST = 0x00000008
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+LWA_ALPHA = 0x2
 SW_HIDE = 0
 HWND_BOTTOM = 1
 HWND_TOP = 0
@@ -2035,6 +2062,8 @@ _user32.EnumChildWindows.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _user32.EnumWindows.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
 _user32.IsIconic.argtypes = [ctypes.c_void_p]
+_user32.GetLayeredWindowAttributes.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _user32.GetClassNameW.argtypes = [
     ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 _user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
@@ -2684,6 +2713,61 @@ def _windows_below(target, rect):
 
     _user32.EnumWindows(_ENUM_WINDOWS_PROC(visit), 0)
     return tuple(reversed(found))
+
+
+# A window's shadow reaches past its rectangle (most of it lies in the invisible resize border already).
+_SHADOW_PX = 12
+
+
+def _windows_over(target, rect, ours):
+    """Rectangles, as (l, t, r, b) on screen, of the windows not ours that sit above `target` and cross
+    `rect`: what a capture of the screen there shows instead of the desktop. Windows that can't be seen
+    (hidden, minimised, cloaked, click-through or fully transparent) are left out."""
+    found = []
+
+    def visit(hwnd, _):
+        if hwnd == target:
+            return 0                              # the rest are below it
+        if hwnd in ours or not _user32.IsWindowVisible(hwnd) or _user32.IsIconic(hwnd):
+            return 1
+        style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if style & WS_EX_TRANSPARENT:
+            return 1
+        if style & WS_EX_LAYERED:
+            alpha, flags = ctypes.c_ubyte(255), ctypes.c_uint(0)
+            if (_user32.GetLayeredWindowAttributes(hwnd, None, ctypes.byref(alpha), ctypes.byref(flags))
+                    and flags.value & LWA_ALPHA and alpha.value == 0):
+                return 1
+        cloaked = ctypes.c_uint()
+        if (_dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked),
+                                          ctypes.sizeof(cloaked)) == 0 and cloaked.value):
+            return 1
+        r = _window_rect(hwnd)
+        if r and r[2] > r[0] and r[3] > r[1]:
+            r = (r[0] - _SHADOW_PX, r[1] - _SHADOW_PX, r[2] + _SHADOW_PX, r[3] + _SHADOW_PX)
+            if _rects_overlap(rect, r):
+                found.append(r)
+        return 1
+
+    try:
+        _user32.EnumWindows(_ENUM_WINDOWS_PROC(visit), 0)
+    except Exception:
+        return []
+    return found
+
+
+def _patch_covered(raw, rect, covers, clean):
+    """`raw` (BGRA of `rect`, (x, y, w, h)) with the parts under `covers` taken from `clean`, a picture of
+    the same place with nothing over it."""
+    from PIL import Image
+    x, y, w, h = rect
+    img = Image.frombytes("RGBA", (w, h), raw)
+    base = Image.frombuffer("RGBA", (w, h), clean, "raw", "RGBA", 0, 1)
+    for l, t, r, b in covers:
+        box = (max(0, l - x), max(0, t - y), min(w, r - x), min(h, b - y))
+        if box[2] > box[0] and box[3] > box[1]:
+            img.paste(base.crop(box), box[:2])
+    return img.tobytes()
 
 
 def _set_capture_exclusion(window, excluded):
