@@ -604,8 +604,8 @@ class _Surface(GlassMixin, QWidget):
         kind = self.wkind
         if kind not in EXTRAS_EVERY or not self.tiles or not self.isVisible() or kind in self._fetching:
             return
-        if kind in ("camera", "media") and self.dim_target:     # the desktop is out of sight
-            return
+        if kind == "camera" and self.dim_target:     # the desktop is out of sight (a song's cover, fetched only
+            return                                    # when the song changes, still follows it)
         art_url = None
         now = time.monotonic()
         if kind == "media":
