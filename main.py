@@ -448,9 +448,10 @@ class Api:
         except Exception:
             return {"rooms": [], "entities": [], "error": True}
         areas, devices, registry = self._registry()
-        overrides = (self._cfg.get("panel") or {}).get("room_overrides") or {}
+        panel = self._cfg.get("panel") or {}
         entities, sensors, rooms = home.build_home(
-            states, areas, devices, registry, overrides)
+            states, areas, devices, registry, panel.get("room_overrides") or {},
+            set(panel.get("deleted_rooms") or ()))
         self._home_states = {e["entity_id"]: e["state"] for e in (*entities, *sensors)}
         self._sync_client_entities()
         return {"rooms": rooms, "entities": entities, "sensors": sensors}

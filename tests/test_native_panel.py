@@ -119,7 +119,7 @@ def tiles_of(n):
 
 
 class GridMode(unittest.TestCase):
-    def test_tap_toggles_and_hold_opens_the_card(self):
+    def test_tap_toggles_and_hold_opens_the_detail_over_the_tiles(self):
         api = FakeApi("grid", tiles_of(3))
         win, sc = make_panel(api)
         tv = sc.tiles_views[0]
@@ -131,9 +131,9 @@ class GridMode(unittest.TestCase):
         self.assertIn(("light", "toggle", "light.l0", {}), api.calls)
         sc._tile_press(tv, tv.tile, ev(tv))
         pump(600)
-        popovers = [c for c in api.calls if c[0] == "popover"]
-        self.assertTrue(popovers)
-        self.assertEqual(popovers[0][1][5], "flyout")
+        self.assertFalse([c for c in api.calls if c[0] == "popover"])     # no window of its own
+        self.assertIsNotNone(sc.detail_view)
+        self.assertEqual(sc.detail.tile["entity"], "light.l0")
         win.dispose()
 
     def test_more_than_two_rows_scroll_a_row_at_a_time(self):
@@ -279,6 +279,140 @@ class Card(unittest.TestCase):
         card.close_card()
         pump(400)
         self.assertIn(("close_popover",), api.calls)
+        win.dispose()
+
+
+class DeletingRooms(unittest.TestCase):
+    def test_delete_a_room_and_bring_it_back(self):
+        api = FakeApi("home")
+        win, sc = make_panel(api)
+        hv = sc.home
+        import copy
+        hv.loaded(copy.deepcopy(HOME))                       # its own copy: deleting changes the devices' rooms
+        hv.m.editing = True
+        hv.build()
+        chip = next(c for c in hv.chips if getattr(c, "key", None) == "客廳")
+        self.assertTrue(chip.x_button)                       # a room from Home Assistant can be deleted too
+        hv.delete_room("客廳")
+        pump(50)
+        panel = api.saved
+        self.assertIn("客廳", panel["deleted_rooms"])
+        self.assertNotIn("客廳", hv.m.room_names())
+        moved = [e["entity_id"] for e in hv.m.entities if e.get("area") == ""]
+        self.assertIn("light.a", moved)                      # its devices are uncategorised
+        self.assertIn("climate.ac", moved)
+        hv.m.editing = False
+        hv.build()
+        shown = [e["entity_id"] for _, es, _ in hv.m.groups() for e in es]
+        self.assertNotIn("light.a", shown)                   # and uncategorised is off the main screen
+        hv.open_sheet()
+        pump(50)
+        rows = [v for v in hv.sheet_view.children[-1].content.children if getattr(v, "left_text", None) == "客廳"]
+        self.assertTrue(rows)                                # the sheet offers it back
+        hv.restore_room("客廳")
+        pump(50)
+        self.assertNotIn("客廳", api.saved["deleted_rooms"])
+        win.dispose()
+
+
+class DetailOverThePanel(unittest.TestCase):
+    """A hold or a right click shows the tile's detail inside the panel, as a capsule's devices are shown."""
+
+    def find(self, view, cls_name):
+        out = []
+
+        def walk(v):
+            if v.__class__.__name__ == cls_name:
+                out.append(v)
+            for c in v.children:
+                walk(c)
+        walk(view)
+        return out
+
+    def open_speaker(self, mode="grid", n=2):
+        api = FakeApi(mode, [{"id": "sp", "entity": "media_player.s", "domain": "media_player", "room": "喇叭",
+                              "label": ""}] + tiles_of(n - 1))
+        win, sc = make_panel(api)
+        sc.push_states([("media_player.s", {"state": "playing", "attributes": {"volume_level": 0.3}})])
+        sc.open_detail("sp")
+        pump(500)
+        return api, win, sc
+
+    def test_a_small_panel_grows_for_it_and_shrinks_back(self):
+        api, win, sc = self.open_speaker(n=2)
+        base = sc.base_css
+        self.assertGreater(sc.css_w, base[0])                       # two tiles are narrower than the card
+        self.assertGreaterEqual(sc.css_h, base[1])
+        self.assertTrue(sc.root.no_hit)
+        self.assertEqual(sc.root.alpha, 0.0)                         # the tiles receded
+        sc.close_detail()
+        pump(500)
+        self.assertIsNone(sc.detail_view)
+        self.assertEqual((sc.css_w, sc.css_h), base)
+        self.assertEqual(sc.root.alpha, 1.0)
+        win.dispose()
+
+    def test_the_volume_slider_answers_where_it_is_drawn(self):
+        """The detail is drawn at twice the panel's units: a press three quarters along the slider, in the
+        window, sets three quarters of the volume."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+        api, win, sc = self.open_speaker()
+        slider = self.find(sc.detail_view, "Slider")[0]
+        x, y, k = slider.in_scene()
+        self.assertAlmostEqual(k, 2.0)
+        s = sc.scale / sc.devicePixelRatioF()
+        at = QPoint(round((x + slider.w * k * 0.75) * s), round((y + slider.h * k / 2) * s))
+        QTest.mousePress(sc, Qt.LeftButton, pos=at)
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=at)
+        pump(150)
+        volume = [c for c in api.calls if c[:2] == ("media_player", "volume_set")]
+        self.assertTrue(volume)
+        self.assertAlmostEqual(volume[-1][3]["volume_level"], 0.75, delta=0.06)
+        self.assertIsNotNone(sc.detail_view)                         # pressing inside does not go back
+        win.dispose()
+
+    def test_new_states_rebuild_it_and_the_space_around_it_goes_back(self):
+        api, win, sc = self.open_speaker(mode="grid", n=4)
+        first = sc.detail_view
+        sc.push_states([("media_player.s", {"state": "paused", "attributes": {"volume_level": 0.5}})])
+        pump(50)
+        self.assertIsNot(sc.detail_view, first)
+        self.assertEqual(sc.detail_view.alpha, 1.0)                  # rebuilt where it was, not faded in again
+        sc.detail_view.on_click(ev(sc.detail_view, 2, 2))
+        pump(500)
+        self.assertIsNone(sc.detail_view)
+        win.dispose()
+
+    def test_its_edit_panel_fields_sit_on_the_scaled_detail(self):
+        api, win, sc = self.open_speaker()
+        sc.detail.set_edit(True)
+        pump(100)
+        fields = self.find(sc.detail_view, "TextField")
+        self.assertTrue(fields)
+        f = fields[0]
+        x, y, k = f.in_scene()
+        s = sc.scale / sc.devicePixelRatioF()
+        g = f.edit.geometry()
+        self.assertAlmostEqual(g.width(), (f.w * k - 2 * 12 * k) * s, delta=2)
+        self.assertAlmostEqual(g.y(), y * s, delta=2)
+        sc.apply_prefs(dict(sc.prefs))                               # a save comes back while typing
+        pump(50)
+        self.assertIs(self.find(sc.detail_view, "TextField")[0], f)  # the field is kept
+        sc.escape()                                                  # Esc leaves the edit panel, then the detail
+        pump(50)
+        self.assertFalse(sc.detail.edit)
+        sc.escape()
+        pump(500)
+        self.assertIsNone(sc.detail_view)
+        win.dispose()
+
+    def test_home_panel_shows_it_without_growing(self):
+        api, win, sc = self.open_speaker(mode="home")
+        sc.open_detail("home:light.a")
+        pump(500)
+        self.assertEqual((sc.css_w, sc.css_h), sc.base_css)
+        self.assertEqual(sc.detail.tile["entity"], "light.a")
         win.dispose()
 
 

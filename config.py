@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     # replaces its Home Assistant area.
     "panel": {"mode": "grid", "tiles": None, "home_tiles": [], "room_overrides": {},
               "hidden_rooms": [], "hidden_chips": [], "custom_rooms": [], "room_order": [],
+              "deleted_rooms": [], "show_other": False,
               "bg_image": "", "bg_blur": 28},
 }
 
@@ -264,6 +265,7 @@ def clean_panel(panel, clean_tiles):
     custom = panel.get("custom_rooms")
     order = panel.get("room_order")
     chips = panel.get("hidden_chips")
+    deleted = panel.get("deleted_rooms")
     return {
         "mode": panel.get("mode") if panel.get("mode") in ("grid", "home") else "grid",
         "tiles": clean_tiles(tiles) if isinstance(tiles, list) else None,
@@ -284,6 +286,11 @@ def clean_panel(panel, clean_tiles):
         "custom_rooms": (list(dict.fromkeys(
             str(r).strip()[:40] for r in custom if isinstance(r, str) and str(r).strip()))[:40]
             if isinstance(custom, list) else []),
+        # Rooms the user deleted: their devices are uncategorised (until the room is brought back).
+        "deleted_rooms": (list(dict.fromkeys(str(r) for r in deleted if isinstance(r, str) and str(r).strip()))
+                          if isinstance(deleted, list) else []),
+        # Whether the uncategorised devices are on the main screen (they are not unless chosen).
+        "show_other": bool(panel.get("show_other")),
         # The order the user put the rooms in; rooms not listed follow.
         "room_order": (list(dict.fromkeys(str(r) for r in order if isinstance(r, str)))
                        if isinstance(order, list) else []),

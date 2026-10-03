@@ -30,11 +30,12 @@ def sensor_kind(state):
     return None
 
 
-def build_home(states, areas, devices, registry, overrides):
+def build_home(states, areas, devices, registry, overrides, deleted=()):
     """(accessories, sensors, rooms).
 
     A device's area applies to its entities unless an entity has its own;
-    `overrides` ({entity_id: room name}) wins over both. Hidden, disabled and
+    `overrides` ({entity_id: room name}) wins over both. A room in `deleted`
+    is no room: its devices have none (they are uncategorised). Hidden, disabled and
     configuration/diagnostic entities are left out, as Home Assistant's own
     dashboards do, and so is an accessory that does not answer and has no
     room (a camera's settings, say)."""
@@ -53,6 +54,8 @@ def build_home(states, areas, devices, registry, overrides):
             continue
         area_id = reg.get("area_id") or device_area.get(reg.get("device_id"))
         room = overrides.get(entity_id) or area_names.get(area_id) or ""
+        if room in deleted:
+            room = ""
         name = (state.get("attributes") or {}).get("friendly_name") or entity_id
         if domain == "sensor":
             kind = sensor_kind(state)

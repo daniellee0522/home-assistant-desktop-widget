@@ -209,5 +209,8 @@
  "按 Esc 取消，Backspace 清除。需要包含 Ctrl、Alt 或 Win。": "Esc cancels, Backspace clears. Use Ctrl, Alt or Win with a key.",
  "這組快捷鍵已被其他程式使用，請換一組。": "Another program already uses this shortcut; choose another.",
  "在任何地方按下即可開啟或關閉系統匣面板。": "Press it anywhere to open or close the tray panel.",
- "需要包含 Ctrl、Alt 或 Win，再加一個按鍵。": "Use Ctrl, Alt or Win together with a key."
+ "需要包含 Ctrl、Alt 或 Win，再加一個按鍵。": "Use Ctrl, Alt or Win together with a key.",
+ "未分類": "Uncategorized",
+ "已刪除的房間": "Deleted rooms",
+ "還原": "Restore"
 }

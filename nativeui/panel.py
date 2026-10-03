@@ -13,9 +13,10 @@ from PySide6.QtGui import QCursor, QImage
 
 from . import render, screens
 from .actions import TileActions
+from .detail import CARD_W, DetailContent
 from .homemodel import HomeModel
 from .overlay import OverlayScene, create_overlay
-from .ui import ScrollView, TileView
+from .ui import ScrollView, TileView, View
 
 PAD, CELL_W, CELL_H, GAP = 14, 152, 146, 14
 HOLD_MS, HOLD_SLOP = 420, 8
@@ -28,6 +29,13 @@ FIT_RANGE = (0.8, 1.5)
 FIT_MARGIN = 12
 ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
+# A tile's detail is shown over the panel's own tiles, as a capsule's devices are: at the size of the detail
+# card beside a widget at 100 % (its units are DETAIL_SCALE of the panel's), with DETAIL_MARGIN around it.
+# A panel too small for it (a row or two of tiles) grows while it is shown, up to DETAIL_MAX_H.
+DETAIL_SCALE = 1 / FLYOUT_ZOOM
+DETAIL_MARGIN = 14
+DETAIL_MAX_H = 604
+DETAIL_MS = 320
 
 
 class PanelScene(OverlayScene):
@@ -51,6 +59,11 @@ class PanelScene(OverlayScene):
         self.hold = None
         self.anim_alpha, self.anim_zoom = 0.0, 0.86          # until it is asked to come in
         self.home = None
+        # The detail shown over the tiles (open_detail), and the panel's own size without it.
+        self.detail = DetailContent(self, lambda: self.prefs, self.states, self.layout_detail,
+                                    on_back=self.close_detail)
+        self.detail_view = None
+        self.base_css = None
         self.configure()
         self.retheme()
         self.rebuild()                       # so it has its size before it is ever shown
@@ -122,6 +135,8 @@ class PanelScene(OverlayScene):
                 v.set_state(self.states.get(v.tile["entity"]))
         if self.home is not None and changed:
             self.home.states_changed(changed)
+        if self.detail_view is not None and self.detail.concerns([(e, None) for e in changed]):
+            self.layout_detail()
 
     def optimistic(self, entity, patch):
         st = self.states.get(entity)
@@ -144,8 +159,8 @@ class PanelScene(OverlayScene):
     def rebuild(self, keep_scroll=False):
         scroll = self.grid_scroll.offset if (keep_scroll and self.grid_scroll is not None) else 0.0
         self.root.clear()
-        for f in list(self.fields):
-            self.fields.remove(f)
+        # the detail's own fields stay (its edit panel may be in the middle of a name)
+        self.fields[:] = [f for f in self.fields if self._in_detail(f)]
         self.tiles_views = []
         self.grid_scroll = None
         self.home = None
@@ -156,6 +171,12 @@ class PanelScene(OverlayScene):
             self.set_css_size(self.home.w, self.home.h)
         else:
             self.build_grid(scroll)
+        self.base_css = (self.css_w, self.css_h)
+        if self.detail_view is not None:
+            if self.detail.prefs_changed():
+                self.layout_detail()
+            else:
+                self.set_css_size(*self.detail_css)
         self.request_size()
         self.request_paint()
 
@@ -265,20 +286,94 @@ class PanelScene(OverlayScene):
         step()
 
     def popover(self, tv, tile):
-        x, y = tv.abs_pos()
-        from .widget import _rect
-        rect = _rect(self._hwnd)
-        if not rect:
+        """A hold or a right click: the tile's detail, over the panel."""
+        self.open_detail(tile["id"])
+
+    # -- a tile's detail, over the tiles ------------------------------------------------------------------------------
+    def open_detail(self, tile_id):
+        if not self.detail.open(tile_id):
             return
-        s = self.scale
-        sx, sy = rect[0] + round(x * s), rect[1] + round(y * s)
-        threading.Thread(target=self.api.open_popover, args=(tile["id"], sx, sy, round(tv.w * s), round(tv.h * s),
-                                                             "flyout"), daemon=True).start()
+        opening = self.detail_view is None
+        self.layout_detail()
+        if opening:
+            # the tiles recede and the detail comes forward, as a capsule's devices do
+            self.root.no_hit = True
+            self.root.animate(DETAIL_MS, "out", alpha=0.0, zoom=0.94, blur=10.0)
+            v = self.detail_view
+            v.alpha, v.zoom, v.blur = 0.0, 1.06, 10.0
+            v.animate(DETAIL_MS, "out", alpha=1.0, zoom=1.0, blur=0.0)
+            self.invalidate_glass()               # the liquid glass no longer blurs behind each tile
+
+    def layout_detail(self):
+        """(Re)build the detail over the tiles, and size the panel for it."""
+        if self.detail.tile is None:
+            return
+        old = self.detail_view
+        k, m = DETAIL_SCALE, DETAIL_MARGIN
+        base_w, base_h = self.base_css or (self.css_w, self.css_h)
+        content = self.detail.build(max_h=(max(base_h, DETAIL_MAX_H) - 2 * m) / k)
+        w = max(base_w, CARD_W * k + 2 * m)
+        h = max(base_h, content.h * k + 2 * m)
+        overlay = View(0, 0, w, h)
+        overlay.interactive = True                # the empty space around it goes back
+        overlay.on_press = lambda e: True
+        overlay.on_click = lambda e: self.close_detail()
+        holder = View((w - CARD_W * k) / 2, m, CARD_W, content.h)
+        holder.scale = k
+        holder.interactive = True                 # but not the empty space inside it, nor a click that a
+        holder.on_press = lambda e: True          # control in it (a slider) leaves unhandled
+        holder.on_click = lambda e: True
+        holder.add(content)
+        overlay.add(holder)
+        if old is not None:
+            overlay.alpha, overlay.zoom, overlay.blur = old.alpha, old.zoom, old.blur
+            old.stop_animation()
+            self.layer.remove(old)
+        self.layer.add(overlay)
+        self.detail_view = overlay
+        self.detail_css = (w, h)
+        if (w, h) != (self.css_w, self.css_h):
+            self.set_css_size(w, h)
+            self.request_size()
+        self.request_paint()
+
+    def close_detail(self, animate=True):
+        v = self.detail_view
+        if v is None:
+            return
+        self.detail.tile = None
+        self.detail_view = None
+        self.root.no_hit = False
+
+        def gone():
+            self.layer.remove(v)
+            if self.base_css and self.base_css != (self.css_w, self.css_h):
+                self.set_css_size(*self.base_css)
+                self.request_size()
+            self.request_paint()
+        if animate:
+            v.no_hit = True
+            v.animate(DETAIL_MS, "out", alpha=0.0, zoom=1.06, blur=10.0, done=gone)
+            self.root.animate(DETAIL_MS, "out", alpha=1.0, zoom=1.0, blur=0.0)
+        else:
+            v.stop_animation()
+            self.root.stop_animation()
+            self.root.alpha, self.root.zoom, self.root.blur = 1.0, 1.0, 0.0
+            gone()
+        self.invalidate_glass()
+
+    def _in_detail(self, view):
+        v = view
+        while v is not None:
+            if v is self.detail_view:
+                return True
+            v = v.parent
+        return False
 
     # -- the glass behind the card ------------------------------------------------------------------------------------
     def glass_tiles(self):
         out = []
-        if self.grid_scroll is None:
+        if self.grid_scroll is None or self.detail_view is not None:
             return out
         s = self.scale
         sv = self.grid_scroll
@@ -457,11 +552,17 @@ class PanelScene(OverlayScene):
 
     def _left(self):
         self.moving = False
+        self.close_detail(animate=False)          # the next opening shows the tiles
         if self.home is not None:
             self.model.reset()
 
     def escape(self):
-        pass
+        if self.detail_view is None:
+            return
+        if self.detail.edit:
+            self.detail.set_edit(False)
+        else:
+            self.close_detail()
 
 
 

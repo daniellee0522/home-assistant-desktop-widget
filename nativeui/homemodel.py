@@ -4,7 +4,7 @@ import math
 
 HOME_COLS = 4
 HOME_PREFIX = "home:"
-OTHER_ROOM = "\u0000other"             # the room of devices that have none
+OTHER_ROOM = "\u0000other"             # uncategorised: the devices with no room, or whose room was deleted
 
 CATEGORIES = [
     {"id": "env", "title": "環境", "icon": "thermometer", "tint": "cyan"},
@@ -138,7 +138,11 @@ class HomeModel:
 
     # -- settings ---------------------------------------------------------------------------------
     def hidden_rooms(self):
-        return set(self.panel.get("hidden_rooms") or [])
+        """The rooms off the main screen. Uncategorised is one unless it was chosen (show_other)."""
+        out = set(self.panel.get("hidden_rooms") or [])
+        if not self.panel.get("show_other"):
+            out.add(OTHER_ROOM)
+        return out
 
     def hidden_chips(self):
         return set(self.panel.get("hidden_chips") or [])
@@ -203,7 +207,7 @@ class HomeModel:
 
     @staticmethod
     def room_label(key):
-        return "其他" if key == OTHER_ROOM else key
+        return "未分類" if key == OTHER_ROOM else key
 
     def visible(self, e):
         rec = self.record(e["entity_id"])
@@ -251,7 +255,7 @@ class HomeModel:
         if self.editing:
             hidden = self.hidden_rooms()
             for key in self.room_names():
-                if key == OTHER_ROOM or (self.room and self.room != key):
+                if self.room and self.room != key:
                     continue
                 groups.setdefault(key, [])
                 if key in hidden and not self.room:

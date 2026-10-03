@@ -83,6 +83,7 @@ class Model(unittest.TestCase):
 
     def test_hidden_room_and_device(self):
         self.m.panel["hidden_rooms"] = ["客廳"]
+        self.m.panel["show_other"] = True
         self.assertEqual([k for k, _, _ in self.m.groups()], ["玄關", OTHER_ROOM])
         self.m.editing = True
         stubs = {k: stub for k, _, stub in self.m.groups()}
@@ -90,6 +91,18 @@ class Model(unittest.TestCase):
         self.m.editing = False
         self.m.ensure_record("lock.d")["hidden"] = True
         self.assertEqual([k for k, _, _ in self.m.groups()], [OTHER_ROOM])
+
+    def test_uncategorised_is_off_the_main_screen_unless_chosen(self):
+        self.assertEqual(self.m.room_label(OTHER_ROOM), "未分類")
+        self.assertNotIn(OTHER_ROOM, [k for k, _, _ in self.m.groups()])
+        self.m.room = OTHER_ROOM                         # its button still shows it
+        self.assertEqual([k for k, _, _ in self.m.groups()], [OTHER_ROOM])
+        self.m.room = ""
+        self.m.editing = True                            # and editing offers to put it back
+        self.assertTrue({k: stub for k, _, stub in self.m.groups()}[OTHER_ROOM])
+        self.m.editing = False
+        self.m.panel["show_other"] = True
+        self.assertIn(OTHER_ROOM, [k for k, _, _ in self.m.groups()])
 
     def test_capsules(self):
         pills = {c["id"]: p["sub"] for c, _, p in self.m.visible_categories()}

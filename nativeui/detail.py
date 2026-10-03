@@ -1,8 +1,9 @@
-"""The detail card: what a hold or a right-click on a tile opens.
+"""The detail of a tile: what a hold or a right-click on it opens.
 
 The controls of each kind of device, the readout and history of a sensor, and the small edit panel
-(icon, name, room, label). main.py drives it (see overlay.py): it is told
-which tile to show, taken to its place by Api.open_popover, and closed again when focus leaves it.
+(icon, name, room, label), as DetailContent. A desktop widget's tile opens it in a window of its own
+(DetailCard: main.py tells it which tile to show, Api.open_popover takes it to its place, and it closes
+when focus leaves it); the tray panel shows it over its own tiles (panel.py).
 """
 import threading
 import time
@@ -217,87 +218,37 @@ class ColorRow(View):
         p.drawRoundedRect(box.adjusted(3, 3, -3, -3), 5, 5)
 
 
-class DetailCard(OverlayScene):
-    def __init__(self, facade, api):
-        super().__init__(facade, api, "popover")
-        self.lensed = False                       # the lens belongs to the widget: this is a quiet pane
-        self.prefs = api._prefs()
-        self.states = {}
+class DetailContent:
+    """What the detail of one tile shows, as views: its name and state, the gear for the edit panel, and the
+    controls of its kind of device (DETAIL) or the edit panel. The detail card window (DetailCard) holds one,
+    and so does the tray panel, which shows it over its own tiles.
+
+    host: the Scene it is drawn in (its fields, its api). prefs: a callable giving the preferences now.
+    states: the host's states, by entity. rebuilt: called when what is shown must be built again.
+    on_back: when given, a back button at the top-left calls it."""
+
+    def __init__(self, host, prefs, states, rebuilt, on_back=None):
+        self.host, self.api = host, host.api
+        self._prefs, self.states, self.rebuilt, self.on_back = prefs, states, rebuilt, on_back
         self.tile = None
-        self.owner = None
         self.edit = False
-        self.seq = 0
         self.history_token = 0
-        self.arm_event = None
-        self.sampling = "live"
-        self.configure()
-        self.retheme()
-        threading.Thread(target=self._load_states, daemon=True).start()
 
-    def _load_states(self):
-        try:
-            for _ in range(200):                    # the facade is still being made
-                if getattr(self.facade, "_native", None) is not None:
-                    break
-                time.sleep(0.01)
-            states = self.api.fetch_initial_states()
-            if states:
-                self.facade.run_on_ui_thread(lambda: self.push_states(list(states.items())))
-        except Exception:
-            traceback.print_exc()
+    @property
+    def prefs(self):
+        return self._prefs()
 
-    # -- preferences ----------------------------------------------------------------------------
-    def configure(self):
-        prefs = self.prefs
-        panel_theme = prefs.get("panel_theme", "follow")
-        own = self.owner == "flyout" and panel_theme != "follow"
-        self.theme_raw = panel_theme if own else prefs.get("theme", "auto")
-        self.style = prefs.get("glass_style", "classic")
-        if self.style not in ("classic", "liquid", "windows"):
-            self.style = "classic"
-        self.language = prefs.get("language", "zh-TW")
-        self.liquid_level = prefs.get("liquid_blur", 0)
-        self.zoom_css = max(0.5, min(2.0, prefs.get("zoom", 100) / 100.0))
-        self.system_glass = (prefs.get("system_glass_active") or {}).get("popover") is True
+    def run_on_ui_thread(self, fn):
+        self.host.facade.run_on_ui_thread(fn)
 
-    def apply_prefs(self, prefs):
-        before = (self.theme_raw, self.style, self.language, self.zoom_css, self.system_glass)
-        keep = self.tile["id"] if self.tile else None
-        self.prefs = prefs
-        self.configure()
-        if before != (self.theme_raw, self.style, self.language, self.zoom_css, self.system_glass):
-            self.retheme()
-            self.update_metrics()
-            self.invalidate_glass()
-        if keep:
-            self.tile = self.find_tile(keep)
-            if self.tile and not self.edit:
-                self.rebuild()
-
-    def themed(self):
-        if self.tile:
-            self.rebuild()
-
-    def card_radius(self):
-        return self.t["radius_tile"]
-
-    def paint_card(self, p):
-        render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme,
-                            radius=self.t["radius_tile"], plain=True)
-
-    def set_owner(self, kind):
-        if kind != self.owner:
-            self.owner = kind
-            self.configure()
-            self.retheme()
-
-    # -- tiles and states -----------------------------------------------------------------------------
+    # -- the tile ------------------------------------------------------------------------------------------
     def find_tile(self, tile_id):
-        for w in self.prefs.get("widgets", []):
+        prefs = self.prefs
+        for w in prefs.get("widgets", []):
             for t in w.get("tiles", []):
                 if t.get("id") == tile_id:
                     return t
-        panel = self.prefs.get("panel") or {}
+        panel = prefs.get("panel") or {}
         for key in ("tiles", "home_tiles"):
             for t in panel.get(key) or []:
                 if t.get("id") == tile_id:
@@ -310,18 +261,30 @@ class DetailCard(OverlayScene):
                     "label": "", "icon": "", "on_mode": "cool", "temp_step": 1}
         return None
 
-    def push_states(self, items):
-        for entity, state in items:
-            self.states[entity] = state
-        if self.tile and not self.edit and any(e == self.tile["entity"] for e, _ in items):
-            self.rebuild()
+    def open(self, tile_id):
+        """Show this tile (False when there is no such tile)."""
+        self.tile = self.find_tile(tile_id)
+        self.edit = False
+        return self.tile is not None
+
+    def prefs_changed(self):
+        """The preferences were replaced: the tile is read again. True when it should be built again (not
+        while its edit panel is open, whose fields would lose what is being typed)."""
+        if self.tile is None:
+            return False
+        self.tile = self.find_tile(self.tile["id"])
+        return self.tile is not None and not self.edit
+
+    def concerns(self, items):
+        """Whether these new states change what is shown."""
+        return bool(self.tile) and not self.edit and any(e == self.tile["entity"] for e, _ in items)
 
     def optimistic(self, entity, patch):
         st = self.states.get(entity)
         if st is not None:
             self.states[entity] = dict(st, **patch)
             if self.tile and not self.edit:
-                self.rebuild()
+                self.rebuilt()
 
     def call(self, domain, service, entity, extra=None):
         def go():
@@ -331,88 +294,24 @@ class DetailCard(OverlayScene):
                 traceback.print_exc()
         threading.Thread(target=go, daemon=True).start()
 
-    # -- opening and closing --------------------------------------------------------------------------------
-    def open_tile(self, tile_id):
-        tile = self.find_tile(tile_id)
-        if tile is None:
-            return
-        self.tile = tile
-        self.edit = False
-        self.root.stop_animation()
-        self.root.alpha, self.root.dy = 0.0, 6.0
-        self.rebuild()
-        threading.Thread(target=lambda: self.api.set_popover_activatable(True), daemon=True).start()
-
-    def enter(self):
-        self.root.animate(150, "out", alpha=1.0, dy=0.0)
-
-    def close_card(self):
-        if self.tile is None:
-            return
-        self.tile = None
-        threading.Thread(target=lambda: self.api.set_popover_activatable(False), daemon=True).start()
-        self.root.animate(150, "out", alpha=0.0, dy=6.0)
-
-        def finish():
-            if self.tile is None:
-                threading.Thread(target=self.api.close_popover, daemon=True).start()
-        QTimer.singleShot(170, finish)
-
-    def escape(self):
-        if self.edit:
-            self.set_edit(False)
-        else:
-            self.close_card()
-
-    def arm(self):
-        """The window is placed but hidden: take the backdrop of where it will appear, then say so."""
-        self.glass = None
-        self.invalidate_glass()
-        done = threading.Event()
-        self.arm_event = done
-
-        def wait():
-            done.wait(0.25)
-            self.api.backdrop_armed()
-        threading.Thread(target=wait, daemon=True).start()
-        self.start_glass()
-
-    def glass_changed(self):
-        super().glass_changed()
-        if self.arm_event is not None:
-            self.arm_event.set()
-            self.arm_event = None
-
-    def shown_up(self):
-        self.start_glass()
-
-    # -- building the card ---------------------------------------------------------------------------------
-    def set_edit(self, on):
-        self.edit = on
-        self.rebuild()
-
-    def request_size(self):
-        self.update_metrics()
-        self.seq += 1
-        seq, pw, ph = self.seq, self.pw, self.ph
-        threading.Thread(target=lambda: self.api.resize_popover_window(pw, ph, seq), daemon=True).start()
-
-    def rebuild(self):
+    # -- the views -----------------------------------------------------------------------------------------
+    def build(self, max_h=BODY_MAX + 67):
+        """The content, CARD_W wide and as tall as it needs up to max_h (the rest scrolls)."""
         tile = self.tile
-        if tile is None:
-            return
-        self.root.clear()
-        for f in list(self.fields):
-            self.fields.remove(f)
+        out = View(0, 0, CARD_W, 0)
         state = self.states.get(tile["entity"])
         title = tile.get("room") or ((state or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
-        self.root.add(Label(title, 19.5, QFont.Bold, "ink1", x=18, y=16, w=CARD_W - 18 - 16 - 32 - 8,
-                            overflow="ellipsis"))
-        self.root.add(Label(state["state"] if state else "無法連線", 14.5, QFont.Normal, "ink2", x=18, y=16 + 23.4))
-        gear = Button(x=CARD_W - 16 - 32, y=16 + (40.8 - 32) / 2, w=32, h=32, icon=ICON_GEAR, icon_size=18,
-                      on_click=lambda e: self.set_edit(not self.edit), active=self.edit, active_fill="btn_fill_strong",
-                      active_color="btn_text")
-        self.root.add(gear)
+        left = 18
+        if self.on_back is not None:
+            back = Button("‹", x=12, y=16 + (40.8 - 32) / 2, w=32, h=32, size=20, on_click=lambda e: self.on_back())
+            out.add(back)
+            left = 12 + 32 + 8
+        out.add(Label(title, 19.5, QFont.Bold, "ink1", x=left, y=16, w=CARD_W - left - 16 - 32 - 8,
+                      overflow="ellipsis"))
+        out.add(Label(state["state"] if state else "無法連線", 14.5, QFont.Normal, "ink2", x=left, y=16 + 23.4))
+        out.add(Button(x=CARD_W - 16 - 32, y=16 + (40.8 - 32) / 2, w=32, h=32, icon=ICON_GEAR, icon_size=18,
+                       on_click=lambda e: self.set_edit(not self.edit), active=self.edit, active_fill="btn_fill_strong",
+                       active_color="btn_text"))
         top = 16 + 40.8 + 10
         body = View(0, 0, BODY_W, 0)
         stack = Stack(body, 0, 4, BODY_W)
@@ -422,20 +321,16 @@ class DetailCard(OverlayScene):
             DETAIL.get(tile["domain"], build_readout)(self, stack, tile, state)
         content_h = stack.end() + 14
         body.h = content_h
-        shown_h = min(content_h, BODY_MAX)
-        scroll = ScrollView(BODY_X, top, BODY_W, shown_h - 0)
-        body.x = 0
+        shown_h = max(60, min(content_h, max_h - top))
+        scroll = ScrollView(BODY_X, top, BODY_W, shown_h)
         scroll.add(body)
         scroll.content.w, scroll.content.h = BODY_W, content_h
-        self.root.add(scroll)
+        out.add(scroll)
+        out.h = top + shown_h
         self.body_scroll = scroll
-        self.set_css_size(CARD_W, top + shown_h)
-        self.request_size()
-        for f in self.fields:
-            f.place()
-        self.request_paint()
+        return out
 
-    # -- helpers for the builders ------------------------------------------------------------------------------
+    # -- helpers for the builders ----------------------------------------------------------------------------
     def slider_block(self, stack, label, value, lo, hi, unit, on_commit, step=1):
         block = View(0, 0, BODY_W, 20 + 6 + 12)
         value_label = Label("%s%s" % (trim_number(value), unit), 15, QFont.Normal, "ink2", w=BODY_W, align="r")
@@ -459,6 +354,11 @@ class DetailCard(OverlayScene):
             row.add(Button(label, x=i * (w + gap), y=0, w=w, h=38, size=15.5, weight=QFont.Normal, active=active,
                            on_click=lambda e, c=click: c()))
         stack.place(row, 10, 10)
+
+    # -- the edit panel ----------------------------------------------------------------------------------------
+    def set_edit(self, on):
+        self.edit = on
+        self.rebuilt()
 
     def build_edit(self, stack):
         tile = self.tile
@@ -489,7 +389,6 @@ class DetailCard(OverlayScene):
         self.field(stack, "類別名稱", tile.get("label") or "", "", self.set_label)
         done = Button("完成", size=15, pad=18, h=34, on_click=lambda e: self.set_edit(False), fill="accent_blue",
                       hover_fill="accent_blue", color="white")
-        done.x = BODY_W - done.w
         row = View(0, 0, BODY_W, 34)
         row.add(done)
         done.x = BODY_W - done.w
@@ -501,7 +400,6 @@ class DetailCard(OverlayScene):
         block.add(TextField(0, 24, BODY_W, 38, value, placeholder, 15.5, on_done, max_length))
         stack.place(block, 0, 10)
 
-    # -- edits --------------------------------------------------------------------------------------------------
     def persist(self):
         prefs = self.prefs
 
@@ -517,18 +415,18 @@ class DetailCard(OverlayScene):
     def set_icon(self, name):
         self.tile["icon"] = name
         self.persist()
-        self.rebuild()
+        self.rebuilt()
 
     def set_mdi(self, text):
         value = text.strip().lower()
         if value and (not render.re.fullmatch(r"mdi:[a-z0-9-]+", value) or not render.mdi_path(value[4:])):
-            for f in self.fields:
+            for f in self.host.fields:
                 if f.placeholder.startswith("例如"):
                     f.set_text(self.tile.get("icon") if (self.tile.get("icon") or "").startswith("mdi:") else "")
             return
         self.tile["icon"] = value
         self.persist()
-        self.rebuild()
+        self.rebuilt()
 
     def set_room(self, text):
         self.tile["room"] = text.strip() or self.tile["entity"]
@@ -548,6 +446,178 @@ class DetailCard(OverlayScene):
     def set_label(self, text):
         self.tile["label"] = text.strip()
         self.persist()
+
+
+class DetailCard(OverlayScene):
+    """The detail card as a window of its own, over a desktop widget's tile."""
+
+    def __init__(self, facade, api):
+        super().__init__(facade, api, "popover")
+        self.lensed = False                       # the lens belongs to the widget: this is a quiet pane
+        self.prefs = api._prefs()
+        self.states = {}
+        self.content = DetailContent(self, lambda: self.prefs, self.states, self.rebuild)
+        self.owner = None
+        self.seq = 0
+        self.arm_event = None
+        self.sampling = "live"
+        self.configure()
+        self.retheme()
+        threading.Thread(target=self._load_states, daemon=True).start()
+
+    @property
+    def tile(self):
+        return self.content.tile
+
+    def _load_states(self):
+        try:
+            for _ in range(200):                    # the facade is still being made
+                if getattr(self.facade, "_native", None) is not None:
+                    break
+                time.sleep(0.01)
+            states = self.api.fetch_initial_states()
+            if states:
+                self.facade.run_on_ui_thread(lambda: self.push_states(list(states.items())))
+        except Exception:
+            traceback.print_exc()
+
+    # -- preferences ----------------------------------------------------------------------------
+    def configure(self):
+        prefs = self.prefs
+        panel_theme = prefs.get("panel_theme", "follow")
+        own = self.owner == "flyout" and panel_theme != "follow"
+        self.theme_raw = panel_theme if own else prefs.get("theme", "auto")
+        self.style = prefs.get("glass_style", "classic")
+        if self.style not in ("classic", "liquid", "windows"):
+            self.style = "classic"
+        self.language = prefs.get("language", "zh-TW")
+        self.liquid_level = prefs.get("liquid_blur", 0)
+        self.zoom_css = max(0.5, min(2.0, prefs.get("zoom", 100) / 100.0))
+        self.system_glass = (prefs.get("system_glass_active") or {}).get("popover") is True
+
+    def apply_prefs(self, prefs):
+        before = (self.theme_raw, self.style, self.language, self.zoom_css, self.system_glass)
+        self.prefs = prefs
+        self.configure()
+        if before != (self.theme_raw, self.style, self.language, self.zoom_css, self.system_glass):
+            self.retheme()
+            self.update_metrics()
+            self.invalidate_glass()
+        if self.content.prefs_changed():
+            self.rebuild()
+
+    def themed(self):
+        if self.tile:
+            self.rebuild()
+
+    def card_radius(self):
+        return self.t["radius_tile"]
+
+    def paint_card(self, p):
+        render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme,
+                            radius=self.t["radius_tile"], plain=True)
+
+    def set_owner(self, kind):
+        if kind != self.owner:
+            self.owner = kind
+            self.configure()
+            self.retheme()
+
+    # -- tiles and states -----------------------------------------------------------------------------
+    def find_tile(self, tile_id):
+        return self.content.find_tile(tile_id)
+
+    def push_states(self, items):
+        for entity, state in items:
+            self.states[entity] = state
+        if self.content.concerns(items):
+            self.rebuild()
+
+    def optimistic(self, entity, patch):
+        self.content.optimistic(entity, patch)
+
+    # -- opening and closing --------------------------------------------------------------------------------
+    def open_tile(self, tile_id):
+        if not self.content.open(tile_id):
+            return
+        self.root.stop_animation()
+        self.root.alpha, self.root.dy = 0.0, 6.0
+        self.rebuild()
+        threading.Thread(target=lambda: self.api.set_popover_activatable(True), daemon=True).start()
+
+    def enter(self):
+        self.root.animate(150, "out", alpha=1.0, dy=0.0)
+
+    def close_card(self):
+        if self.tile is None:
+            return
+        self.content.tile = None
+        threading.Thread(target=lambda: self.api.set_popover_activatable(False), daemon=True).start()
+        self.root.animate(150, "out", alpha=0.0, dy=6.0)
+
+        def finish():
+            if self.tile is None:
+                threading.Thread(target=self.api.close_popover, daemon=True).start()
+        QTimer.singleShot(170, finish)
+
+    def escape(self):
+        if self.content.edit:
+            self.set_edit(False)
+        else:
+            self.close_card()
+
+    def arm(self):
+        """The window is placed but hidden: take the backdrop of where it will appear, then say so."""
+        self.glass = None
+        self.invalidate_glass()
+        done = threading.Event()
+        self.arm_event = done
+
+        def wait():
+            done.wait(0.25)
+            self.api.backdrop_armed()
+        threading.Thread(target=wait, daemon=True).start()
+        self.start_glass()
+
+    def glass_changed(self):
+        super().glass_changed()
+        if self.arm_event is not None:
+            self.arm_event.set()
+            self.arm_event = None
+
+    def shown_up(self):
+        self.start_glass()
+
+    # -- building the card ---------------------------------------------------------------------------------
+    def set_edit(self, on):
+        self.content.set_edit(on)
+
+    def set_icon(self, name):
+        self.content.set_icon(name)
+
+    def set_room(self, text):
+        self.content.set_room(text)
+
+    def request_size(self):
+        self.update_metrics()
+        self.seq += 1
+        seq, pw, ph = self.seq, self.pw, self.ph
+        threading.Thread(target=lambda: self.api.resize_popover_window(pw, ph, seq), daemon=True).start()
+
+    def rebuild(self):
+        if self.tile is None:
+            return
+        self.root.clear()
+        for f in list(self.fields):
+            self.fields.remove(f)
+        view = self.content.build()
+        self.root.add(view)
+        self.body_scroll = self.content.body_scroll
+        self.set_css_size(CARD_W, view.h)
+        self.request_size()
+        for f in self.fields:
+            f.place()
+        self.request_paint()
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -724,7 +794,7 @@ def build_readout(card, stack, tile, state):
                     vs = [v for _, v in res["points"]]
                     rng.text = "%s – %s" % (trim_number(min(vs)), trim_number(max(vs)))
                 chart.changed()
-            card.facade.run_on_ui_thread(apply)
+            card.run_on_ui_thread(apply)
         threading.Thread(target=load, daemon=True).start()
 
 

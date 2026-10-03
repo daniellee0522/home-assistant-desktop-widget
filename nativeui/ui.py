@@ -135,6 +135,8 @@ class View:
         self.alpha = 1.0
         self.dx = self.dy = 0.0         # offsets that animate, on top of x, y
         self.zoom = 1.0                 # about the view's centre
+        self.scale = 1.0                # its content drawn this much larger, from its top-left: one of its
+                                        # own px is `scale` of its parent's (w and h are its own px)
         self.blur = 0.0                 # CSS px; drawn through an offscreen picture while above 0
         self.clip = False
         self.radius = None              # a squircle clip when set (with clip)
@@ -179,14 +181,18 @@ class View:
         if self.scene:
             self.scene.request_paint()
 
+    def in_scene(self):
+        """(x, y, k): the view's top-left in the scene, and how many scene px one of its own px is
+        (every offset and scale on the way up undone; zoom, which only animates, is not)."""
+        if self.parent is None:
+            px, py, pk = 0.0, 0.0, 1.0
+        else:
+            px, py, pk = self.parent.in_scene()
+        return px + pk * (self.x + self.dx), py + pk * (self.y + self.dy), pk * self.scale
+
     def abs_pos(self):
-        """The view's top-left in the scene, undoing every offset on the way up."""
-        x = y = 0.0
-        v = self
-        while v is not None:
-            x += v.x + v.dx
-            y += v.y + v.dy
-            v = v.parent
+        """The view's top-left in the scene."""
+        x, y, _ = self.in_scene()
         return x, y
 
     # -- painting -----------------------------------------------------------------------
@@ -205,6 +211,8 @@ class View:
             p.translate(self.w / 2, self.h / 2)
             p.scale(self.zoom, self.zoom)
             p.translate(-self.w / 2, -self.h / 2)
+        if self.scale != 1.0:
+            p.scale(self.scale, self.scale)
         if self.alpha < 1.0:
             p.setOpacity(p.opacity() * self.alpha)
         if self.clip:
@@ -229,6 +237,8 @@ class View:
         if self.zoom != 1.0:
             lx = (lx - self.w / 2) / self.zoom + self.w / 2
             ly = (ly - self.h / 2) / self.zoom + self.h / 2
+        if self.scale != 1.0:
+            lx, ly = lx / self.scale, ly / self.scale
         if self.clip and not self.contains(lx, ly):
             return None
         for c in reversed(self.children):
@@ -240,8 +250,8 @@ class View:
         return None
 
     def to_local(self, gx, gy):
-        x, y = self.abs_pos()
-        return gx - x, gy - y
+        x, y, k = self.in_scene()
+        return (gx - x) / k, (gy - y) / k
 
     # -- animation ------------------------------------------------------------------------
     def animate(self, ms=200, ease="out", done=None, **props):
@@ -583,7 +593,7 @@ class TextField(View):
     def restyle(self):
         if self.edit is None or self.scene is None:
             return
-        s = self.scene.scale / self.scene.devicePixelRatioF()
+        s = self.scene.scale / self.scene.devicePixelRatioF() * self.in_scene()[2]
         ink = resolve(self.scene, "ink1").name()
         f = font(self.size, QFont.Normal)
         qf = QFont(f)
@@ -600,10 +610,11 @@ class TextField(View):
             return
         shown = self.visible_in_scene()
         if shown:
-            x, y = self.abs_pos()
+            x, y, k = self.in_scene()
             s = self.scene.scale / self.scene.devicePixelRatioF()
-            pad = 12
-            self.edit.setGeometry(round((x + pad) * s), round(y * s), round((self.w - 2 * pad) * s), round(self.h * s))
+            pad = 12 * k
+            self.edit.setGeometry(round((x + pad) * s), round(y * s), round((self.w * k - 2 * pad) * s),
+                                  round(self.h * k * s))
         self.edit.setVisible(shown)
 
     def visible_in_scene(self):

@@ -82,6 +82,21 @@ class BuildHome(unittest.TestCase):
         self.assertEqual([e['entity_id'] for e in entities], ['switch.cam_power'])
 
 
+class DeletedRooms(unittest.TestCase):
+    def test_a_deleted_room_leaves_its_devices_uncategorised(self):
+        areas = [{'area_id': 'lr', 'name': 'Living room'}, {'area_id': 'bd', 'name': 'Bedroom'}]
+        registry = [{'entity_id': 'light.a', 'area_id': 'lr'}, {'entity_id': 'light.b', 'area_id': 'bd'},
+                    {'entity_id': 'light.c', 'area_id': 'bd'}]
+        states = [state('light.a'), state('light.b'), state('light.c')]
+        overrides = {'light.c': 'Den'}
+        acc, _, rooms = home.build_home(states, areas, [], registry, overrides, {'Living room', 'Den'})
+        where = {e['entity_id']: e['area'] for e in acc}
+        self.assertEqual(where, {'light.a': '', 'light.b': 'Bedroom', 'light.c': ''})
+        self.assertEqual(rooms, ['Bedroom'])
+        acc, _, rooms = home.build_home(states, areas, [], registry, overrides)          # brought back
+        self.assertEqual({e['entity_id']: e['area'] for e in acc}['light.c'], 'Den')
+
+
 class PanelConfig(unittest.TestCase):
     def test_clean_panel(self):
         keep = lambda tiles: list(tiles)
@@ -90,7 +105,9 @@ class PanelConfig(unittest.TestCase):
                                     'room_overrides': {'light.a': ' Study ', 'b': '', 3: 'x'}}, keep)
         self.assertEqual(panel, {'mode': 'grid', 'tiles': None, 'home_tiles': [{'entity': 'a'}],
                                  'room_overrides': {'light.a': 'Study'}, 'hidden_rooms': [], 'hidden_chips': [], 'custom_rooms': [], 'room_order': [],
-                                 'bg_image': '', 'bg_blur': 28})
+                                 'deleted_rooms': [], 'show_other': False, 'bg_image': '', 'bg_blur': 28})
+        gone = config.clean_panel({'deleted_rooms': ['Garage', 'Garage', '', 3], 'show_other': 1}, keep)
+        self.assertEqual((gone['deleted_rooms'], gone['show_other']), (['Garage'], True))
         self.assertEqual(config.clean_panel({'custom_rooms': [' Den ', 'Den', '', 4]}, keep)['custom_rooms'], ['Den'])
         loud = config.clean_panel({'hidden_rooms': ['Garage', 3], 'bg_image': 'x.jpg', 'bg_blur': 999}, keep)
         self.assertEqual((loud['hidden_rooms'], loud['bg_image'], loud['bg_blur']),

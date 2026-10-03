@@ -328,11 +328,10 @@ class HomeView(EditMixin, View):
         m = self.m
         self.rooms_row = ScrollView(12, 14, W - 4 - 24, 46, horizontal=True, fade=44)
         self.main.add(self.rooms_row)
-        custom = set(m.panel.get("custom_rooms") or [])
         chips = []
 
         def add_chip(key, label, off):
-            has_x = m.editing and key in custom and not any(e.get("area") == key for e in m.entities)
+            has_x = m.editing and key not in ("", OTHER_ROOM)          # any room but all and uncategorised
             text = ("◌ " if off else "● ") + label if (m.editing and key != "") else label
             chip = Chip(text, key, self.chip_click, active=(not m.editing and m.room == key), off=off,
                         x_button=has_x)
@@ -367,10 +366,28 @@ class HomeView(EditMixin, View):
         self.chips = chips
 
     def delete_room(self, key):
-        self.m.panel["custom_rooms"] = [r for r in self.m.panel.get("custom_rooms") or [] if r != key]
+        """Delete a room: its devices are uncategorised. One with devices can be brought back from the add
+        sheet (the devices moved into it go back too); an empty room of the user's own just goes."""
+        m, p = self.m, self.m.panel
+        members = [e for e in (*m.entities, *m.sensors) if e.get("area") == key]
+        for name in ("custom_rooms", "room_order", "hidden_rooms", "hidden_chips"):
+            p[name] = [r for r in p.get(name) or [] if r != key]
+        if members or key in m.rooms:
+            p["deleted_rooms"] = list(dict.fromkeys([*(p.get("deleted_rooms") or []), key]))
+        for e in members:                           # at once; Api.get_home says the same next time
+            e["area"] = ""
+        m.rooms = [r for r in m.rooms if r != key]
+        if m.room == key:
+            m.room = ""
         self.persist()
         self.build()
         self.apply_category_state(animate=False)
+
+    def restore_room(self, key):
+        p = self.m.panel
+        p["deleted_rooms"] = [r for r in p.get("deleted_rooms") or [] if r != key]
+        self.persist()
+        self.load()                                 # its devices' rooms come from Home Assistant again
 
     def focus_room_field(self):
         f = getattr(self, "room_field", None)
@@ -610,7 +627,13 @@ class HomeView(EditMixin, View):
         self.apply_category_state(animate=False)
 
     def toggle_room_hidden(self, key, off):
-        s = self.m.hidden_rooms()
+        if key == OTHER_ROOM:
+            self.m.panel["show_other"] = bool(off)
+            self.persist()
+            self.build()
+            self.apply_category_state(animate=False)
+            return
+        s = self.m.hidden_rooms() - {OTHER_ROOM}
         if off:
             s.discard(key)
         else:
@@ -634,6 +657,7 @@ class HomeView(EditMixin, View):
         field = getattr(self, "room_field", None)
         name = (field.value() if field is not None else "").strip()
         if commit and name:
+            m.panel["deleted_rooms"] = [r for r in m.panel.get("deleted_rooms") or [] if r != name]
             rooms = list(m.panel.get("custom_rooms") or [])
             if name not in rooms and name not in m.rooms:
                 rooms.append(name)
@@ -677,6 +701,12 @@ class HomeView(EditMixin, View):
                 count = sum(1 for e in m.entities if m.room_key(e.get("area")) == room)
                 y = self.sheet_row(lst, y, m.room_label(room), "%d 個配件　顯示" % count,
                                    lambda e, room=room: self.show_hidden_room(room))
+        deleted = list(m.panel.get("deleted_rooms") or [])
+        if deleted:
+            lst.add(Label("已刪除的房間", 20, QFont.Bold, "ink2", x=4, y=y + 6, lh=1.3))
+            y += 6 + 26 + 10
+            for room in deleted:
+                y = self.sheet_row(lst, y, room, "還原", lambda e, room=room: self.restore_room(room))
         lst.add(Label("已移除的配件", 20, QFont.Bold, "ink2", x=4, y=y + 6, lh=1.3))
         y += 6 + 26 + 10
         gone = [e for e in m.entities if (m.record(e["entity_id"]) or {}).get("hidden")]
@@ -717,6 +747,8 @@ class HomeView(EditMixin, View):
         return paint
 
     def show_hidden_room(self, room):
+        if room == OTHER_ROOM:
+            self.m.panel["show_other"] = True
         self.m.panel["hidden_rooms"] = [r for r in self.m.panel.get("hidden_rooms") or [] if r != room]
         self.persist()
         self.build()
