@@ -3159,6 +3159,10 @@ def main():
     api._apply_hotkey()
 
     qtshell.start()
+    # The event loop ends without Quit when Windows asks the program to close (an installer updating it,
+    # signing out, shutting down). The tray's thread would then hold the process open until it was
+    # killed: leave the way Quit does.
+    api._quit()
 
 
 if __name__ == "__main__":
