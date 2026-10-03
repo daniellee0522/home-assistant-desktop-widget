@@ -90,7 +90,7 @@ class _Surface(GlassMixin, QWidget):
         self.scale = 1.0
         self.pw = self.ph = 1
         self.form, self.rects = "small", []
-        self.wkind = "tiles"                      # what it shows: tiles, weather, camera, chart, shortcuts
+        self.wkind = "tiles"                      # what it shows: tiles, weather, camera, chart
         self.extras, self._extras_at, self._fetching = {}, {}, set()
         self.extras_timer = QTimer(self)
         self.extras_timer.setInterval(5000)
@@ -175,7 +175,7 @@ class _Surface(GlassMixin, QWidget):
         mine = mine or {"size": "2x4", "tiles": []}
         wkind = mine.get("kind") if mine.get("kind") in kinds.KINDS else "tiles"
         new = {
-            # a widget of another kind holds only the devices it shows (the first weather, the shortcuts...)
+            # a widget of another kind holds only the devices it shows (the first weather, two sensors...)
             "tiles": mine["tiles"] if wkind == "tiles" else kinds.shown(wkind, mine["tiles"]),
             "wkind": wkind, "size_key": mine["size"], "zoom": prefs.get("zoom", 100),
             "theme_raw": prefs.get("theme", "auto"), "style": prefs.get("glass_style", "classic"),
@@ -231,9 +231,8 @@ class _Surface(GlassMixin, QWidget):
         self.scale = max(0.5, min(2.0, self.zoom / 100.0)) * self.dpi
         cw, ch = render.widget_size(self.size_key)
         self.pw, self.ph = round(cw * self.scale), round(ch * self.scale)
-        if self.wkind in ("tiles", "shortcuts"):
-            self.form, self.rects = render.tile_layout(self.size_key, len(self.tiles),
-                                                       "small" if self.wkind == "shortcuts" else None)
+        if self.wkind == "tiles":
+            self.form, self.rects = render.tile_layout(self.size_key, len(self.tiles))
             self.scroll_max = render.scroll_range(self.size_key, len(self.tiles))
         else:                                    # one picture: no tiles to press, nothing to scroll
             self.form, self.rects, self.scroll_max = "small", [], 0.0
@@ -491,11 +490,8 @@ class _Surface(GlassMixin, QWidget):
         self._invalidate_overlay()
         if i < 0:
             if press.get("button") and self._button_at(x, y) and not moved:
-                if self.wkind == "tiles":
-                    threading.Thread(target=self.api.open_settings_window, daemon=True).start()
-                else:                             # an empty weather, camera...: the editor, on it
-                    wid = self.widget_id
-                    threading.Thread(target=lambda: self.api.open_widget_editor(wid), daemon=True).start()
+                wid = self.widget_id              # an empty widget: the editor, on it
+                threading.Thread(target=lambda: self.api.open_widget_editor(wid), daemon=True).start()
             elif self.wkind in EXTRAS_EVERY and self.tiles and not moved:
                 self.facade.popover(self.tiles[0])        # a weather, a camera, a chart: its detail
             return

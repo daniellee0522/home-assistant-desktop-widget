@@ -258,7 +258,6 @@
  "選擇天氣": "Choose a weather",
  "選擇攝影機": "Choose a camera",
  "選擇感測器": "Choose sensors",
- "加入場景或腳本": "Add scenes or scripts",
  "按這裡設定": "Tap here to set it up",
  "家": "Home",
  "門口": "Front door",
@@ -272,12 +271,12 @@
  "全選": "Select all",
  "取消全選": "Select none",
  "新增感測器": "Add sensors",
- "新增捷徑": "Add shortcuts",
  "更換天氣": "Change weather",
  "更換攝影機": "Change camera",
  "+ 新增感測器": "+ Add sensors",
- "+ 新增捷徑": "+ Add shortcuts",
  "預覽": "Preview",
  "尚無配件，按下方「%s」": "Nothing yet: press “%s” below",
- "天氣、攝影機、圖表與捷徑": "Weather, cameras, charts and shortcuts"
+ "天氣、攝影機與圖表": "Weather, cameras and charts",
+ "按這裡加入配件": "Press here to add devices",
+ "編輯 Widget": "Edit widget"
 }

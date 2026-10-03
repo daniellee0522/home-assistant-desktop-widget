@@ -271,7 +271,9 @@ def follow_screen(hwnd, x, y):
     for widget in app.topLevelWidgets():
         handle = widget.windowHandle()
         if handle is not None and int(widget.winId()) == int(hwnd):
-            if handle.screen() is not target:
+            # (only among the screens of one desktop: to another, Qt would make the window again, and
+            # the window we know by its HWND would be gone)
+            if handle.screen() is not target and target in handle.screen().virtualSiblings():
                 handle.setScreen(target)
             return
 

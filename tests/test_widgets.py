@@ -134,6 +134,13 @@ class Snapping(unittest.TestCase):
         x, y = self.snap((108, 600, 408, 800))
         self.assertEqual(x, 100)
 
+    def test_stepping_out_of_another_never_leaves_the_screens(self):
+        """A widget nudged while on top of another (a click on the editor's map) was pushed off the
+        screen, out of sight: it stays inside the work area."""
+        snap = snap_function()
+        x, y = snap((1500, 100, 1900, 300), [(1500, 100, 1900, 300)], self.AREAS, 16, 12)
+        self.assertTrue(0 <= x and x + 400 <= 1920 and 0 <= y and y + 200 <= 1080, (x, y))
+
     def test_far_from_everything_is_left_alone(self):
         self.assertEqual(self.snap((1000, 500, 1300, 700)), (1000, 500))
 

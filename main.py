@@ -514,6 +514,20 @@ class Api:
         if self._flyout_open and self._home_mode():
             ids = ids + list(self._home_states)
         self._client.set_entities(ids)
+        # A device just added says nothing until it changes (a room's temperature, for hours): its state
+        # now is read once and given to the windows.
+        unknown = [e for e in self._watched_entities() if e not in self._known_states]
+        if unknown and self._cfg.get("ha_token"):
+            threading.Thread(target=self._read_new_states, args=(unknown,), daemon=True).start()
+
+    def _read_new_states(self, entities):
+        try:
+            by_id = {s.get("entity_id"): s for s in self._client.get_states()}
+        except Exception:
+            return
+        items = [[e, by_id[e]] for e in entities if e in by_id]
+        if items:
+            self._on_ha_events(items)
 
     def test_connection(self, url, token):
         tmp = HAClient()
@@ -2482,6 +2496,17 @@ def snap_rect(rect, others, areas, threshold, gap):
                 moved = True
         if not moved:
             break
+    # Stepping out of another widget must not take it off the screens: it stays inside the work area its
+    # middle is in (or the nearest one), even if that means overlapping.
+    if areas:
+        cx, cy = x + w / 2, y + h / 2
+
+        def distance(a):
+            al, at, ar, ab = a
+            return max(al - cx, 0, cx - ar) + max(at - cy, 0, cy - ab)
+        al, at, ar, ab = min(areas, key=distance)
+        x = max(al, min(x, ar - w))
+        y = max(at, min(y, ab - h))
     return int(x), int(y)
 
 

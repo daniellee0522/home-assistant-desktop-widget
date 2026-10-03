@@ -26,6 +26,25 @@ TEXT = {
     "section": (14.5, QFont.Bold, "ink2"),        # a heading over a group of fields
     "caption": (12, QFont.Medium, "ink2"),        # small print: times under a bar, a range
     "menu": (15, QFont.Normal, "ink1"),           # a choice in a menu
+    "empty": (15, QFont.Normal, "white"),         # a message over a picture (an empty preview)
+
+    # Settings and the widget editor: a denser window, read close up
+    "header": (15, QFont.Bold, "ink1"),           # the window's title
+    "header_sub": (11.5, QFont.Normal, "ink2"),   # under it: connected, what the page is for
+    "group": (12, QFont.Bold, "ink2"),            # a heading over a group of settings or a column
+    "field": (12, QFont.Normal, "ink2"),          # what a field, a slider or a choice sets
+    "hint": (11.5, QFont.Normal, "ink2"),         # a note, a result, nothing found
+    "tiny": (10.5, QFont.Normal, "ink2"),         # a unit beside a small field
+
+    # The Home panel, drawn in its own units (half a px each: the sizes are twice the others')
+    "home_title": (38, QFont.ExtraBold, "ink1"),  # 我的家
+    "home_category": (32, QFont.ExtraBold, "ink1"),   # the open capsule's title
+    "home_sheet": (30, QFont.Bold, "ink1"),       # a sheet's title
+    "home_room": (27, QFont.Bold, "ink1"),        # a room's heading
+    "home_status": (21, QFont.DemiBold, "ink2"),  # beside it: its temperature and humidity
+    "home_body": (24, QFont.Normal, "ink2"),      # a message in the room list
+    "home_hint": (20, QFont.Medium, "ink2"),      # how to use what is shown
+    "home_section": (20, QFont.Bold, "ink2"),     # a heading in a sheet
 }
 
 # A box that scrolls fades out over this many of its px at an end with more beyond it, everywhere.

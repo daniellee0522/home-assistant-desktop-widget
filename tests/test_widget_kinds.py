@@ -1,4 +1,4 @@
-"""The other kinds of desktop widget (nativeui/kinds.py): the weather, a camera, a chart, shortcuts. What
+"""The other kinds of desktop widget (nativeui/kinds.py): the weather, a camera, a chart. What
 each shows of its devices, that it fetches what it needs besides states, what a tap does, and the editor:
 a kind is dragged from its palette, keeps its size and its devices, and its picker offers what it shows."""
 import os
@@ -73,14 +73,13 @@ class WhatEachShows(unittest.TestCase):
                  T("scene.x", "scene"), T("script.y", "script")]
         self.assertEqual([t["entity"] for t in kinds.shown("weather", tiles)], ["weather.home"])
         self.assertEqual(len(kinds.shown("chart", tiles)), 2)
-        self.assertEqual([t["entity"] for t in kinds.shown("shortcuts", tiles)], ["scene.x", "script.y"])
         self.assertEqual(kinds.shown("tiles", tiles), tiles)
 
     def test_every_kind_draws_in_every_size_light_and_dark(self):
         states = {"weather.home": {"state": "sunny", "attributes": {"temperature": 30}},
                   "sensor.a": {"state": "21.5", "attributes": {"unit_of_measurement": "°C"}}}
         tiles = [T("weather.home", "weather"), T("camera.c", "camera"), T("sensor.a", "sensor"), T("scene.x", "scene")]
-        for kind in ("weather", "camera", "chart", "shortcuts"):
+        for kind in ("weather", "camera", "chart"):
             for size in render.SIZES:
                 for theme in ("light", "dark"):
                     w, h = render.widget_size(size)
@@ -100,7 +99,7 @@ class WhatEachShows(unittest.TestCase):
         self.assertEqual(kinds.KIND_SIZE, config.KIND_SIZE)
 
     def test_an_empty_one_asks_for_its_devices_and_is_its_button(self):
-        for kind in ("weather", "camera", "chart", "shortcuts"):
+        for kind in ("weather", "camera", "chart"):
             w, h = render.widget_size(kinds.KIND_SIZE[kind])
             img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
             img.fill(0)
@@ -147,13 +146,31 @@ class OnTheDesktop(unittest.TestCase):
         self.assertEqual(sorted(surf.extras["history"]), ["sensor.a", "sensor.b"])
         TW.done(win)
 
-    def test_a_shortcut_runs_when_tapped(self):
-        api, win, surf = make([T("scene.home", "scene", "回家"), T("light.a", "light")], "shortcuts", "2x2")
-        self.assertEqual(len(surf.rects), 1)                 # the light is not a shortcut
+    def test_a_scene_is_a_tile_of_an_ordinary_widget_and_runs_when_tapped(self):
+        self.assertEqual(config._clean_widget({"id": "a", "kind": "shortcuts", "size": "2x4",
+                                               "tiles": [T("scene.home", "scene")]})["kind"], "tiles")
+        api, win, surf = make([T("scene.home", "scene", "回家"), T("light.a", "light")], "tiles", "2x2")
+        self.assertEqual(len(surf.rects), 2)
         QTest.mouseClick(surf, Qt.LeftButton, pos=TW.centre(surf, 0))
         TW.pump(150)
         self.assertTrue([c for c in api.calls if c[0] == "service" and c[3] == "scene.home"])
         TW.done(win)
+
+    def test_dimmed_every_kind_is_clear_glass(self):
+        """While dimmed the weather's sky and the camera's picture give way to clear glass, as tiles do."""
+        states = {"weather.home": {"state": "sunny", "attributes": {"temperature": 30}}}
+        w, h = render.widget_size("2x4")
+        for kind, tile in (("weather", T("weather.home", "weather")), ("camera", T("camera.c", "camera"))):
+            out = []
+            for dim in (False, True):
+                img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+                img.fill(0)
+                p = QPainter(img)
+                kinds.draw_widget(p, kind, "2x4", [tile], states, "dark", dim=dim, extras={})
+                p.end()
+                out.append(img.pixelColor(w // 2, h - 40).alpha())
+            self.assertGreater(out[0], 200, kind)               # the sky, the dark of a camera
+            self.assertLess(out[1], 160, kind)                  # glass to see through
 
 
 class InTheEditor(unittest.TestCase):
@@ -250,6 +267,31 @@ class InTheEditor(unittest.TestCase):
         before = len(sc.current_tiles())
         sc.picker_add.on_click(None)
         self.assertEqual(len(sc.current_tiles()), before + 3)
+
+
+class TheMap(unittest.TestCase):
+    def test_a_click_on_a_widget_of_the_map_selects_it_and_moves_nothing(self):
+        import test_native_settings as TS
+        api, win, sc = TS.make()
+        moved = []
+        api.move_widget = lambda i, x, y: moved.append((i, x, y)) or {"x": x, "y": y}
+        sc.open_editor("w2")
+        sc.layout = api.get_layout()
+        sc.build()
+        TW.pump(150)
+        box = [v for v in InTheEditor.walk(None, sc.root, "MapBox") if v.wd["id"] == "w1"][0]
+        sc.body_scroll.scroll_to(box.abs_pos()[1] - 150)
+        TW.pump(50)
+        s = sc.scale / sc.devicePixelRatioF()
+        x, y, k = box.in_scene()
+        at = QPoint(round((x + box.w * k / 2) * s), round((y + box.h * k / 2) * s))
+        QTest.mousePress(sc, Qt.LeftButton, pos=at)
+        QTest.mouseMove(sc, QPoint(at.x() + 2, at.y() + 1))       # a hand that trembles
+        QTest.mouseRelease(sc, Qt.LeftButton, pos=at)
+        TW.pump(150)
+        self.assertEqual(moved, [])
+        self.assertEqual(sc.widget_id, "w1")
+        win.dispose()
 
 
 class DraggingInTheEditor(unittest.TestCase):

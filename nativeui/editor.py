@@ -10,8 +10,8 @@ import uuid
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
 
-from . import kinds, render, ui
-from .ui import Button, CheckRow, Label, Rect, TextField, View
+from . import kinds, render, style, ui
+from .ui import Button, CheckRow, Rect, TextField, View
 
 PANEL_ID = "__panel"
 SIZES = ["1x1", "2x2", "2x4", "4x4"]
@@ -23,9 +23,8 @@ RIGHT_X = LEFT_X + LEFT_W + 22
 RIGHT_W = EDITOR_W - 18 - RIGHT_X
 ROW_STEP = 46                    # a device row and the space under it
 # what the list of devices is called, and its button, by the widget's kind
-LIST_TITLE = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "感測器", "shortcuts": "捷徑"}
-ADD_TEXT = {"tiles": "+ 新增配件", "weather": "選擇天氣", "camera": "選擇攝影機", "chart": "+ 新增感測器",
-            "shortcuts": "+ 新增捷徑"}
+LIST_TITLE = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "感測器"}
+ADD_TEXT = {"tiles": "+ 新增配件", "weather": "選擇天氣", "camera": "選擇攝影機", "chart": "+ 新增感測器"}
 
 
 def new_tile_id():
@@ -109,7 +108,7 @@ class Palette(View):
                 x += bw + 16
             y += lh + 14
         if on_press_kind is not None:
-            self.add(Label("天氣、攝影機、圖表與捷徑", 11.5, QFont.Normal, "ink2", x=0, y=y - 4))
+            self.add(style.label("hint", "天氣、攝影機與圖表", x=0, y=y - 4))
             y += 14 + 8
             gap = 12
             kw = (LEFT_W - gap) / 2
@@ -257,11 +256,11 @@ class MapBox(View):
         self.on_release = self._release
 
     def _press(self, e):
-        ed = self.mm.editor
-        if ed.widget_id != self.wd["id"]:
-            ed.select_widget(self.wd["id"], keep_drag=True)
-        ed.editor_dragging = True
-        self.drag = {"start": (e.gx, e.gy), "origin": (self.x, self.y), "base": (self.wd["x"], self.wd["y"])}
+        # (the editor is built again for a new selection when the button is let go: built now, this box
+        # would be gone from under the pointer)
+        self.mm.editor.editor_dragging = True
+        self.drag = {"start": (e.gx, e.gy), "origin": (self.x, self.y), "base": (self.wd["x"], self.wd["y"]),
+                     "moved": False}
         return True
 
     def _move(self, e):
@@ -269,6 +268,10 @@ class MapBox(View):
         if not d:
             return True
         dx, dy = e.gx - d["start"][0], e.gy - d["start"][1]
+        if not d["moved"]:
+            if (dx * dx + dy * dy) ** 0.5 < 5:          # a click that trembles moves nothing
+                return True
+            d["moved"] = True
         self.x, self.y = d["origin"][0] + dx, d["origin"][1] + dy
         k = self.mm.k
         try:
@@ -283,8 +286,11 @@ class MapBox(View):
 
     def _release(self, e):
         self.drag = None
-        self.mm.editor.editor_dragging = False
-        self.mm.editor.refresh_layout()
+        ed = self.mm.editor
+        ed.editor_dragging = False
+        if ed.widget_id != self.wd["id"]:
+            ed.select_widget(self.wd["id"])
+        ed.refresh_layout()
         return True
 
     def paint(self, p):
@@ -327,8 +333,6 @@ class Preview(View):
         n = len(widget["tiles"])
         if self.kind == "tiles":
             self.form, self.rects = render.tile_layout(size, n, form)
-        elif self.kind == "shortcuts":
-            self.form, self.rects = render.tile_layout(size, n, "small")
         else:
             self.form, self.rects = "small", []
         # only the tiles in sight take the pointer and the drop
@@ -426,7 +430,7 @@ class Preview(View):
     def _card(self, p):
         sc = self.scene
         tiles = self.widget["tiles"]
-        whole = self.kind not in ("tiles", "shortcuts")
+        whole = self.kind != "tiles"
         key = (sc.theme, sc.style, self.kind, self.zoom_k, p.transform().m11(), render._language,
                repr(tiles) if whole else None,
                repr({t["entity"]: self.editor.states.get(t["entity"]) for t in tiles}) if whole else None)
@@ -447,19 +451,15 @@ class Preview(View):
     def _tile_pic(self, p, tile, slot, w, h):
         sc = self.scene
         st = self.editor.states.get(tile["entity"])
-        key = (repr(tile), repr(st), sc.theme, sc.style, self.form, self.zoom_k, p.transform().m11(),
-               slot % len(kinds.SHORTCUT_COLORS) if self.kind == "shortcuts" else 0)
+        key = (repr(tile), repr(st), sc.theme, sc.style, self.form, self.zoom_k, p.transform().m11())
         pic = self.pics.get(key)
         if pic is None:
             z = self.zoom_k
 
             def draw(q):
                 q.scale(z, z)
-                if self.kind == "shortcuts":
-                    kinds.draw_shortcuts(q, [tile], [(0, 0, w, h)], self.editor.states, None, first=slot)
-                else:
-                    render.draw_tile(q, tile, st, 0, 0, w, h, sc.theme, render.tokens(sc.theme, False, sc.style),
-                                     self.form)
+                render.draw_tile(q, tile, st, 0, 0, w, h, sc.theme, render.tokens(sc.theme, False, sc.style),
+                                 self.form)
             if len(self.pics) > 64:
                 self.pics.clear()
             pic = self.pics[key] = device_image(p, w * z, h * z, draw)
@@ -468,7 +468,7 @@ class Preview(View):
     def paint(self, p):
         z = self.zoom_k
         put_image(p, self._card(p), 0, 0)
-        if self.kind not in ("tiles", "shortcuts"):
+        if self.kind != "tiles":
             return
         pr = self.press if self.dragging() else None
         moving = False
@@ -552,7 +552,7 @@ class TileRow(View):
             self.step = TextField(right - 40, 8, 40, 24, str(float(tile.get("temp_step") or 1)).rstrip("0").rstrip("."),
                                   "", 11, self._step_done, 4, radius=11)
             self.add(self.step)
-            self.add(Label("±", 10.5, QFont.Normal, "ink2", x=right - 40 - 14, y=(40 - 12.6) / 2))
+            self.add(style.label("tiny", "±", x=right - 40 - 14, y=(40 - 12.6) / 2))
             right -= 40 + 18
         self.text_w = right - 70
         self.rename = None
@@ -894,13 +894,13 @@ class EditorMixin:
 
         # the left column
         y = 2
-        body.add(Label("拖曳到桌面新增", 12, QFont.DemiBold, "ink2", x=LEFT_X, y=y))
+        body.add(style.label("group", "拖曳到桌面新增", x=LEFT_X, y=y))
         y += 14.4 + 8
         pal = Palette(self, self.drag_new_widget, self.drag_new_kind)
         pal.x, pal.y = LEFT_X, y
         body.add(pal)
         y += pal.h
-        body.add(Label("桌面配置（拖曳移動）", 12, QFont.DemiBold, "ink2", x=LEFT_X, y=y + 12))
+        body.add(style.label("group", "桌面配置（拖曳移動）", x=LEFT_X, y=y + 12))
         y += 12 + 14.4 + 8
         self.minimap_host = View(LEFT_X, y, LEFT_W, 120)
         body.add(self.minimap_host)
@@ -914,7 +914,7 @@ class EditorMixin:
         body.add(lock)
         y += lock.h
         if len(self.widgets()) > SOFT_LIMIT:
-            hint = Label("已超過 %d 個 Widget，每多一個都會多用一份記憶體。" % SOFT_LIMIT, 11.5, QFont.Normal, "ink2",
+            hint = style.label("hint", "已超過 %d 個 Widget，每多一個都會多用一份記憶體。" % SOFT_LIMIT,
                          x=LEFT_X, y=y + 6, w=LEFT_W, wrap=True, lh=1.4)
             body.add(hint)
             y += 6 + hint.h
@@ -922,7 +922,7 @@ class EditorMixin:
 
         # the right column
         y = 2
-        body.add(Label("我的 Widget", 12, QFont.DemiBold, "ink2", x=RIGHT_X, y=y))
+        body.add(style.label("group", "我的 Widget", x=RIGHT_X, y=y))
         y += 14.4 + 8
         x = 0
         row_y = y
@@ -941,8 +941,7 @@ class EditorMixin:
             x += c.w + 6
         y = row_y + 28
         kind = self.current_kind()
-        body.add(Label("預覽（拖曳配件調整順序）" if kind in ("tiles", "shortcuts") else "預覽", 12, QFont.DemiBold,
-                       "ink2", x=RIGHT_X, y=y + 12))
+        body.add(style.label("group", "預覽（拖曳配件調整順序）" if kind == "tiles" else "預覽", x=RIGHT_X, y=y + 12))
         y += 12 + 14.4 + 8
         if widget:
             w, h = render.widget_size("2x4" if on_panel else widget["size"])
@@ -954,8 +953,7 @@ class EditorMixin:
             body.add(prev)
             self.preview = prev
             if not widget["tiles"]:
-                body.add(Label("尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), 15, QFont.Normal,
-                               "white", x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
+                body.add(style.label("empty", "尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
             y += box_h
         # the tools
         ty = y + 12
@@ -968,8 +966,7 @@ class EditorMixin:
                 tx += c.w + 6
             tx += 6
         elif not on_panel:
-            note = Label("%s Widget · %s" % (render.tr(kinds.KIND_LABELS[kind]), widget["size"]), 12, QFont.Normal,
-                         "ink2", x=tx, y=ty + 6)
+            note = style.label("field", "%s Widget · %s" % (render.tr(kinds.KIND_LABELS[kind]), widget["size"]), x=tx, y=ty + 6)
             body.add(note)
             tx += note.w + 14
         if not on_panel:
@@ -993,7 +990,7 @@ class EditorMixin:
         tiles = widget["tiles"] if widget else []
         cap = kinds.KIND_MAX.get(kind)
         count = ("%d/%d" % (len(tiles), cap)) if cap and cap > 1 else "%d" % len(tiles)
-        body.add(Label("%s (%s)" % (render.tr(LIST_TITLE[kind]), count), 12, QFont.Bold, "ink2", x=RIGHT_X, y=y + 5,
+        body.add(style.label("group", "%s (%s)" % (render.tr(LIST_TITLE[kind]), count), x=RIGHT_X, y=y + 5,
                        spacing=0.36))
         text = ADD_TEXT[kind]
         if cap == 1 and tiles:

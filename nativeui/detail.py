@@ -19,6 +19,7 @@ from .ui import Button, ScrollView, Slider, TextField, View
 CARD_W = 320
 BODY_X, BODY_W = 14, 292
 BODY_MAX = 560
+CARD_MAX_H = 760                     # the tallest the detail card beside a widget is made
 HISTORY_HOURS = 24
 
 ICON_CHOICES = ["light", "switch", "mdi:air-conditioner", "fan", "mdi:blinds", "mdi:curtains", "media", "monitor",
@@ -496,10 +497,21 @@ class DetailCard(OverlayScene):
         self.content.set_room(text)
 
     def request_size(self):
+        """The window takes the card's size now, on this thread: asked from another, it could land after the
+        window was shown at its old size, the bottom of the card cut off."""
         self.update_metrics()
         self.seq += 1
-        seq, pw, ph = self.seq, self.pw, self.ph
-        threading.Thread(target=lambda: self.api.resize_popover_window(pw, ph, seq), daemon=True).start()
+        try:
+            self.api.resize_popover_window(self.pw, self.ph, self.seq)
+        except Exception:
+            traceback.print_exc()
+
+    def room(self):
+        """How tall the card can be, in its own px: the work area of its screen, less a margin."""
+        screen = self.screen()
+        if screen is None or not self.scale:
+            return BODY_MAX + 67
+        return max(320.0, screen.availableGeometry().height() * screen.devicePixelRatio() / self.scale - 24)
 
     def rebuild(self):
         if self.tile is None:
@@ -507,11 +519,17 @@ class DetailCard(OverlayScene):
         self.root.clear()
         for f in list(self.fields):
             self.fields.remove(f)
-        view = self.content.build()
-        self.root.add(view)
+        # all of it shown, as in the tray panel: the tall controls made shorter, then smaller if it must be
+        room = min(self.room(), CARD_MAX_H)
+        view = self.content.build(max_h=room, fit=True)
+        k = min(1.0, room / view.h)
+        holder = View(0, 0, CARD_W * k, view.h * k)
+        view.scale = k
+        holder.add(view)
+        self.root.add(holder)
         controls.reattach_menu(self, view)      # a menu open over it stays, over the new card
         self.body_scroll = self.content.body_scroll
-        self.set_css_size(CARD_W, view.h)
+        self.set_css_size(CARD_W * k, view.h * k)
         self.request_size()
         for f in self.fields:
             f.place()

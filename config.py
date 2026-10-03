@@ -39,8 +39,9 @@ SUPPORTED_DOMAINS = [
 ]
 # What a widget shows: its devices as tiles, or one of the other kinds (nativeui/kinds.py). A widget is made
 # of its kind (dragged from the editor's palette) and keeps it; the other kinds have a size of their own.
-WIDGET_KINDS = ("tiles", "weather", "camera", "chart", "shortcuts")
-KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4", "shortcuts": "2x4"}
+# (A "shortcuts" kind was tried and folded back: its scenes and scripts are tiles of an ordinary widget.)
+WIDGET_KINDS = ("tiles", "weather", "camera", "chart")
+KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4"}
 
 DEFAULT_CONFIG = {
     "ha_url": "http://homeassistant.local:8123",

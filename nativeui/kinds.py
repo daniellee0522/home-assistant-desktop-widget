@@ -1,8 +1,8 @@
 """The other kinds of desktop widget, after iOS's own: the weather, a camera, a chart of sensors and a
-row of shortcuts (scenes, scripts, automations). A widget of the tiles kind is render.draw_widget's.
+A widget of the tiles kind is render.draw_widget's (scenes and scripts are tiles there).
 
 A widget is made of its kind, dragged from the editor's palette, and keeps it. Its devices (its tiles) say
-what it shows: a weather entity, a camera, two sensors, or the shortcuts. Each kind has one size of its own
+what it shows: a weather entity, a camera, or two sensors. Each kind has one size of its own
 (KIND_SIZE, as config.KIND_SIZE); the drawing still works in every size.
 What comes from elsewhere than the states (the forecast, the camera's picture, the sensors' history) is in
 `extras`, fetched by the widget (nativeui/widget.py).
@@ -15,16 +15,14 @@ from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath
 
 from . import render
 
-KINDS = ("tiles", "weather", "camera", "chart", "shortcuts")
-KIND_LABELS = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "圖表", "shortcuts": "捷徑"}
-KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4", "shortcuts": "2x4"}
-KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "chart": "mdi:chart-line",
-              "shortcuts": "mdi:gesture-tap-button"}
+KINDS = ("tiles", "weather", "camera", "chart")
+KIND_LABELS = {"tiles": "配件", "weather": "天氣", "camera": "攝影機", "chart": "圖表"}
+KIND_SIZE = {"weather": "2x4", "camera": "2x4", "chart": "2x4"}
+KIND_ICONS = {"weather": "mdi:weather-partly-cloudy", "camera": "mdi:cctv", "chart": "mdi:chart-line"}
 # what an empty one asks for
-KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器", "shortcuts": "加入場景或腳本"}
+KIND_ASK = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "選擇感測器"}
 # which devices each kind takes, and how many (None: any number)
-KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",),
-                "shortcuts": ("scene", "script", "automation")}
+KIND_DOMAINS = {"weather": ("weather",), "camera": ("camera",), "chart": ("sensor",),}
 KIND_MAX = {"weather": 1, "camera": 1, "chart": 2}
 
 CONDITIONS = {
@@ -43,7 +41,6 @@ SKIES = {
     "rain": (("#3f4d5e", "#66778a"), ("#1c232c", "#38424f")),
     "snow": (("#8394a6", "#bcc8d3"), ("#3a4552", "#5d6a78")),
 }
-SHORTCUT_COLORS = ("#ff9f0a", "#30d158", "#0a84ff", "#bf5af2", "#ff375f", "#64d2ff", "#5e5ce6", "#ffd60a")
 CHART_COLORS = ("#0a84ff", "#ff9f0a", "#30d158")
 
 
@@ -120,14 +117,16 @@ def _day(iso, i):
 
 # ---------------------------------------------------------------------------------- the weather
 
-def draw_weather(p, W, H, cols, rows, tile, state, forecast, card):
-    top, bottom = _sky(state)
-    g = QLinearGradient(0, 0, 0, H)
-    g.setColorAt(0, QColor(top))
-    g.setColorAt(1, QColor(bottom))
-    p.setPen(Qt.NoPen)
-    p.setBrush(g)
-    p.drawPath(card)
+def draw_weather(p, W, H, cols, rows, tile, state, forecast, card, sky=True):
+    """sky: the condition's own sky behind it (not while dimmed: then it is clear glass, as the tiles are)."""
+    if sky:
+        top, bottom = _sky(state)
+        g = QLinearGradient(0, 0, 0, H)
+        g.setColorAt(0, QColor(top))
+        g.setColorAt(1, QColor(bottom))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawPath(card)
     white, soft = QColor(255, 255, 255), QColor(255, 255, 255, 205)
     attrs = (state or {}).get("attributes") or {}
     name = tile.get("room") or attrs.get("friendly_name") or tile["entity"]
@@ -207,7 +206,15 @@ def draw_weather(p, W, H, cols, rows, tile, state, forecast, card):
 
 # ---------------------------------------------------------------------------------- a camera
 
-def draw_camera(p, W, H, tile, state, picture, taken, card):
+def draw_camera(p, W, H, tile, state, picture, taken, card, dim=False):
+    """dim: clear glass with the camera's icon and name, as the tiles are while dimmed (no picture is taken
+    then either)."""
+    if dim:
+        render.draw_icon(p, "mdi:cctv", "#ffffff", QRectF(22, 22, 44, 44))
+        name = tile.get("room") or ((state or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
+        f = _font(20, QFont.DemiBold)
+        _text(p, _fit(name, f, W - 44), f, QColor(255, 255, 255, 230), 22, H - 22 - 26)
+        return
     p.save()
     p.setClipPath(card)
     p.setPen(Qt.NoPen)
@@ -327,39 +334,6 @@ def draw_chart(p, W, H, cols, rows, tiles, states, history, tcol):
             _spark(p, rect, (history or {}).get(tile["entity"]), color)
 
 
-# ---------------------------------------------------------------------------------- shortcuts
-
-def draw_shortcuts(p, tiles, rects, states, ui, first=0):
-    """The shortcuts as coloured buttons; each one's colour is its place's (first: the place of tiles[0])."""
-    flash = (ui or {}).get("flash") or {}
-    for i, (tile, (x, y, w, h)) in enumerate(zip(tiles, rects)):
-        p.save()
-        if (ui or {}).get("pressed") == i:
-            p.translate(x + w / 2, y + h / 2)
-            p.scale(0.95, 0.95)
-            p.translate(-(x + w / 2), -(y + h / 2))
-        c = QColor(SHORTCUT_COLORS[(i + first) % len(SHORTCUT_COLORS)])
-        shape = render.squircle(x, y, w, h, 40)
-        g = QLinearGradient(0, y, 0, y + h)
-        g.setColorAt(0, c.lighter(112))
-        g.setColorAt(1, c)
-        p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawPath(shape)
-        k = flash.get(i, 0.0)
-        if k > 0:
-            p.setBrush(QColor(255, 255, 255, round(110 * k)))
-            p.drawPath(shape)
-        st = states.get(tile["entity"])
-        render.draw_icon(p, render.icon_name(tile, st), "#ffffff", QRectF(x + 18, y + 18, 34, 34))
-        name = tile.get("room") or ((st or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
-        f = _font(18, QFont.Bold)
-        lines = render.wrap_text(name, f, w - 36)[:2]
-        for j, line in enumerate(lines):
-            _text(p, line, f, QColor(255, 255, 255), x + 18, y + h - 18 - (len(lines) - j) * 23)
-        p.restore()
-
-
 # ---------------------------------------------------------------------------------- empty, and the samples
 
 def draw_kind_empty(p, W, H, kind, tcol, dim):
@@ -398,10 +372,6 @@ def sample(kind):
         return ([t("sensor.t", "sensor", render.tr("溫度")), t("sensor.h", "sensor", render.tr("濕度"))],
                 {"sensor.t": {"state": "23.4", "attributes": {"unit_of_measurement": "°C"}},
                  "sensor.h": {"state": "58", "attributes": {"unit_of_measurement": "%"}}}, {"history": hist})
-    if kind == "shortcuts":
-        names = (("scene.home", "回家", "mdi:home"), ("scene.away", "出門", "mdi:exit-run"),
-                 ("scene.night", "晚安", "mdi:weather-night"), ("script.movie", "電影", "mdi:movie-open"))
-        return ([dict(t(e, e.split(".")[0], render.tr(n)), icon=i) for e, n, i in names], {}, {})
     return [], {}, {}
 
 
@@ -420,29 +390,19 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
     card = render.squircle(0, 0, W, H, tcol["radius_panel"])
     button = None
-    if kind in ("chart", "shortcuts") or not mine:
+    if kind == "chart" or not mine or dim:     # dimmed, every kind is clear glass, as the tiles are
         render.draw_card_bg(p, W, H, tcol, style, theme)
     if not mine:
         button = draw_kind_empty(p, W, H, kind, tcol, dim) if message else None
     elif kind == "weather":
-        draw_weather(p, W, H, cols, rows, mine[0], states.get(mine[0]["entity"]), extras.get("forecast"), card)
+        draw_weather(p, W, H, cols, rows, mine[0], states.get(mine[0]["entity"]), extras.get("forecast"), card,
+                     sky=not dim)
     elif kind == "camera":
         draw_camera(p, W, H, mine[0], states.get(mine[0]["entity"]), extras.get("picture"),
-                    extras.get("picture_at"), card)
+                    extras.get("picture_at"), card, dim)
     elif kind == "chart":
         draw_chart(p, W, H, cols, rows, mine, states, extras.get("history"), tcol)
-    elif kind == "shortcuts":
-        _, rects = render.tile_layout(size, len(mine), "small")
-        p.save()
-        p.setClipRect(QRectF(render.PAD, render.PAD, W - 2 * render.PAD, H - 2 * render.PAD))
-        p.translate(0, -(ui or {}).get("scroll", 0))
-        draw_shortcuts(p, mine, rects, states, ui)
-        p.restore()
-    if dim and kind in ("weather", "camera") and mine:
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 0, 0, 120))
-        p.drawPath(card)
-    if kind in ("weather", "camera") and mine:
+    if kind in ("weather", "camera") and mine and not dim:
         render.inner_shadow(p, card, QColor(255, 255, 255, 40))
     p.restore()
     return button

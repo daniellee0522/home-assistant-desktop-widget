@@ -10,10 +10,10 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF
 
-from . import render, ui
+from . import render, style, ui
 from .homeedit import EditMixin
 from .homemodel import OTHER_ROOM, CATEGORIES
-from .ui import Button, Label, Rect, ScrollView, TextField, TileView, View
+from .ui import Button, Rect, ScrollView, TextField, TileView, View
 
 W, H = 678, 900                     # upright: the rooms get the height
 PAD = 14
@@ -252,7 +252,7 @@ class HomeView(EditMixin, View):
             m.room = ""
         self.add(Rect(0, 0, W, H, None))                       # nothing: the card paints itself
         # the top: the title and the tools
-        self.add(Label("我的家", 38, QFont.ExtraBold, "ink1", x=PAD + 4, y=PAD + (52 - 38 * 1.15) / 2, spacing=-0.5, lh=1.15))
+        self.add(style.label("home_title", "我的家", x=PAD + 4, y=PAD + (52 - 38 * 1.15) / 2, spacing=-0.5, lh=1.15))
         editing = m.cat_editing if m.category else m.editing
         done = Button("完成" if editing else "編輯", size=23, weight=QFont.Bold, h=52, pad=24, active=editing,
                       on_click=lambda e: self.toggle_editing())
@@ -405,9 +405,9 @@ class HomeView(EditMixin, View):
         """A room's heading: its name, its status, and when editing a button to switch it off or on."""
         m = self.m
         row = View(0, 0, HOME_SPAN, 38)
-        name = Label(m.room_label(key), 27, QFont.Bold, "ink1", x=8, y=0, lh=1.3)
+        name = style.label("home_room", m.room_label(key), x=8, y=0, lh=1.3)
         row.add(name)
-        status = Label("", 21, QFont.DemiBold, "ink2", x=8 + name.w + 14, y=4, lh=1.3)
+        status = style.label("home_status", "", x=8 + name.w + 14, y=4, lh=1.3)
         self.status_labels.append((status, key))
         row.add(status)
         row.name_label, row.key = name, key
@@ -433,7 +433,7 @@ class HomeView(EditMixin, View):
         groups = m.groups()
         if not groups:
             text = "正在載入配件…" if not m.entities else ("這個房間還沒有配件" if m.room else "沒有可顯示的配件")
-            lab = Label(text, 24, QFont.Normal, "ink2", x=8, y=y + 40, lh=1.3)
+            lab = style.label("home_body", text, x=8, y=y + 40, lh=1.3)
             self.body.add(lab)
             y += 120
         for key, entities, stub in groups:
@@ -464,7 +464,7 @@ class HomeView(EditMixin, View):
                 else:
                     grid.h = TILE_H * 0.7
                     grid.empty = True
-                    lab = Label("把配件拖曳到這裡", 22, QFont.Normal, "ink2", w=HOME_SPAN, align="c", lh=1.3)
+                    lab = style.label("home_body", "把配件拖曳到這裡", w=HOME_SPAN, align="c", lh=1.3)
                     lab.y = (grid.h - lab.h) / 2
                     grid.add(lab)
                 section.add(grid)
@@ -523,10 +523,10 @@ class HomeView(EditMixin, View):
         if cat is None:
             return
         title = cat["title"] + ("　" + m.room_label(m.room) if m.room else "")
-        t = Label(render.tr(title), 32, QFont.ExtraBold, "ink1", x=12 + 8, y=6 + 4, lh=1.3, spacing=-0.3)
+        t = style.label("home_category", render.tr(title), x=12 + 8, y=6 + 4, lh=1.3, spacing=-0.3)
         cv.add(t)
         if m.cat_editing:
-            cv.add(Label("按 − 不顯示該配件，按 ＋ 加回", 20, QFont.Medium, "ink2", x=12 + 8 + t.w + 16, y=6 + 12, lh=1.3))
+            cv.add(style.label("home_hint", "按 − 不顯示該配件，按 ＋ 加回", x=12 + 8 + t.w + 16, y=6 + 12, lh=1.3))
         everyone = [e for e in m.category_all(cat) if (not m.room or m.room_key(e.get("area")) == m.room)] \
             if m.cat_editing else m.category_members(cat)
         groups = {}
@@ -535,7 +535,7 @@ class HomeView(EditMixin, View):
         y = 6 + 4 + 32 * 1.3 + 16
         n = 0
         for key in sorted(groups, key=m.room_sort_key):
-            title = Label(m.room_label(key), 27, QFont.Bold, "ink1", x=12 + 8, y=y, lh=1.3)
+            title = style.label("home_room", m.room_label(key), x=12 + 8, y=y, lh=1.3)
             cv.add(title)
             y += 38 + 10
             # a grid four cells wide, dense: tiles as they come, in their shapes
@@ -691,7 +691,7 @@ class HomeView(EditMixin, View):
         sheet.interactive = True
         sheet.on_press = lambda e: True
         sheet.add(Rect(0, 0, W, H, "panel_solid", self.panel.t["radius_panel"], shape="squircle"))
-        sheet.add(Label("新增配件", 30, QFont.Bold, "ink1", x=26, y=22, lh=1.3))
+        sheet.add(style.label("home_sheet", "新增配件", x=26, y=22, lh=1.3))
         done = Button("完成", size=23, weight=QFont.Bold, h=52, pad=24, on_click=lambda e: self.close_sheet())
         done.x, done.y = W - 26 - done.w, 22 - 4
         sheet.add(done)
@@ -700,7 +700,7 @@ class HomeView(EditMixin, View):
         y = 0
         hidden_now = [r for r in sorted(m.hidden_rooms()) if r in m.room_names()]
         if hidden_now:
-            lst.add(Label("主畫面隱藏的房間", 20, QFont.Bold, "ink2", x=4, y=y + 6, lh=1.3))
+            lst.add(style.label("home_section", "主畫面隱藏的房間", x=4, y=y + 6, lh=1.3))
             y += 6 + 26 + 10
             for room in hidden_now:
                 count = sum(1 for e in m.entities if m.room_key(e.get("area")) == room)
@@ -708,15 +708,15 @@ class HomeView(EditMixin, View):
                                    lambda e, room=room: self.show_hidden_room(room))
         deleted = list(m.panel.get("deleted_rooms") or [])
         if deleted:
-            lst.add(Label("已刪除的房間", 20, QFont.Bold, "ink2", x=4, y=y + 6, lh=1.3))
+            lst.add(style.label("home_section", "已刪除的房間", x=4, y=y + 6, lh=1.3))
             y += 6 + 26 + 10
             for room in deleted:
                 y = self.sheet_row(lst, y, room, "還原", lambda e, room=room: self.restore_room(room))
-        lst.add(Label("已移除的配件", 20, QFont.Bold, "ink2", x=4, y=y + 6, lh=1.3))
+        lst.add(style.label("home_section", "已移除的配件", x=4, y=y + 6, lh=1.3))
         y += 6 + 26 + 10
         gone = [e for e in m.entities if (m.record(e["entity_id"]) or {}).get("hidden")]
         if not gone:
-            lab = Label("沒有已移除的配件。被移除的配件會列在這裡，按一下加回。", 24, QFont.Normal, "ink2", x=0, y=y + 40,
+            lab = style.label("home_body", "沒有已移除的配件。被移除的配件會列在這裡，按一下加回。", x=0, y=y + 40,
                         w=W - 52, wrap=True, lh=1.3)
             lst.add(lab)
             y += 40 + lab.h

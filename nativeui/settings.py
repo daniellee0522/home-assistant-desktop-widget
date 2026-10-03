@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
 import hotkey as hotkeymod
 
-from . import render, ui
+from . import render, style, ui
 from .detail import Stack
 from . import kinds
 from .editor import EditorMixin
@@ -249,7 +249,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             body, max_h, width = self.build_editor_body(), 640, 800
         elif self.page == "picker":
             kind = self.current_kind()
-            title = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "新增感測器", "shortcuts": "新增捷徑"}
+            title = {"weather": "選擇天氣", "camera": "選擇攝影機", "chart": "新增感測器"}
             top = self.header(title.get(kind, "新增配件"),
                               "選擇一個實體" if self.picker_single() else "可複選，選好後按「加入」",
                               back=lambda e: self.go(self.return_page), dot=True)
@@ -307,13 +307,13 @@ class SettingsScene(EditorMixin, OverlayScene):
             b = Button("‹", x=14, y=14, w=30, h=30, size=22, weight=QFont.Bold, on_click=back)
             self.root.add(b)
             x = 14 + 30 + 8
-        self.root.add(Label(title, 15, QFont.Bold, "ink1", x=x, y=14, w=width - x - 60, overflow="ellipsis"))
+        self.root.add(style.label("header", title, x=x, y=14, w=width - x - 60, overflow="ellipsis"))
         sx = x
         if dot:
             ok = self.connected
             self.root.add(Rect(x, 14 + 18 + 3.5, 8, 8, "accent_green" if ok else "accent_red", "full"))
             sx = x + 13
-        self.root.add(Label(sub, 11.5, QFont.Normal, "ink2", x=sx, y=14 + 18))
+        self.root.add(style.label("hint", sub, x=sx, y=14 + 18))
         if back is None or self.page == "editor":
             self.root.add(Button("✕", x=width - 14 - 30, y=14, w=30, h=30, size=15,
                                  on_click=lambda e: self.close_settings()))
@@ -321,11 +321,11 @@ class SettingsScene(EditorMixin, OverlayScene):
 
     # -- the settings screen -------------------------------------------------------------------------------------------
     def section_title(self, stack, text, mt=0):
-        stack.place(Label(text, 12, QFont.Bold, "ink2", w=BODY_W, spacing=0.36), mt, 8)
+        stack.place(style.label("group", text, w=BODY_W, spacing=0.36), mt, 8)
 
     def labelled(self, stack, label, view, mb=10):
         block = View(0, 0, BODY_W, 16 + 4 + view.h)
-        block.add(Label(label, 12, QFont.Normal, "ink2", w=BODY_W))
+        block.add(style.label("field", label, w=BODY_W))
         view.y = 20
         block.add(view)
         stack.place(block, 0, mb)
@@ -347,7 +347,7 @@ class SettingsScene(EditorMixin, OverlayScene):
         row = View(0, 0, BODY_W, 33)
         test = Button("測試連線", size=12.5, weight=QFont.DemiBold, h=33, pad=16, on_click=lambda e: self.test_connection())
         row.add(test)
-        self.test_label = Label("", 11.5, QFont.Normal, "ink2", x=test.w + 10, y=(33 - 14) / 2)
+        self.test_label = style.label("hint", "", x=test.w + 10, y=(33 - 14) / 2)
         if self.test_result:
             text, color = self.test_result
             self.test_label.text, self.test_label.color = text, color
@@ -389,7 +389,7 @@ class SettingsScene(EditorMixin, OverlayScene):
                          "毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。")
         # the panel's own picture
         block = View(0, 0, BODY_W, 0)
-        block.add(Label("面板背景圖片", 12, QFont.Normal, "ink2", w=BODY_W))
+        block.add(style.label("field", "面板背景圖片", w=BODY_W))
         y = 20
         has = bool(panel.get("bg_image"))
         choose = Button("更換圖片" if has else "選擇圖片", size=12, weight=QFont.DemiBold, h=28, pad=12, x=0, y=y,
@@ -400,7 +400,7 @@ class SettingsScene(EditorMixin, OverlayScene):
                              on_click=lambda e: self.clear_bg()))
         y += 28 + 8
         if has:
-            blur_lbl = Label("%s" % self.t_("圖片模糊程度"), 12, QFont.Normal, "ink2", w=BODY_W)
+            blur_lbl = style.label("field", "%s" % self.t_("圖片模糊程度"), w=BODY_W)
             blur_lbl.y = y
             block.add(blur_lbl)
             y += 18 + 6
@@ -464,7 +464,7 @@ class SettingsScene(EditorMixin, OverlayScene):
     def shortcut_row(self, stack):
         """The shortcut that opens the panel: press the button, then the keys (Esc cancels, Backspace clears)."""
         block = View(0, 0, BODY_W, 0)
-        block.add(Label("開關系統匣面板的快捷鍵", 12, QFont.Normal, "ink2", w=BODY_W))
+        block.add(style.label("field", "開關系統匣面板的快捷鍵", w=BODY_W))
         current = self.prefs.get("hotkey", "")
         if self.capturing:
             text = "請按下按鍵組合…"
@@ -529,13 +529,13 @@ class SettingsScene(EditorMixin, OverlayScene):
 
     def select_block(self, label, options, value, change, w=BODY_W):
         block = View(0, 0, w, 16 + 4 + 36)
-        block.add(Label(label, 12, QFont.Normal, "ink2", w=w))
+        block.add(style.label("field", label, w=w))
         block.add(Select(0, 20, w, options, value, change))
         return block
 
     def select_hint(self, stack, label, options, value, change, hint):
         block = View(0, 0, BODY_W, 0)
-        block.add(Label(label, 12, QFont.Normal, "ink2", w=BODY_W))
+        block.add(style.label("field", label, w=BODY_W))
         block.add(Select(0, 20, BODY_W, options, value, change))
         h = Hint(hint, BODY_W)
         h.y = 20 + 36 + 5
@@ -546,8 +546,8 @@ class SettingsScene(EditorMixin, OverlayScene):
     def slider_row(self, stack, label, value, lo, hi, step, unit, on_commit, hint=None, fmt=None):
         block = View(0, 0, BODY_W, 0)
         fmt = fmt or (lambda v: "%s%s" % (int(v) if float(v).is_integer() else v, unit))
-        val = Label(fmt(value), 12, QFont.Normal, "ink2", w=BODY_W, align="r")
-        block.add(Label(label, 12, QFont.Normal, "ink2", w=BODY_W), val)
+        val = style.label("field", fmt(value), w=BODY_W, align="r")
+        block.add(style.label("field", label, w=BODY_W), val)
         block.add(Slider(0, 18 + 6 - 5, BODY_W, value, lo, hi, step, on_input=lambda v: setattr(val, "text", fmt(v)),
                          on_commit=on_commit))
         block.h = 18 + 6 + 12
@@ -714,7 +714,7 @@ class SettingsScene(EditorMixin, OverlayScene):
         host.clear()
         y = 0
         if self.entities is None:
-            host.add(Label("載入中...", 11.5, QFont.Normal, "ink2", w=BODY_W))
+            host.add(style.label("hint", "載入中...", w=BODY_W))
             host.h = 16
             return
         q = (getattr(self, "picker_query", "") or "").lower()
@@ -733,7 +733,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             if not items:
                 continue
             any_ = True
-            host.add(Label(DOMAIN_LABELS[domain], 11, QFont.Bold, "ink2", x=2, y=y + 10, spacing=0.3))
+            host.add(style.label("group", DOMAIN_LABELS[domain], x=2, y=y + 10, spacing=0.3))
             if not self.picker_single() and self.picker_room() is None and len(items) > 1:
                 ids = {x["entity_id"] for x in self.picker_sel}
                 every = all(e["entity_id"] in ids for e in items)
@@ -747,7 +747,7 @@ class SettingsScene(EditorMixin, OverlayScene):
                 host.add(PickerRow(e, y, BODY_W, self.pick_entity, self))
                 y += 44 + 4
         if not any_:
-            host.add(Label("沒有符合的實體", 11.5, QFont.Normal, "ink2", w=BODY_W))
+            host.add(style.label("hint", "沒有符合的實體", w=BODY_W))
             y = 16
         host.h = y
 

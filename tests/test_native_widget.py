@@ -55,6 +55,9 @@ class FakeApi:
     def open_settings_window(self):
         self.calls.append(("settings",))
 
+    def open_widget_editor(self, wid=None):
+        self.calls.append(("editor", wid))
+
     def wake(self):
         self.calls.append(("wake",))
         return True
@@ -285,7 +288,7 @@ class Preferences(unittest.TestCase):
         self.assertEqual(surf.states["light.desk"]["state"], "on")
         done(win)
 
-    def test_empty_widget_button_opens_settings(self):
+    def test_empty_widget_button_opens_its_editor(self):
         api, win, surf = make([])
         pump(100)
         self.assertIsNotNone(surf.empty_button)
@@ -293,7 +296,7 @@ class Preferences(unittest.TestCase):
         s = surf.scale / surf.devicePixelRatioF()
         QTest.mouseClick(surf, Qt.LeftButton, pos=QPoint(round(r.center().x() * s), round(r.center().y() * s)))
         pump(150)
-        self.assertIn(("settings",), api.calls)
+        self.assertIn(("editor", "w1"), api.calls)
         done(win)
 
 

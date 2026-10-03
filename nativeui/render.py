@@ -805,7 +805,7 @@ def draw_empty(p, W, H, small, theme, raw_theme, dim):
         blocks.append((wrap_text(tr("尚未設定任何配件"), tf, width), tf, title_c, (26 if small else 40) * k * 1.2))
         if not small:
             sf = font(26 * k, QFont.Normal)
-            blocks.append((wrap_text(tr("按這裡開始設定 Home Assistant"), sf, width), sf, sub_c, 26 * k * 1.25))
+            blocks.append((wrap_text(tr("按這裡加入配件"), sf, width), sf, sub_c, 26 * k * 1.25))
         btn_h = 26 * k * 1.33 + 28 * k
         gap = 8 * k
         total = sum(len(lines) * h for lines, _, _, h in blocks) + gap * (len(blocks) - 1)             + (0 if small else 2 * gap + btn_h)
@@ -821,12 +821,12 @@ def draw_empty(p, W, H, small, theme, raw_theme, dim):
     if small:
         return None
     f = font(26 * k, QFont.DemiBold)
-    tw = QFontMetricsF(f).horizontalAdvance(tr("開啟設定")) / 10 * HSCALE
+    tw = QFontMetricsF(f).horizontalAdvance(tr("編輯 Widget")) / 10 * HSCALE
     rect = QRectF((W - tw - 72 * k) / 2, y + gap, tw + 72 * k, btn_h)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(ACCENT["blue"]))
     p.drawPath(squircle_pill(rect))
-    draw_centred(p, tr("開啟設定"), f, "#ffffff", rect)
+    draw_centred(p, tr("編輯 Widget"), f, "#ffffff", rect)
     return rect
 
 
