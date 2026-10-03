@@ -110,6 +110,11 @@ class GlassMixin:
     def _liquid_glass(self):
         return self.style == "liquid" and self.lensed
 
+    def wants_glass(self):
+        """Whether anything of the desktop shows through the card now. A card whose face is solid (a clock, a
+        player...) asks for no pictures of the desktop until it is clear glass again."""
+        return True
+
     def _on_glass(self):
         self.glass_queued.clear()
         if self._make_glass():
@@ -160,6 +165,12 @@ class GlassMixin:
                 if getattr(self, "moving", False):
                     time.sleep(0.02)             # the window is coming in or going away: not now
                     continue
+                if not self.wants_glass():       # nothing of the desktop shows: no looks at it until it does
+                    taken = False
+                    last_hash = None
+                    self.sample_now.wait(1.0)
+                    self.sample_now.clear()      # (else a stray request would spin this round)
+                    continue
                 self.sample_now.clear()
                 # At most 30 looks a second: an animated wallpaper behind the
                 # window otherwise keeps the program busy for pictures nobody can tell apart. The pace
@@ -167,6 +178,8 @@ class GlassMixin:
                 # The tray panel, while it is open, gets as many looks as it can take (the cost of one, about
                 # 25 ms, sets the pace); the widgets keep their own 30 a second whatever else is open.
                 pace = 1 / 60 if kind == "flyout" else 1 / 30
+                if getattr(self, "dim_target", False):
+                    pace = 1 / 6                 # dimmed: nobody is at the desktop; its glass need not keep pace
                 wait = pace - (time.monotonic() - last)
                 if wait > 0:
                     time.sleep(wait)

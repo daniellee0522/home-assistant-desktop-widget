@@ -351,7 +351,7 @@ def _face(p, W, H, card, theme, dim, tcol, style):
         return QColor(255, 255, 255, 235), QColor(255, 255, 255, 150)
     dark = theme == "dark"
     p.setPen(Qt.NoPen)
-    p.setBrush(QColor(28, 28, 30, 238) if dark else QColor(255, 255, 255, 242))
+    p.setBrush(QColor(28, 28, 30) if dark else QColor(255, 255, 255))      # solid: no desktop shows through
     p.drawPath(card)
     render.inner_shadow(p, card, QColor(255, 255, 255, 30) if dark else QColor(0, 0, 0, 18))
     return (QColor(245, 245, 247), QColor(245, 245, 247, 140)) if dark else (QColor(17, 17, 19), QColor(17, 17, 19, 120))
@@ -367,6 +367,16 @@ def _ring(W, H, radius, inset):
         path = render.squircle(inset, inset, W - 2 * inset, H - 2 * inset, max(1.0, radius - inset), steps=48)
         poly = path.toFillPolygon()
         _rings[key] = [(poly.at(i).x(), poly.at(i).y()) for i in range(poly.size())]
+    return _rings[key]
+
+
+def _ticks(W, H, radius):
+    """The 60 minute ticks: (outer end, inner end) along the card's outline, worked out once per size."""
+    key = ("ticks", W, H, radius)
+    if key not in _rings:
+        outer, inner = _ring(W, H, radius, 18), _ring(W, H, radius, 18 + 17)
+        angles = [-math.pi / 2 + i / 60 * 2 * math.pi for i in range(60)]
+        _rings[key] = [(_on_ring(outer, W / 2, H / 2, a), _on_ring(inner, W / 2, H / 2, a)) for a in angles]
     return _rings[key]
 
 
@@ -405,10 +415,7 @@ def draw_clock(p, W, H, ink, ink2, now, radius=84):
     """The time, large, narrow and tall, inside a ring of minute ticks all alike: this minute's the darkest,
     the next one's the lightest, and those between fading from one to the other around the ring; the day
     above it."""
-    for i in range(60):
-        ang = -math.pi / 2 + i / 60 * 2 * math.pi
-        x1, y1 = _on_ring(_ring(W, H, radius, 18), W / 2, H / 2, ang)
-        x2, y2 = _on_ring(_ring(W, H, radius, 18 + 17), W / 2, H / 2, ang)
+    for i, ((x1, y1), (x2, y2)) in enumerate(_ticks(W, H, radius)):
         ago = (now.minute - i) % 60                      # 0: this minute ... 59: the next one
         c = QColor(ink)
         c.setAlphaF(ink.alphaF() * (1.0 - 0.88 * ago / 59))

@@ -345,6 +345,14 @@ class _Surface(GlassMixin, QWidget):
         self.update()
         self._schedule_tick()
 
+    def wants_glass(self):
+        """The tiles and a chart stand on glass; a clock, a calendar, the weather, a camera and a player have a
+        solid face of their own, and want the desktop's picture only while dimmed (clear glass then) or when
+        they are empty (the bare card)."""
+        if self.wkind in ("tiles", "chart") or self.dim_target:
+            return True
+        return self.wkind not in kinds.NO_DEVICES and not kinds.shown(self.wkind, self.tiles)
+
     def _schedule_tick(self):
         if self.wkind in ("clock", "calendar"):
             ms = (60 - time.time() % 60) * 1000 + 30
@@ -376,6 +384,8 @@ class _Surface(GlassMixin, QWidget):
         self.dim_from = self.dim_t
         self.dim_clock.start()
         self.dim_timer.start()
+        if on:
+            self.sample_now.set()                 # a solid face turning to glass: a picture of the desktop now
         if on and self.wkind == "media":
             self.tick_timer.stop()                # dimmed, a song's place is not drawn again each second
         elif not on:

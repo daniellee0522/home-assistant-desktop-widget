@@ -586,9 +586,17 @@ class DesktopDuplication:
             self._close(outputs, devices)
 
     def _pump(self):
-        """Wait for the screen on every output somebody is reading."""
+        """Wait for the screen on every output somebody is reading, while a read waits. With none waiting no
+        frame is taken: duplication keeps what changed until the next one is (its dirty rectangles add up),
+        so nothing is missed, and an animated desktop is not copied at the monitor's rate (60-144 a second)
+        for windows that look a few times a second."""
         with self._lock:
             rects = list(self._interest)
+            waiting = bool(self._reads)
+        if not waiting:
+            self._wake.wait(_ACQUIRE_MS / 1000.0)
+            self._wake.clear()
+            return
         active = [out for out in self._outputs
                   if any(out.texture_rect(rect)[1] for rect in rects)]
         if not active:
