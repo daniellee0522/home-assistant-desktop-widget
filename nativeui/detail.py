@@ -611,7 +611,10 @@ def cards(card, stack, items):
 
 
 def build_onoff(card, stack, tile, state):
-    """A thing switched on and off, shown as its family (appearance.py): its words, its colour, its icon."""
+    """A thing switched on and off, shown as its family (appearance.py): its words, its colour, its icon; as a
+    lock, the lock's own screen."""
+    if appearance.family(tile) == "lock":
+        return build_lock(card, stack, tile, state)
     on = bool(state) and state.get("state") == "on"
     on_words, off_words = appearance.words(tile)
     big_value(stack, on_words if on else off_words, state)
@@ -723,13 +726,21 @@ def build_fan(card, stack, tile, state):
 
 
 def build_lock(card, stack, tile, state):
+    """A lock, and anything shown as one (a switch given a lock's icon): the same screen. The tall switch is
+    up and green when locked; its words are the tile's (render.state_text)."""
     s = (state or {}).get("state")
-    locked = s == "locked"
-    big_value(stack, STATE_TEXT["lock"].get(s, s or "無法連線"), state)
-    centered(stack, controls.TallSwitch(TALL_W, card.tall, locked, "accent_green",
-                                        render.icon_name(tile, state),
-                                        lambda: (card.optimistic(tile["entity"], {"state": "unlocked" if locked else "locked"}),
-                                                 card.call("lock", "unlock" if locked else "lock", tile["entity"]))), 4, 16)
+    entity = tile["entity"]
+    if tile["domain"] == "lock":
+        locked = s == "locked"
+        act = lambda: (card.optimistic(entity, {"state": "unlocked" if locked else "locked"}),
+                       card.call("lock", "unlock" if locked else "lock", entity))
+    else:                                   # a switch shown as a lock: on is unlocked (appearance.WORDS)
+        locked = s != "on"
+        act = lambda: (card.optimistic(entity, {"state": "on" if locked else "off"}),
+                       card.call(tile["domain"], "toggle", entity))
+    big_value(stack, render.state_text(tile, state) if state else "無法連線", state)
+    centered(stack, controls.TallSwitch(TALL_W, card.tall, locked, "accent_green", render.icon_name(tile, state),
+                                        act), 4, 16)
 
 
 def build_climate(card, stack, tile, state):

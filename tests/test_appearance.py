@@ -57,6 +57,20 @@ class Families(unittest.TestCase):
                 self.assertTrue(ok, icon)
 
 
+class OneScreenPerFamily(unittest.TestCase):
+    def test_a_switch_shown_as_a_lock_opens_the_locks_own_screen(self):
+        built = []
+        orig = detail.build_lock
+        detail.build_lock = lambda *a: built.append(a[2]["domain"])
+        try:
+            detail.build_onoff(None, None, T("switch", "lock"), {"state": "off"})
+            detail.DETAIL["lock"] = detail.build_lock
+        finally:
+            detail.build_lock = orig
+            detail.DETAIL["lock"] = orig
+        self.assertEqual(built, ["switch"])
+
+
 class EditPanel(unittest.TestCase):
     def setUp(self):
         import test_native_panel as TP
