@@ -33,6 +33,24 @@ def test_worker(connection):
 
 
 class GlassTests(unittest.TestCase):
+    def test_close_restores_source_and_hides_popover_in_one_composition(self):
+        events=[]
+        source=Mock()
+        source.native.set_transition_tile.side_effect=lambda value: events.append("restore")
+        popover=Mock()
+        popover.native.hide.side_effect=lambda: events.append("hide")
+        dwm=Mock()
+        dwm.DwmFlush.side_effect=lambda: events.append("commit")
+        scope=definitions("Api", _run_on_ui_thread=lambda window,fn: fn(), _dwmapi=dwm)
+        api=scope["Api"].__new__(scope["Api"])
+        api._popover_owner="w:a"
+        api._window_for=lambda kind: source
+        api._popover_window=popover
+        api._overlays_open={"popover"}
+        api._schedule_release=Mock()
+        api._apply_capture_exclusion=Mock()
+        api._close_popover()
+        self.assertEqual(events,["restore","hide","commit"])
     def test_bottom_pin_does_not_reposition_already_bottom_window(self):
         user = Mock()
         user.GetWindow.return_value = 123
@@ -192,13 +210,19 @@ class GlassTests(unittest.TestCase):
         api._apply_capture_exclusion()
         self.assertTrue({'w:a', 'w:b'} <= api._excluded_kinds)
         self.assertNotIn('settings', api._excluded_kinds)
+        api._cfg["glass_style"]="classic"
+        api._overlays_open={"popover"}
+        epoch=api._capture_epoch
+        api._apply_capture_exclusion()
+        self.assertTrue({'w:a', 'w:b'} <= api._excluded_kinds)
+        self.assertEqual(api._capture_epoch,epoch)
 
-    def test_liquid_popover_composites_excluded_widget(self):
+    def test_popover_composites_excluded_widget_in_both_glass_styles(self):
         scope = definitions('_popover_needs_compat')
         needs_compat = scope['_popover_needs_compat']
         self.assertTrue(needs_compat('popover', 'liquid', {'main', 'popover'}, (123,)))
         self.assertFalse(needs_compat('main', 'liquid', {'main'}, (123,)))
-        self.assertFalse(needs_compat('popover', 'classic', {'main'}, (123,)))
+        self.assertTrue(needs_compat('popover', 'classic', {'main'}, (123,)))
         self.assertFalse(needs_compat('popover', 'liquid', {'popover'}, (123,)))
 
     def test_transparent_widget_keeps_popover_backdrop_color(self):

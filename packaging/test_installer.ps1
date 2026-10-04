@@ -30,6 +30,10 @@ if ((Get-FileHash -LiteralPath $legacyConfig).Hash -ne (Get-FileHash -LiteralPat
     throw 'Legacy settings migration failed.'
 }
 $installedExe = Join-Path $testDestination 'HA Widgets.exe'
+$buildInfo = Get-Content -LiteralPath (Join-Path $testDestination 'build-info.json') -Raw | ConvertFrom-Json
+if ((Get-Item -LiteralPath $installedExe).VersionInfo.ProductVersion -ne $buildInfo.version) {
+    throw 'Installed executable and build manifest versions differ.'
+}
 $originalExeHash = (Get-FileHash -LiteralPath $installedExe).Hash
 '{"ha_token":"","tiles":[],"theme":"light","test_marker":"keep-on-upgrade"}' |
     Set-Content -LiteralPath $userConfig -Encoding utf8

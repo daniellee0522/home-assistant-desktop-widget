@@ -11,9 +11,9 @@ import math
 import re
 import time
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage,
-                           QLinearGradient, QPainter, QPainterPath, QPen)
+                           QLinearGradient, QPainter, QPainterPath, QPen, QRegion)
 from PySide6.QtWidgets import QLineEdit, QWidget
 
 from . import render, style
@@ -151,6 +151,7 @@ class View:
         self.alpha = 1.0
         self.dx = self.dy = 0.0         # offsets that animate, on top of x, y
         self.zoom = 1.0                 # about the view's centre
+        self.zoom_origin = (0.5, 0.5)
         self.scale = 1.0                # its content drawn this much larger, from its top-left: one of its
                                         # own px is `scale` of its parent's (w and h are its own px)
         self.blur = 0.0                 # CSS px; drawn through an offscreen picture while above 0
@@ -194,8 +195,16 @@ class View:
         self.remove(*list(self.children))
 
     def changed(self):
+        self.invalidate_cached_ancestors()
         if self.scene:
             self.scene.request_paint()
+
+    def invalidate_cached_ancestors(self, include_self=True):
+        view = self if include_self else self.parent
+        while view is not None:
+            if hasattr(view,"_page_cache"):
+                view._page_cache = None
+            view = view.parent
 
     def in_scene(self):
         """(x, y, k): the view's top-left in the scene, and how many scene px one of its own px is
@@ -224,9 +233,10 @@ class View:
         p.save()
         p.translate(self.x + self.dx, self.y + self.dy)
         if self.zoom != 1.0:
-            p.translate(self.w / 2, self.h / 2)
+            ox, oy = self.w * self.zoom_origin[0], self.h * self.zoom_origin[1]
+            p.translate(ox, oy)
             p.scale(self.zoom, self.zoom)
-            p.translate(-self.w / 2, -self.h / 2)
+            p.translate(-ox, -oy)
         if self.scale != 1.0:
             p.scale(self.scale, self.scale)
         if self.alpha < 1.0:
@@ -251,8 +261,9 @@ class View:
             return None
         lx, ly = x - self.x - self.dx, y - self.y - self.dy
         if self.zoom != 1.0:
-            lx = (lx - self.w / 2) / self.zoom + self.w / 2
-            ly = (ly - self.h / 2) / self.zoom + self.h / 2
+            ox, oy = self.w * self.zoom_origin[0], self.h * self.zoom_origin[1]
+            lx = (lx - ox) / self.zoom + ox
+            ly = (ly - oy) / self.zoom + oy
         if self.scale != 1.0:
             lx, ly = lx / self.scale, ly / self.scale
         if self.clip and not self.contains(lx, ly):
@@ -270,14 +281,14 @@ class View:
         return (gx - x) / k, (gy - y) / k
 
     # -- animation ------------------------------------------------------------------------
-    def animate(self, ms=200, ease="out", done=None, **props):
+    def animate(self, ms=200, ease="out", done=None, delay=0, **props):
         if self.scene is None:
             for k, v in props.items():
                 setattr(self, k, v)
             if done:
                 done()
             return
-        self.scene.tweens.animate(self, props, ms, ease, done)
+        self.scene.tweens.animate(self, props, ms, ease, done, delay)
 
     def stop_animation(self):
         if self.scene:
@@ -321,12 +332,13 @@ class Label(View):
     """Text: one line (clipped, faded or ellipsised) or wrapped to its width."""
 
     def __init__(self, text="", size=14, weight=QFont.Normal, color="ink1", x=0, y=0, w=0, align="l",
-                 lh=1.2, wrap=False, overflow="clip", spacing=0.0, any_break=False, opacity=1.0):
+                 lh=1.2, wrap=False, overflow="clip", spacing=0.0, any_break=False, opacity=1.0, cell_h=None):
         super().__init__(x, y, w, 0)
         self._text, self.size, self.weight, self.color = text, size, weight, color
         self.align, self.lh, self.wrap, self.overflow, self.spacing = align, lh, wrap, overflow, spacing
         self.any_break = any_break
         self.text_alpha = opacity
+        self.cell_h = cell_h
         self._paths = None
         self._lines = None
         self.fit_width = w == 0
@@ -359,7 +371,7 @@ class Label(View):
             self._lines = [text]
             if self.fit_width:
                 self.w = text_width(text, f)
-        self.h = len(self._lines) * self.lh * self.size
+        self.h = self.cell_h if self.cell_h is not None else len(self._lines) * self.lh * self.size
         self._paths = None
         self.changed()
 
@@ -382,10 +394,15 @@ class Label(View):
                     line = ellipsize(line, f, self.w)
                 lw = text_width(line, f)
                 x = 0 if self.align == "l" else (self.w - lw) / 2 if self.align == "c" else self.w - lw
-                base = i * lh + (lh - fm.height() / 10) / 2 + fm.ascent() / 10
-                self._paths.append((render.text_path(QPointF(0, 0), f, line, x, base), lw))
+                if self.cell_h is not None:
+                    from . import style
+                    path = style.text_path(line, f, QRectF(x, 0, lw, self.cell_h), align="line")
+                else:
+                    base = i * lh + (lh - fm.height() / 10) / 2 + fm.ascent() / 10
+                    path = render.text_path(QPointF(0, 0), f, line, x, base)
+                self._paths.append((path, lw))
         brush = QBrush(col)
-        if self.overflow == "fade" and not self.wrap and self._paths[0][1] > self.w - 16 and self.w > 16:
+        if self.overflow == "fade" and not self.wrap and self._paths[0][1] > self.w + 0.5 and self.w > 16:
             g = QLinearGradient(0, 0, self.w, 0)
             g.setColorAt(0, col)
             g.setColorAt(max(0.0, (self.w - 16) / self.w), col)
@@ -446,8 +463,7 @@ class Button(View):
 
     def _press(self, on):
         self.pressed = on
-        self.zoom = 0.96 if on else 1.0
-        self.changed()
+        self.animate(100 if on else 180, "spring", zoom=0.96 if on else 1.0)
         return True
 
     def paint(self, p):
@@ -463,13 +479,17 @@ class Button(View):
                                     self.icon_size, self.icon_size))
         elif self.text:
             f = font(self.size, self.weight)
-            fm = QFontMetricsF(f)
-            tw = text_width(render.tr(self.text), f)
-            base = (self.h - fm.height() / 10) / 2 + fm.ascent() / 10
-            p.setPen(Qt.NoPen)
-            p.setBrush(resolve(self.scene, color))
-            left = 10 if getattr(self, "align_left", False) else (self.w - tw) / 2
-            p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.text), left, base))
+            left = getattr(self, "align_left", False)
+            # pad determines an auto-sized button's width, not an extra inset
+            # to subtract again from fixed cells such as the widget-size choices.
+            available = max(0, self.w - (20 if left else 0))
+            text = render.tr(self.text)
+            if text_width(text, f) > available:
+                render.draw_text_fade(p, text, f, resolve(self.scene, color),
+                                      QRectF(10 if left else 0, 0, available, self.h), False)
+            else:
+                rect = QRectF(10 if left else 0, 0, text_width(text, f) if left else self.w, self.h)
+                style.center_text(p, text, f, resolve(self.scene, color), rect, align="line")
 
 
 class Slider(View):
@@ -633,10 +653,32 @@ class TextField(View):
         shown = self.visible_in_scene()
         if shown:
             x, y, k = self.in_scene()
+            y += self.scene.anim_dy
             s = self.scene.scale / self.scene.devicePixelRatioF()
             pad = 12 * k
-            self.edit.setGeometry(round((x + pad) * s), round(y * s), round((self.w * k - 2 * pad) * s),
-                                  round(self.h * k * s))
+            geometry = QRect(round((x + pad) * s), round(y * s), round((self.w * k - 2 * pad) * s),
+                             round(self.h * k * s))
+            if self.edit.geometry() != geometry:
+                self.edit.setGeometry(geometry)
+            # Native editors must obey the same scroll and moving-pane clips as painted fields.
+            bounds = QRectF(self.edit.geometry())
+            ancestor = self.parent
+            while ancestor is not None:
+                if ancestor.clip:
+                    ax, ay, ak = ancestor.in_scene()
+                    ay += self.scene.anim_dy
+                    bounds = bounds.intersected(QRectF(ax*s, ay*s, ancestor.w*ak*s, ancestor.h*ak*s))
+                ancestor = ancestor.parent
+            clip = self.scene.transition_clip()
+            if clip is not None:
+                frame = clip.boundingRect()
+                bounds = bounds.intersected(QRectF(frame.x()*s, (frame.y()+self.scene.anim_dy)*s, frame.width()*s, frame.height()*s))
+            shown = not bounds.isEmpty()
+            if shown:
+                local = bounds.translated(-self.edit.x(), -self.edit.y()).toAlignedRect()
+                region = QRegion(local)
+                if self.edit.mask() != region:
+                    self.edit.setMask(region)
         self.edit.setVisible(shown)
 
     def visible_in_scene(self):
@@ -685,6 +727,10 @@ class TileView(View):
         self.on_enter = lambda e: self._hover(True)
         self.on_leave = lambda e: self._hover(False)
 
+    def contains(self, x, y):
+        radius = self.scene.t["radius_tile"] if self.scene else 32
+        return render.squircle(0, 0, self.w, self.h, radius).contains(QPointF(x, y))
+
     def _hover(self, on):
         if self.hovered != on:
             self.hovered = on
@@ -699,6 +745,8 @@ class TileView(View):
         self.invalidate()
 
     def paint(self, p):
+        if getattr(self, "transition_hidden", False):
+            return
         # Drawn once, at the device's resolution where the tile rests (its zoom and the window's own
         # entrance only scale that picture), and put on whole pixels there.
         s = self.scene.scale * self.in_scene()[2]
@@ -888,14 +936,18 @@ class Tweens:
         self.scene = scene
         self.running = []
         self.timer = QTimer(scene)
+        self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(16)
         self.timer.timeout.connect(self.tick)
 
-    def animate(self, view, props, ms, ease, done):
-        # Starting over on a property replaces its old tween.
+    def animate(self, view, props, ms, ease, done, delay=0):
+        # Retarget a spring from its displayed value and velocity.
+        velocity = {}
         for t in self.running:
             if t["view"] is view:
                 for k in props:
+                    if ease == "spring" and t["ease"] == "spring":
+                        velocity[k] = t.get("velocity", {}).get(k, 0.0)
                     t["props"].pop(k, None)
         self.running = [t for t in self.running if t["props"]]
         start = {k: getattr(view, k) for k in props}
@@ -907,31 +959,75 @@ class Tweens:
                 done()
             return
         self.running.append({"view": view, "props": dict(props), "start": start, "ms": ms, "ease": ease,
-                             "t0": time.monotonic(), "done": done})
+                             "t0": time.monotonic() + delay / 1000, "done": done,
+                             "initial_velocity": velocity, "velocity": dict(velocity)})
+        screen = self.scene.screen() if hasattr(self.scene, "screen") else None
+        rate = screen.refreshRate() if screen is not None else 60
+        interval = max(4, min(16, int(1000 / max(60, rate))))
+        if self.timer.interval() != interval:
+            self.timer.setInterval(interval)
         self.timer.start()
 
     def cancel(self, view):
         self.running = [t for t in self.running if t["view"] is not view]
+        if not self.running:
+            self.timer.stop()
+
+    def replace_view(self, old, new):
+        """A rebuilt view inherits the current presentation and the original timeline."""
+        for tween in self.running:
+            if tween["view"] is old:
+                for name in tween["props"]:
+                    setattr(new, name, getattr(old, name))
+                tween["view"] = new
 
     def tick(self):
         now = time.monotonic()
         finished = []
         for t in self.running:
-            k = min(1.0, (now - t["t0"]) * 1000 / t["ms"])
-            e = _ease(t["ease"], k)
-            for name, goal in t["props"].items():
-                setattr(t["view"], name, t["start"][name] + (goal - t["start"][name]) * e)
-            if k >= 1.0:
-                finished.append(t)
+            if now < t["t0"]:
+                continue
+            if t["ease"] == "spring":
+                elapsed = now - t["t0"]
+                omega = 10 / (t["ms"] / 1000)
+                decay = math.exp(-omega * elapsed)
+                settled = True
+                for name, goal in t["props"].items():
+                    offset = t["start"][name] - goal
+                    velocity = t["initial_velocity"].get(name, 0.0)
+                    c = velocity + omega * offset
+                    displacement = (offset + c * elapsed) * decay
+                    current_velocity = (velocity - omega * c * elapsed) * decay
+                    t["velocity"][name] = current_velocity
+                    setattr(t["view"], name, goal + displacement)
+                    amplitude = max(1, abs(offset))
+                    settled &= abs(displacement) < 0.001 * amplitude and abs(current_velocity) < 0.03 * amplitude
+                if settled:
+                    for name, goal in t["props"].items():
+                        setattr(t["view"], name, goal)
+                    finished.append(t)
+            else:
+                k = min(1.0, (now - t["t0"]) * 1000 / t["ms"])
+                e = _ease(t["ease"], k)
+                for name, goal in t["props"].items():
+                    setattr(t["view"], name, t["start"][name] + (goal - t["start"][name]) * e)
+                if k >= 1.0:
+                    for name, goal in t["props"].items():
+                        setattr(t["view"], name, goal)
+                    finished.append(t)
         for t in finished:
             if t in self.running:
                 self.running.remove(t)
             if t["done"]:
                 t["done"]()
+        for t in self.running + finished:
+            invalidate = getattr(t["view"],"invalidate_cached_ancestors",None)
+            if invalidate:
+                invalidate(include_self=False)
         if not self.running:
             self.timer.stop()
         # only the window's own fade and scale moved: what is drawn in it did not
-        self.scene.request_paint(content=any(t["view"] is not self.scene for t in self.running + finished))
+        self.scene.request_paint(content=any(t["view"] is not self.scene or "progress" in t["props"] for t in self.running + finished))
 
 
 # ---------------------------------------------------------------------------------------
@@ -972,6 +1068,7 @@ class Scene(GlassMixin, QWidget):
         self.t = ui_tokens("light")
         self.fade_alpha = 1.0            # the whole window's opacity (entrances and exits)
         self.anim_alpha, self.anim_zoom, self.anim_origin = 1.0, 1.0, (1.0, 1.0)   # the glass and card as one
+        self.anim_dy = 0.0
         self.init_glass()
         self._hwnd = 0
         self._paint_pending = False
@@ -1009,7 +1106,8 @@ class Scene(GlassMixin, QWidget):
 
     def update_metrics(self):
         hwnd = self.cache_hwnd()
-        self.dpi = ((_dpi(hwnd) / 96.0) if hwnd else (self.devicePixelRatioF() or 1.0)) or 1.0
+        self.dpi = getattr(self, "metric_dpi", None) or (((_dpi(hwnd) / 96.0) if hwnd else
+                                                       (self.devicePixelRatioF() or 1.0)) or 1.0)
         self.scale = self.zoom_css * self.dpi
         self.pw, self.ph = max(1, round(self.css_w * self.scale)), max(1, round(self.css_h * self.scale))
         self.fit_glass()
@@ -1054,6 +1152,7 @@ class Scene(GlassMixin, QWidget):
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
         if self.fade_alpha * self.anim_alpha < 1:
             p.setOpacity(self.fade_alpha * self.anim_alpha)
+        p.translate(0, self.anim_dy * self.scale / self.devicePixelRatioF())
         if self.anim_zoom != 1.0:
             ox, oy = self.anim_origin[0] * self.width(), self.anim_origin[1] * self.height()
             p.translate(ox, oy)
@@ -1064,8 +1163,17 @@ class Scene(GlassMixin, QWidget):
         # and a picture placed by its own ratio was drawn shifted and too large or small (and the pointer,
         # which Qt maps by its ratio, missed what it pointed at).
         q = self.devicePixelRatioF() or 1.0
+        clip = self.transition_clip()
+        if clip is not None:
+            transform = p.transform()
+            p.scale(self.scale / q, self.scale / q)
+            p.setClipPath(clip)
+            p.setTransform(transform)
         if self.glass is not None and not self.system_glass:
+            p.save()
+            p.setOpacity(p.opacity() * self.transition_glass_opacity())
             p.drawImage(QRectF(0, 0, self.glass.width() / q, self.glass.height() / q), self.glass)
+            p.restore()
         # What is on the card is drawn once into a picture and that picture is what is painted: the glass
         # behind it changes up to sixty times a second while the views do not, and drawing them again for
         # each new glass costs a few ms where the picture costs a tenth of one. Coming in or going away
@@ -1073,6 +1181,12 @@ class Scene(GlassMixin, QWidget):
         img = self.content_image()
         p.drawImage(QRectF(0, 0, img.width() / q, img.height() / q), img)
         p.end()
+
+    def transition_glass_opacity(self):
+        return 1.0
+
+    def transition_clip(self):
+        return None
 
     def glass_changed(self):
         # A view changed without asking to be drawn again shows at the latest within a quarter second,
@@ -1173,7 +1287,7 @@ class Scene(GlassMixin, QWidget):
     def _css(self, e):
         pos = e.position()
         k = self.devicePixelRatioF() / self.scale
-        return pos.x() * k, pos.y() * k
+        return pos.x() * k, pos.y() * k - self.anim_dy
 
     def view_at(self, gx, gy):
         return self.layer.hit(gx, gy) or self.root.hit(gx, gy)
@@ -1203,6 +1317,7 @@ class Scene(GlassMixin, QWidget):
     def close_popup(self):
         if self.popup is not None:
             popup, self.popup = self.popup, None
+            self.tweens.cancel(popup)
             self.layer.remove(popup)
             if getattr(popup, "on_closed", None):
                 popup.on_closed()

@@ -96,6 +96,33 @@ class Regressions(unittest.TestCase):
         self.api.open_settings_window.assert_called_once()
         self.api._flyout_window.show.assert_not_called()
 
+    def test_panel_open_arms_once_without_fixed_waits(self):
+        for cold in (True, False):
+            with self.subTest(cold=cold):
+                api = api_type()()
+                clock = Mock()
+                clock.monotonic.return_value = 1
+                api.show_flyout.__globals__.update(time=clock, _get_hwnd=lambda w: 1,
+                    _tray_point=lambda: None, _bring_to_front=Mock())
+                window = Mock()
+                api._all_tiles = lambda: [1]
+                api._ensure_overlay = Mock(return_value=window)
+                api._sync_client_entities = Mock()
+                api._tray_corner = Mock(return_value=(0, 0))
+                api._flyout_size = (450, 600)
+                api._place_flyout = Mock()
+                api._overlays_open = set()
+                api._fresh = {'flyout'} if cold else set()
+                api._apply_capture_exclusion = Mock()
+                api._apply_system_glass = Mock()
+                api._watch_flyout_focus = Mock()
+                api._arm_backdrop = Mock()
+                api.show_flyout(from_key=True)
+                api._arm_backdrop.assert_called_once_with('flyout', window,
+                    timeout=6.0 if cold else .12, settle=False)
+                clock.sleep.assert_not_called()
+                window.send.assert_called_once_with('flyout_enter')
+
     def test_save_uses_config_directory_not_install_directory(self):
         with tempfile.TemporaryDirectory() as folder:
             dest = str(Path(folder) / 'config.json')

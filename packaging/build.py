@@ -105,8 +105,9 @@ def main():
     (bundle / 'build-info.json').write_text(json.dumps({
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'nativeui/widget.py', ROOT / 'nativeui/render.py', ROOT / 'nativeui/liquid.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
-                                    ROOT / 'nativeui/i18n_en.json', ROOT / 'nativeui/mdi_paths.json']},
+                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'app_version.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
+                                    ROOT / 'nativeui/i18n_en.json', ROOT / 'nativeui/mdi_paths.json',
+                                    *sorted((ROOT / 'nativeui').rglob('*.py'))]},
     }, indent=2), encoding='utf-8')
 
     if compiler:

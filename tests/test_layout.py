@@ -31,6 +31,21 @@ def ink_box(img, test):
 
 
 class Centring(unittest.TestCase):
+    def test_long_names_use_the_original_fade_without_elision(self):
+        from unittest.mock import patch
+        from nativeui import ui
+        from types import SimpleNamespace
+        for text in ("客廳靠窗的閱讀燈與間接照明", "Living room reading light beside the window"):
+            button = ui.Button(text, w=120, h=36)
+            button.scene = SimpleNamespace(t=ui.ui_tokens("light"))
+            image = QImage(120, 36, QImage.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            p = QPainter(image)
+            with patch.object(render, "draw_text_fade", wraps=render.draw_text_fade) as fade:
+                button.paint(p)
+                self.assertEqual(fade.call_args.args[1], text)
+            p.end()
+
     def test_a_number_is_centred_in_its_box_by_its_ink(self):
         rect = QRectF(10, 20, 40, 40)
         for text in ("4", "31", "1", "88"):

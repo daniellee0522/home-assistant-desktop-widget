@@ -17,6 +17,10 @@ from . import render
 # read, ink2 for what is said about it; never lighter than ink2, never on less than a READABLE backing.
 TEXT = {
     "title": (19.5, QFont.Bold, "ink1"),          # what a screen or a card is about
+    "detail_title": (22, QFont.Bold, "ink1"),
+    "home_pill": (23, QFont.Bold, "ink1"),
+    "home_pill_sub": (19, QFont.Medium, "ink2"),
+    "home_chip": (22, QFont.DemiBold, "ink1"),
     "eyebrow": (12.5, QFont.Medium, "ink2"),      # above a title: where it is
     "hero": (52, QFont.Light, "ink1"),            # the weather's temperature, alone and large
     "display": (40, QFont.Normal, "ink1"),        # the one big reading of a detail (24°, 60 %, 已上鎖)

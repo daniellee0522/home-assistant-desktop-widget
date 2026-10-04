@@ -487,14 +487,16 @@ def draw_text_fade(p, text, f, color, rect, shadow):
         p.drawPath(halo)
         p.restore()
     col = parse_color(color)
-    # The page's mask always fades the last 16 px of the box, whatever the text.
-    g = QLinearGradient(rect.left(), 0, rect.right(), 0)
-    g.setColorAt(0, col)
-    g.setColorAt(max(0.0, (rect.width() - 16) / rect.width()), col)
-    clear = QColor(col)
-    clear.setAlpha(0)
-    g.setColorAt(1, clear)
-    brush = QBrush(g)
+    # Only actual overflow fades; allow fractional font-metric rounding.
+    brush = QBrush(col)
+    if fm.horizontalAdvance(text) / 10 * HSCALE > rect.width() + 0.5 and rect.width() > 0:
+        g = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        g.setColorAt(0, col)
+        g.setColorAt(max(0.0, (rect.width() - 16) / rect.width()), col)
+        clear = QColor(col)
+        clear.setAlpha(0)
+        g.setColorAt(1, clear)
+        brush = QBrush(g)
     # As outlines, which are anti-aliased in greys (the page's text is); Qt's
     # own glyph drawing would colour the edges (ClearType).
     path = text_path(base, f, text, rect.left(), base_y)
@@ -562,6 +564,11 @@ def mini_buttons(form, cw, ch):
     return []
 
 
+def bar_icon_rect(w, h):
+    """The same icon disc that is painted on a long tile, used for its quick action."""
+    return QRectF(23, (h - 100) / 2, 100, 100)
+
+
 def draw_icon(p, name, color, rect):
     """An icon in a colour that may be translucent (an rgba tuple)."""
     opacity = 1.0
@@ -607,7 +614,8 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
 
     # -- the icon ------------------------------------------------------
     if form == "bar":
-        dx, dy = 23, (ch - 100) / 2
+        disc_rect = bar_icon_rect(cw, ch)
+        dx, dy = disc_rect.x(), disc_rect.y()
         if reading:
             text = reading["text"]               # "24°": a thermostat does not say whether it is °C or °F
             f = font(34, QFont.Bold, -0.5)
@@ -682,14 +690,16 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
                            QRectF(pad, bottom - lh, textw, lh), False)
             bottom -= lh + 1
         if readout:
-            draw_text_fade(p, name, font(16.5, QFont.Medium), c1 if on else tcol["off_text2"],
+            name_font = font(16.5, QFont.Medium)
+            draw_text_fade(p, name, name_font, c1 if on else tcol["off_text2"],
                            QRectF(pad, bottom - 19.8, textw, 19.8), False)
             bottom -= 19.8 + 1
             draw_text_fade(p, value, font(27, QFont.Bold), c1,
                            QRectF(pad, bottom - 29.7, textw, 29.7), False)
         else:
             nh = (21 if big else 19.5) * 1.2
-            draw_text_fade(p, name, font(21 if big else 19.5, QFont.DemiBold), c1,
+            name_font = font(21 if big else 19.5, QFont.DemiBold)
+            draw_text_fade(p, name, name_font, c1,
                            QRectF(pad, bottom - nh, textw, nh), False)
             if value:
                 draw_text_fade(p, value, font(25.5, QFont.Bold), c1,

@@ -15,6 +15,8 @@ import traceback
 
 ENTITY = "local_media.this_pc"
 NAME = "本機"
+TRANSITION_GRACE_S = 0.3
+TRANSITION_POLL_S = 0.05
 
 try:
     from winrt.windows.media.control import \
@@ -62,6 +64,7 @@ class LocalMedia:
         self.slow = False                           # the widgets are dimmed
         self.art, self._art_key, self._art_n = None, None, 0
         self._last = None
+        self._transition_until = None
         self._manager = None
         self._loop = None
         self._wake_event = None
@@ -80,6 +83,7 @@ class LocalMedia:
     async def _main(self):
         self._wake_event = asyncio.Event()
         while True:
+            self._wake_event.clear()
             if self.active:
                 try:
                     await self._read()
@@ -87,10 +91,12 @@ class LocalMedia:
                     traceback.print_exc()
             try:
                 # (the session's own events wake it at once; this is the fallback)
-                await asyncio.wait_for(self._wake_event.wait(), 5.0 if (self.slow or not self.active) else 2.0)
+                timeout = 5.0 if (self.slow or not self.active) else 2.0
+                if self.active and self._transition_until is not None:
+                    timeout = min(timeout, TRANSITION_POLL_S)
+                await asyncio.wait_for(self._wake_event.wait(), timeout)
             except asyncio.TimeoutError:
                 pass
-            self._wake_event.clear()
 
     def _wake(self):
         if self._loop is not None and self._wake_event is not None:
@@ -121,6 +127,9 @@ class LocalMedia:
         session = await self._session()
         if session is None:
             state = {"state": "off", "attributes": {"friendly_name": NAME}}
+            if self._hold_transition(state):
+                return
+            self.art, self._art_key = None, None
         else:
             props = await session.try_get_media_properties_async()
             info = session.get_playback_info()
@@ -141,6 +150,9 @@ class LocalMedia:
                 attrs["media_duration"] = round(duration, 1)
                 attrs["media_position"] = round(_seconds(line.position) - _seconds(line.start_time), 1)
                 attrs["media_position_updated_at"] = _iso(line.last_updated_time)
+            state = {"state": status, "attributes": attrs}
+            if self._hold_transition(state):
+                return
             # The cover is read again whenever the song's details change, and kept only if it differs: an
             # app gives the new title first and its cover a moment later.
             if self._props_dirty or (props.title, props.artist) != self._art_key:
@@ -156,6 +168,27 @@ class LocalMedia:
         if self._changed(state):
             self._last = state
             self.on_state(ENTITY, state)
+
+    def _hold_transition(self, state):
+        """Keep the last track through a bounded gap while Windows replaces a media session.
+
+        A real pause with metadata is immediate; only missing metadata or an inactive session
+        gets a grace period. Retry during that period without discarding the last cover.
+        """
+        incomplete = (state["state"] in ("off", "idle") or
+                      not state["attributes"].get("media_title"))
+        last = self._last
+        if (not incomplete or last is None or last["state"] not in ("playing", "paused") or
+                not last["attributes"].get("media_title")):
+            self._transition_until = None
+            return False
+        now = time.monotonic()
+        if self._transition_until is None:
+            self._transition_until = now + TRANSITION_GRACE_S
+        if now < self._transition_until:
+            return True
+        self._transition_until = None
+        return False
 
     async def _thumbnail(self, ref):
         if ref is None:
@@ -223,6 +256,7 @@ class LocalMedia:
         self.active, self.slow = active, slow
         if changed:
             self._last = None                      # a widget that just started showing it is told all
+            self._transition_until = None
             self._wake()
 
     def get_art(self, path):

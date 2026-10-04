@@ -47,6 +47,8 @@ class GlassMixin:
         self.sample_now = threading.Event()
         self.force = threading.Event()    # the next picture must not be taken for the last one
         self._glass_fit = None            # what the glass was made for: see fit_glass
+        self._glass_generation = 0
+        self._latest_generation = 0
         self.dragging = False
         self._stop = threading.Event()
         self._glass_thread = None
@@ -64,6 +66,7 @@ class GlassMixin:
         self.sample_now.set()
 
     def invalidate_glass(self):
+        self._glass_generation += 1
         self.force.set()
         self.sample_now.set()
 
@@ -117,6 +120,8 @@ class GlassMixin:
 
     def _on_glass(self):
         self.glass_queued.clear()
+        if self._latest_generation != self._glass_generation:
+            return
         if self._make_glass():
             self.glass_changed()
 
@@ -157,7 +162,7 @@ class GlassMixin:
             try:
                 if self.force.is_set():
                     self.force.clear()
-                    last_hash, taken = None, False
+                    last_hash, taken, quiet = None, False, 0
                 still = self.sampling == "still" and not self.dragging
                 if still and taken and not self.sample_now.is_set():
                     self.sample_now.wait(0.5)
@@ -183,11 +188,12 @@ class GlassMixin:
                     time.sleep(wait)
                 last = time.monotonic()
                 pw, ph = self.pw, self.ph
+                generation = self._glass_generation
                 shot = api.get_desktop_backdrop(kind, last_hash, pw, ph, None, None,
                                                 0 if still else None)
                 if not shot:
                     last_hash = None
-                    time.sleep(0.25)
+                    self.sample_now.wait(0.25)
                     continue
                 if shot.get("skip"):
                     taken = False
@@ -195,7 +201,10 @@ class GlassMixin:
                     self.sample_now.wait((shot.get("retry_ms") or 500) / 1000.0)
                     continue
                 if not shot.get("paced"):
-                    time.sleep(max(0.016, (shot.get("ms") or 0) * 4 / 1000.0) if quiet < 4 else 3.0)
+                    self.sample_now.wait(max(0.016, (shot.get("ms") or 0) * 4 / 1000.0) if quiet < 4 else 3.0)
+                if generation != self._glass_generation:
+                    last_hash, taken = None, False
+                    continue
                 if shot.get("unchanged"):
                     quiet += 1
                     taken = True
@@ -220,12 +229,16 @@ class GlassMixin:
                         key = want
                     out = lens.frame(picture, card, self.glass_tiles(), (8 + 4 * t) * self.scale,
                                      frost=22.0 * t * self.scale)
-                    self.latest = QImage(out.tobytes(), out.width, out.height, out.width * 4,
+                    latest = QImage(out.tobytes(), out.width, out.height, out.width * 4,
                                          QImage.Format_RGBA8888).copy()
-                    self.latest.setDevicePixelRatio(self.dpi)
+                    latest.setDevicePixelRatio(self.dpi)
                 else:
-                    self.latest = QImage(picture.tobytes(), picture.width, picture.height,
+                    latest = QImage(picture.tobytes(), picture.width, picture.height,
                                          picture.width * 3, QImage.Format_RGB888).copy()
+                if generation != self._glass_generation:
+                    last_hash, taken = None, False
+                    continue
+                self.latest, self._latest_generation = latest, generation
                 if not self.glass_queued.is_set():           # only the newest is ever painted
                     self.glass_queued.set()
                     self.glass_signals.glass.emit()

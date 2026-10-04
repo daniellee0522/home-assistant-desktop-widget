@@ -9,6 +9,9 @@ Writes, each at twice its size so misplaced pixels show:
   home.png      the Home panel in edit mode (its badges)
 Look for: text off-centre in its shape, uneven rows, badges and icons off their marks, words cut off,
 anything unreadable on its background.
+
+The screen sheets show content only. glass/ contains separate native-window captures through
+the actual glass worker, with controlled bright, dark, busy and fine-pattern desktops.
 """
 import datetime
 import os
@@ -89,19 +92,19 @@ STATES = {"light.desk": {"state": "on", "attributes": {"brightness": 180}},
               "media_position": 96, "media_position_updated_at": AGO, "supported_features": 16435}}}
 
 
-def widget(kind, size, theme, dim):
+def widget(kind, size, theme, dim, surface="classic"):
     w, h = render.widget_size(size)
     img = QImage(round(w * K), round(h * K), QImage.Format_ARGB32_Premultiplied)
     img.fill(0)
     p = QPainter(img)
     if kind == "tiles":
-        render.draw_widget(p, size, TILES, STATES, theme, None, K, dim)
+        render.draw_widget(p, size, TILES, STATES, theme, None, K, dim, surface)
     else:
         tiles = {"weather": [{"id": "w", "entity": "weather.home", "domain": "weather", "room": "Home"}],
                  "camera": [{"id": "c", "entity": "camera.door", "domain": "camera", "room": "Door"}],
                  "chart": TILES[6:8],
                  "media": [{"id": "m", "entity": "media_player.s", "domain": "media_player", "room": "Study"}]}.get(kind, [])
-        kinds.draw_widget(p, kind, size, tiles, STATES, theme, K, dim, "classic", None, theme, {"now": NOW})
+        kinds.draw_widget(p, kind, size, tiles, STATES, theme, K, dim, surface, None, theme, {"now": NOW})
     p.end()
     return img
 
@@ -114,7 +117,7 @@ def widgets():
     return sheet(images, 6)
 
 
-def details():
+def details(theme="light"):
     import test_native_panel as T
     shots = []
     cases = [("light.desk", "light", ""), ("climate.ac", "climate", ""), ("media_player.s", "media_player", ""),
@@ -122,6 +125,8 @@ def details():
              ("switch.plug", "switch", "lock"), ("cover.blinds", "cover", ""), ("sensor.t", "sensor", "")]
     for entity, domain, icon in cases:
         api = T.FakeApi()
+        original_prefs = api._prefs
+        api._prefs = lambda: dict(original_prefs(), theme=theme)
         api.tiles = [{"id": "t", "entity": entity, "domain": domain, "room": entity, "label": "", "icon": icon}]
         win = detail.create_popover(api)
         card = win.native
@@ -138,9 +143,11 @@ def details():
     return sheet(shots, 4)
 
 
-def editor():
+def editor(theme="light"):
     import test_native_settings as TS
     api = TS.FakeApi()
+    original_prefs = api._prefs
+    api._prefs = lambda: dict(original_prefs(), theme=theme)
     win = settings.create_settings(api)
     sc = win.native
     pump(100)
@@ -157,9 +164,11 @@ def editor():
     return img
 
 
-def home():
+def home(theme="light"):
     import test_native_panel as T
     api = T.FakeApi("home", T.tiles_of(6))
+    original_prefs = api._prefs
+    api._prefs = lambda: dict(original_prefs(), theme=theme)
     win, sc = T.make_panel(api)
     pump(300)
     if sc.home is not None:
@@ -171,18 +180,82 @@ def home():
     return img
 
 
+def categories(theme="light"):
+    import test_native_panel as T
+    api = T.FakeApi()
+    original = api._prefs
+    api._prefs = lambda: dict(original(), theme=theme)
+    win, sc = T.make_panel(api)
+    shots = []
+    try:
+        for category in ("env", "light", "security"):
+            sc.home.toggle_category(category)
+            pump(700)
+            for editing in (False, True):
+                if editing:
+                    sc.home.toggle_editing()
+                image = sc.content_image().copy()
+                image.setDevicePixelRatio(1)
+                shots.append(image)
+        return sheet(shots, 3)
+    finally:
+        win.dispose()
+
+
+def materials():
+    """Backing/text swatches only; these do not exercise desktop capture, blur or refraction."""
+    from nativeui import style, ui
+    img = QImage(960, 360, QImage.Format_ARGB32_Premultiplied)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    for row, theme in enumerate(("light", "dark")):
+        for col, desktop in enumerate(("#ffffff", "#000000")):
+            box = QRectF(col * 480, row * 180, 480, 180)
+            p.fillRect(box, QColor(desktop))
+            pane = box.adjusted(16, 16, -16, -16)
+            p.setPen(Qt.NoPen)
+            p.setBrush(style.readable_backing(theme))
+            p.drawRoundedRect(pane, 18, 18)
+            colors = ui.ui_tokens(theme)
+            for i, (role, text) in enumerate((("title", "客廳 Living room"),
+                                             ("display", "24°"), ("secondary", "目前溫度 · Current temperature"))):
+                style.center_text(p, text, style.font(role), render.parse_color(colors[style.TEXT[role][2]]),
+                                  QRectF(pane.x(), pane.y() + 10 + i * 42, pane.width(), 42), "line")
+    p.end()
+    return img
+
+
+def surfaces():
+    return sheet([widget("tiles", "2x2", theme, dim, surface)
+                  for surface in ("classic", "liquid", "windows")
+                  for theme, dim in (("light", False), ("dark", False), ("dark", True))], 3)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     render.set_language("en")
-    for name, make in (("widgets", widgets), ("details", details), ("editor", editor), ("home", home)):
+    failed = []
+    for name, make in (("widgets", widgets), ("details", details), ("editor", editor), ("home", home),
+                       ("details-dark", lambda: details("dark")), ("editor-dark", lambda: editor("dark")),
+                       ("home-dark", lambda: home("dark")), ("categories", categories),
+                       ("categories-dark", lambda: categories("dark")), ("materials", materials), ("surfaces", surfaces)):
         try:
             img = make()
         except Exception as e:                 # one screen failing does not keep the others from being seen
             print(name, "failed:", e)
+            failed.append(name)
             continue
         target = OUT / (name + ".png")
         img.save(str(target))
         print(target, img.width(), img.height())
+    from tools import glass_review
+    glass_review.main(OUT / "glass")
+    from tools import settings_review
+    settings_review.main(OUT / "settings-review")
+    from tools import panel_motion_review
+    panel_motion_review.main()
+    if failed:
+        raise SystemExit("Failed visual checks: " + ", ".join(failed))
 
 
 if __name__ == "__main__":

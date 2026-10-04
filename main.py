@@ -169,6 +169,8 @@ class Api:
 
         self._popover_window = None
         self._popover_resize_lock = threading.Lock()
+        self._popover_open_lock = threading.RLock()
+        self._popover_generation = 0
         # The tile the popover belongs to (x, y, w, h in physical pixels)
         # and the last real size it took; see _popover_origin.
         self._popover_anchor = None
@@ -979,12 +981,12 @@ class Api:
     # Sizes arrive in physical pixels: a window multiplies its CSS size by
     # its own DPI, which avoids a second, disagreeing conversion on this side.
 
-    def resize_popover_window(self, phys_w, phys_h, seq=None):
+    def resize_popover_window(self, phys_w, phys_h, seq=None, origin=None):
         # Where the popover goes depends on its size, so it is placed and
         # sized in one call and never shows at the old place for a frame.
         self._resize_native(
             self._popover_window, self._popover_resize_lock, "_popover_last_resize_seq",
-            phys_w, phys_h, seq, origin=self._popover_origin,
+            phys_w, phys_h, seq, origin=(lambda w, h: origin) if origin is not None else self._popover_origin,
         )
 
     def resize_flyout_window(self, phys_w, phys_h, seq=None):
@@ -1048,7 +1050,7 @@ class Api:
         self._armed.set()
         return True
 
-    def _arm_backdrop(self, kind, window, timeout=0.3):
+    def _arm_backdrop(self, kind, window, timeout=0.3, settle=True):
         """Have a hidden, already-positioned window capture the backdrop of
         where it is about to appear, so it does not open showing a frosted
         picture of wherever it was last time."""
@@ -1058,7 +1060,8 @@ class Api:
         # The timeout only guards against a window that never answers.
         self._armed.wait(timeout)
         # A moment for the compositor to put that frame on the surface.
-        time.sleep(0.04)
+        if settle:
+            time.sleep(0.04)
         self._arming_kind = None
 
     def toggle_flyout(self, from_key=False):
@@ -1099,7 +1102,8 @@ class Api:
         self._overlays_open.add("flyout")
         self._arming_kind = "flyout"
         self._apply_capture_exclusion()
-        if "flyout" in self._fresh:
+        cold = "flyout" in self._fresh
+        if cold:
             # A panel just made has drawn nothing and does not know its size yet; shown now it
             # would open blank and then jump. Let it size itself, fetch its data and take its
             # backdrop while it is still hidden, as the detail card does.
@@ -1108,22 +1112,19 @@ class Api:
             window.set_opacity(0.0)
             try:
                 window.show()
-                time.sleep(0.05)
-                self._arm_backdrop("flyout", window, timeout=6.0)
+                self._arm_backdrop("flyout", window, timeout=6.0, settle=False)
             finally:
                 window.set_opacity(1.0)
             if self._flyout_size:
                 self._place_flyout(window, hwnd, self._flyout_size)
             self._arming_kind = "flyout"
-        # Shown before its backdrop is armed, unlike the popover: waiting up
-        # to 300ms for the panel after a tray click reads as a stutter, while
-        # a stale first frame lasts only a frame or two.
+        # Reused windows can be shown immediately; cold windows were already
+        # shown transparently and armed above.
         try:
             window.show()
         except Exception:
             pass
-        # Let Qt finish the resize and DWM compose it.
-        time.sleep(0.05)
+        # arm() sizes on the GUI thread and acknowledges the background; no fixed sleep is needed.
         # The size the panel asked for may have landed while it was hidden.
         if self._flyout_size:
             self._place_flyout(window, hwnd, self._flyout_size)
@@ -1131,7 +1132,8 @@ class Api:
         self._apply_system_glass("flyout")
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
-        self._arm_backdrop("flyout", window)
+        if not cold:
+            self._arm_backdrop("flyout", window, timeout=0.12, settle=False)
         _bring_to_front(window)
         window.send("flyout_enter")
 
@@ -1154,7 +1156,7 @@ class Api:
         self.hide_flyout()
 
     # Keep in step with the panel's own exit (nativeui/panel.py flyout_leave).
-    _FLYOUT_LEAVE_S = 0.16
+    _FLYOUT_LEAVE_S = 0.20
 
     def hide_flyout(self):
         if not self._flyout_open:
@@ -1259,12 +1261,21 @@ class Api:
         )
 
     def open_popover(self, tile_id, screen_x, screen_y, tile_w=0, tile_h=0,
-                     owner_kind=None):
+                     owner_kind=None, source_image=None):
+        with self._popover_open_lock:
+            self._popover_generation += 1
+            return self._open_popover(tile_id, screen_x, screen_y, tile_w, tile_h, owner_kind, source_image)
+
+    def _open_popover(self, tile_id, screen_x, screen_y, tile_w=0, tile_h=0,
+                      owner_kind=None, source_image=None):
         """Show the detail card over a tile. Coordinates are physical.
         `owner_kind` is the window the tile is in."""
         if not self._ensure_overlay("popover"):
             return
         self._popover_owner = owner_kind
+        owner_window = self._window_for(owner_kind)
+        if source_image is not None and owner_window is not None:
+            _run_on_ui_thread(owner_window, lambda: owner_window.native.prepare_transition(tile_id))
         # The card takes the theme of the window it opens from (the panel has
         # its own).
         self._popover_window.send("set_owner", owner_kind)
@@ -1272,42 +1283,49 @@ class Api:
             state = self._home_states.get(tile_id[5:])
             if state:
                 self._broadcast("push_states", [[tile_id[5:], state]], windows=(self._popover_window,))
+        self._popover_anchor = (int(screen_x), int(screen_y), int(tile_w), int(tile_h))
         hwnd = _get_hwnd(self._popover_window)
         if hwnd:
             # Anchored at the tile's top-left, flipping at screen edges.
-            self._popover_anchor = (int(screen_x), int(
-                screen_y), int(tile_w), int(tile_h))
             # The window is still collapsed from its last close, so place it
             # with the last known size; resize_popover_window corrects it
             # once the card reports the real one.
-            guess = self._popover_size
-            if guess:
-                at = self._popover_origin(guess[0], guess[1])
-                if at:
-                    screen_x, screen_y = at
             _run_on_ui_thread(
                 self._popover_window,
                 lambda: _set_window_pos(hwnd, int(screen_x), int(screen_y)),
             )
-        # Registered before applying exclusions: the popover must be excluded
-        # from capture (or it reads itself back in) and the widget below it
-        # must stay capturable to appear in its backdrop.
+        # The widget keeps its capture source. Its offscreen image is composed
+        # into the popover backdrop without the tile being lifted.
         self._overlays_open.add("popover")
         self._arming_kind = "popover"
         self._apply_capture_exclusion()
         # Render the card, let it settle its size and place, and take the
         # backdrop there - all while the window is still hidden.
-        self._popover_window.send("open_tile", tile_id)
+        def prepare():
+            scene = self._popover_window.native
+            scene.source_surface = owner_window.native if owner_window and hasattr(owner_window.native,"set_transition_cover") else None
+            source_dpi = getattr(owner_window.native, "dpi", None) if owner_window else None
+            scene.set_transition_source(self._popover_anchor, source_image, tile_id, self._popover_generation,
+                                        source_dpi=source_dpi, source_work=_work_area_at(screen_x, screen_y))
+            scene.open_tile(tile_id)
+        _run_on_ui_thread(self._popover_window, prepare)
+        self._capture_epoch += 1
+        self._duplication_after.pop("popover", None)
         self._arm_backdrop("popover", self._popover_window)
         try:
-            self._popover_window.show()
+            def show_morph():
+                scene = self._popover_window.native
+                scene.sync_source_cover()
+                if source_image is not None and owner_window is not None:
+                    owner_window.native.set_transition_tile(tile_id)
+                scene.show()
+                scene.enter()
+            _run_on_ui_thread(self._popover_window, show_morph)
         except Exception:
             pass
         self._apply_capture_exclusion()
         _bring_to_front(self._popover_window)
         self._apply_system_glass("popover")
-        # Its entrance played while hidden; replay it now that it is visible.
-        self._popover_window.send("enter")
 
     def _ensure_settings_window(self):
         """Settings is seldom open, so it is made when asked for and released
@@ -1357,18 +1375,36 @@ class Api:
                 pass
         self._apply_capture_exclusion()
 
-    def close_popover(self):
+    def close_popover(self, expected_generation=None):
+        with self._popover_open_lock:
+            if expected_generation is not None and expected_generation != self._popover_generation:
+                return False
+            return self._close_popover()
+
+    def _close_popover(self):
+        owner = self._window_for(self._popover_owner)
+        def handoff():
+            restore = getattr(owner.native,"set_transition_tile",None) if owner else None
+            if restore is not None:
+                restore(None)
+            if self._popover_window:
+                self._popover_window.native.hide()
         if self._popover_window:
             try:
-                self._popover_window.hide()
+                _run_on_ui_thread(self._popover_window,handoff)
+                _dwmapi.DwmFlush()
             except Exception:
                 pass
             self._schedule_release("popover")
-        # Forget the tile: the card shrinks the hidden window on the way out,
-        # and that resize must not move it.
+        # Placement of a closed card cannot keep referring to its source tile.
         self._popover_anchor = None
         self._overlays_open.discard("popover")
         self._apply_capture_exclusion()
+
+    def get_popover_source_image(self, tile_id):
+        owner = self._window_for(self._popover_owner)
+        snapshot = getattr(owner.native, "transition_image", None) if owner else None
+        return _run_on_ui_thread(owner, lambda: snapshot(tile_id)) if snapshot else None
 
     def set_popover_activatable(self, enabled):
         if self._popover_window:
@@ -1662,11 +1698,10 @@ class Api:
         """Decide, for each window, whether it is hidden from screen capture.
 
         A window must be excluded to read the screen for its own backdrop,
-        or it reads itself back in. But an excluded window comes back black
-        in anything captured on top of it, so a window is left capturable
-        while another of ours overlaps it. Liquid mode keeps the widget
-        excluded below the popover (switching its capture source changed
-        the glass); the popover composes the widget itself instead.
+        or it reads itself back in. An excluded window comes back black in
+        captures above it, so overlays compose widgets over their cached
+        desktop pixels. Widgets keep the same capture source beneath a
+        popover in both glass styles to avoid flashes during handoff.
 
         A kind only counts as excluded if the OS accepted the call; older
         builds fall back to the slower PrintWindow path.
@@ -1693,8 +1728,7 @@ class Api:
             mine = rects.get(kind)
             covered = bool(mine) and any(
                 rects.get(other) and _rects_overlap(mine, rects[other])
-                and not (_is_widget_kind(kind) and other == "popover"
-                         and self._cfg.get("glass_style") == "liquid")
+                and not (_is_widget_kind(kind) and other == "popover")
                 for other in above
             )
             # Settings reads nothing from the screen, so it need not hide.
@@ -2616,7 +2650,7 @@ def _is_widget_kind(kind):
 
 
 def _popover_needs_compat(kind, style, excluded, below, owner="main"):
-    return (kind == "popover" and style == "liquid"
+    return (kind == "popover"
             and (owner or "main") in excluded and bool(below))
 
 
@@ -2627,8 +2661,8 @@ def _grab_widget_rgba(window):
 
     def grab():
         from PySide6.QtGui import QImage
-        pixmap = window.native.grab()
-        image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+        snapshot = getattr(window.native,"backdrop_image",None)
+        image = (snapshot() if snapshot else window.native.grab().toImage()).convertToFormat(QImage.Format_RGBA8888)
         if image.isNull():
             return None
         r = _window_rect(_get_hwnd(window))
@@ -3297,6 +3331,10 @@ def main():
             os.makedirs(folder, exist_ok=True)
             time.sleep(6)
             api.dismiss_flyout = lambda: None
+            if os.environ.get("HA_WIDGET_PROBE_MOTION"):
+                from tools.live_panel_review import run
+                run(api, folder)
+                return
             if os.environ.get("HA_WIDGET_PROBE_DIM"):
                 for n in range(2):
                     api._dimmed = True

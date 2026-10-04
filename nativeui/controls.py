@@ -133,34 +133,128 @@ class TallSlider(View):
 
 
 class TallSwitch(View):
-    """A tall track with a block in its top half when on (a lock locked, a switch on), its bottom half
-    when off; tap to change. The block carries the icon."""
+    """Binary control: direct drag, endpoint commit, or a faster tap along the same path."""
     cursor = Qt.PointingHandCursor
 
     def __init__(self, w, h, on, color, icon, on_click):
         super().__init__(0, 0, w, h)
         self.interactive = True
         self.on, self.color, self.icon = on, color, icon
-        self.on_press = lambda e: True
-        self.on_click = lambda e: on_click()
+        self.position = float(on)
+        self.activate = on_click
+        self.dragging = self.moved = self.skip_click = False
+        self.press_y = self.start_position = 0.0
+        self.motion_samples = []
+        self.on_press, self.on_move, self.on_release = self._press, self._move, self._release
+        self.on_click = self._click
+
+    def contains(self, x, y):
+        path = QPainterPath()
+        r = min(self.w/2, 44)
+        path.addRoundedRect(QRectF(0, 0, self.w, self.h), r, r)
+        return path.contains(QPointF(x, y))
+
+    def _press(self, e):
+        self.stop_animation()
+        self.scene.capture = self
+        self.dragging = True
+        self.moved = self.skip_click = False
+        self.press_y, self.start_position = e.y, self.position
+        self.motion_samples = [(time.monotonic(), e.y)]
+        return True
+
+    def _move(self, e):
+        if self.dragging:
+            now = time.monotonic()
+            self.motion_samples = [(t, y) for t, y in self.motion_samples if now-t <= .12]
+            self.motion_samples.append((now, e.y))
+            delta = e.y - self.press_y
+            self.moved |= abs(delta) > 6
+            if self.moved:
+                self.position = max(0.0, min(1.0, self.start_position - delta / max(1, self.h/2-8)))
+                self.changed()
+        return True
+
+    def _set(self, target, response):
+        self.on = bool(target)
+        self.animate(response, "spring", position=float(target))
+        self.activate()
+
+    def _release(self, e):
+        if not self.dragging:
+            return True
+        self._move(e)
+        self.dragging = False
+        self.skip_click = self.moved
+        if self.moved:
+            velocity = 0.0
+            if len(self.motion_samples) > 1:
+                t0, y0 = self.motion_samples[0]
+                t1, y1 = self.motion_samples[-1]
+                velocity = -(y1-y0) / max(.008, t1-t0) / max(1, self.h/2-8)
+            target = velocity > 0 if abs(velocity) > 2.5 else self.position >= .5
+            if target != self.on:
+                self._set(target, 320)
+            else:
+                self.animate(320, "spring", position=float(self.on))
+        return True
+
+    def _click(self, e):
+        if not self.skip_click:
+            self._set(not self.on, 180)
+        self.skip_click = False
+        return True
+
+    @staticmethod
+    def _blend(a, b, t):
+        return QColor.fromRgbF(*(x+(y-x)*t for x,y in zip(a.getRgbF(), b.getRgbF())))
 
     def paint(self, p):
-        r = min(self.w / 2, 44)
-        track = ui.resolve(self.scene, self.color if self.on else "btn_fill")
-        if self.on:
-            track = QColor(track)
-            track.setAlphaF(0.22)
+        t = max(0.0, min(1.0, self.position))
+        r = min(self.w/2, 44)
+        accent = ui.resolve(self.scene, self.color)
+        on_track = QColor(accent)
+        on_track.setAlphaF(.22)
+        track = self._blend(ui.resolve(self.scene, "btn_fill"), on_track, t)
         p.setPen(Qt.NoPen)
         p.setBrush(track)
         p.drawRoundedRect(QRectF(0, 0, self.w, self.h), r, r)
-        pad = 8
-        bh = self.h / 2 - pad
-        top = pad if self.on else self.h - pad - bh
-        block = QRectF(pad, top, self.w - 2 * pad, bh)
-        p.setBrush(ui.resolve(self.scene, self.color) if self.on else ui.resolve(self.scene, "btn_fill_strong"))
-        p.drawRoundedRect(block, r - pad, r - pad)
-        render.draw_icon(p, self.icon, "#ffffff" if self.on else ui.resolve(self.scene, "ink2").name(),
-                         QRectF(block.center().x() - 13, block.center().y() - 13, 26, 26))
+        pad, bh = 8, self.h/2-8
+        top = (self.h-pad-bh) * (1-t) + pad*t
+        block = QRectF(pad, top, self.w-2*pad, bh)
+        p.setBrush(self._blend(ui.resolve(self.scene, "btn_fill_strong"), accent, t))
+        p.drawRoundedRect(block, r-pad, r-pad)
+        icon_color = self._blend(ui.resolve(self.scene, "ink2"), QColor("#ffffff"), t)
+        render.draw_icon(p, self.icon, (icon_color.red(), icon_color.green(), icon_color.blue(), icon_color.alphaF()),
+                         QRectF(block.center().x()-13, block.center().y()-13, 26, 26))
+
+
+def preserve_controls(scene, old, new):
+    """Rebuilding during a gesture or spring transfers presentation and pointer ownership."""
+    def controls(view):
+        found = [view] if isinstance(view, (TallSwitch, TallSlider, Dial, ui.Slider, ui.Button)) else []
+        return found + [control for child in view.children for control in controls(child)]
+    before, after = controls(old), controls(new)
+    for old_control, new_control in zip(before, after):
+        if type(old_control) is not type(new_control):
+            continue
+        if isinstance(old_control, ui.Button):
+            new_control.zoom = old_control.zoom
+            new_control.pressed = old_control.pressed
+        elif isinstance(old_control, TallSwitch):
+            for name in ("position", "dragging", "moved", "skip_click", "press_y", "start_position", "motion_samples"):
+                setattr(new_control, name, getattr(old_control, name))
+        elif getattr(old_control, "dragging", False):
+            new_control.dragging, new_control.value = True, old_control.value
+            callback = getattr(new_control, "on_input_", None)
+            if callback: callback(new_control.value)
+        scene.tweens.replace_view(old_control, new_control)
+        if isinstance(new_control, TallSwitch) and not new_control.dragging and old_control.on != new_control.on:
+            scene.tweens.animate(new_control, {"position": float(new_control.on)}, 180, "spring", None)
+        for name in ("capture", "press_view", "hover_view"):
+            if getattr(scene, name, None) is old_control:
+                setattr(scene, name, new_control)
+
 
 
 class Dial(View):
@@ -340,9 +434,9 @@ class ModeCard(View):
     built again (reattach_menu)."""
     cursor = Qt.PointingHandCursor
 
-    def __init__(self, w, icon, title, value, options=None, on_pick=None, current=None):
+    def __init__(self, w, icon, title, value, options=None, on_pick=None, current=None, compact=False):
         """options: [(value, label)]; on_pick(value) when one is chosen; current: the value chosen now."""
-        super().__init__(0, 0, w, 62)
+        super().__init__(0, 0, w, 54 if compact else 62)
         self.interactive = True
         self.icon, self.title, self.value, self.key = icon, title, value, title
         self.options, self.on_pick, self.current = options or [], on_pick, current
@@ -364,10 +458,13 @@ class ModeCard(View):
         render.draw_icon(p, self.icon, ui.resolve(self.scene, "ink1").name(), QRectF(14, (self.h - 24) / 2, 24, 24))
         x = 14 + 24 + 12
         size, weight, color = style.TEXT["label"]
-        _text(p, render.tr(self.title), ui.font(size, weight), ui.resolve(self.scene, color), x, 11)
+        f = ui.font(size, weight)
+        render.draw_text_fade(p, render.tr(self.title), f, ui.resolve(self.scene, color),
+                              QRectF(x, (self.h - 42) / 2, self.w - x - 10, 18), False)
         size, weight, color = style.TEXT["value"]
         f = ui.font(size, weight)
-        _text(p, ui.ellipsize(render.tr(self.value), f, self.w - x - 10), f, ui.resolve(self.scene, color), x, 31)
+        render.draw_text_fade(p, render.tr(self.value), f, ui.resolve(self.scene, color),
+                              QRectF(x, (self.h - 42) / 2 + 20, self.w - x - 10, 22), False)
 
 
 class ChoiceMenu(View):
@@ -480,10 +577,12 @@ def _place(anchor, pane):
     drawn, inside the window."""
     scene = anchor.scene
     ax, ay, k = anchor.in_scene()
+    anchor_k = k
+    k = min(k, max(1, scene.css_w - 12) / pane.w, max(1, scene.css_h - 12) / pane.h)
     pane.scale = k
     mw, mh = pane.w * k, pane.h * k
-    x = min(max(6.0, ax + (anchor.w * k - mw) / 2), scene.css_w - mw - 6)
-    y = ay + (anchor.h + 6) * k
+    x = min(max(6.0, ax + (anchor.w * anchor_k - mw) / 2), scene.css_w - mw - 6)
+    y = ay + anchor.h * anchor_k + 6 * k
     if y + mh > scene.css_h - 6:
         y = ay - 6 * k - mh
     pane.x, pane.y = x, max(6.0, min(y, scene.css_h - mh - 6))
@@ -501,9 +600,10 @@ def _show(anchor, pane):
     pane.anchor, pane.on_closed = anchor, lambda: _unopen(pane)
     anchor.open = True
     _place(anchor, pane)
-    pane.alpha, pane.dy = 0.0, -6.0
+    pane.alpha, pane.dy, pane.zoom = 0.0, -6.0, 0.98
+    pane.zoom_origin = (0.5, 0 if pane.y >= anchor.in_scene()[1] else 1)
     scene.open_popup(pane)
-    pane.animate(160, "out", alpha=1.0, dy=0.0)
+    pane.animate(260, "spring", alpha=1.0, dy=0.0, zoom=1.0)
     return pane
 
 
@@ -547,6 +647,11 @@ def reattach_menu(scene, tree):
     card = found[0]
     if isinstance(pane, ChoiceMenu) and (card.options != pane.options or card.current != pane.current):
         new = ChoiceMenu(card.options, card.current, card.w, pane.on_pick, pane.key)
+        # A state can arrive while the pane is appearing: carry its displayed position
+        # and remaining animation into the replacement, without jumping to fully open.
+        new.alpha, new.dy, new.zoom = pane.alpha, pane.dy, pane.zoom
+        new.zoom_origin = pane.zoom_origin
+        scene.tweens.replace_view(pane, new)
         new.on_closed = lambda: _unopen(new)
         scene.layer.remove(pane)
         scene.layer.add(new)

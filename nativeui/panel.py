@@ -1,15 +1,15 @@
 """The tray panel: the widget's tiles beside the taskbar, or the Home view.
 
 main.py drives it (overlay.py): `arm()` while it is placed but hidden (size, data, the
-backdrop), `flyout_enter()` to bring it in, `flyout_leave()` to send it away. It scales out of its tray
-corner and back, never past its resting size, the glass and the card as one.
+backdrop), `flyout_enter()` to bring it in, `flyout_leave()` to send it away. It slides up from its tray
+corner and back down, the glass and the card as one, keeping its resting size.
 """
 import threading
 import time
 import traceback
 
-from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QCursor, QImage
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QCursor, QImage, QPainter
 
 from . import render, screens
 from .actions import TileActions
@@ -29,12 +29,9 @@ FLYOUT_ZOOM = 0.5
 FIT_SIDE = 1080
 FIT_RANGE = (0.8, 1.5)
 FIT_MARGIN = 12
-ENTER_CURVE, LEAVE_CURVE = (0.12, 0.9, 0.2, 1.0), (0.5, 0.0, 0.9, 0.35)
+ENTER_CURVE, LEAVE_CURVE = (0.16, 1.0, 0.3, 1.0), (0.4, 0.0, 1.0, 1.0)
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
-# A tile's detail is shown over the panel's own tiles, as a capsule's devices are: at the size of the detail
-# card beside a widget at 100 % (its units are DETAIL_SCALE of the panel's), with DETAIL_MARGIN around it.
-# A panel too small for it (a row or two of tiles) grows while it is shown, up to DETAIL_MAX_H. It never
-# scrolls: its tall controls are made shorter, and what is still too tall is drawn smaller.
+# Details fit inside the panel's existing bounds. State updates and navigation never resize the glass.
 DETAIL_SCALE = 1 / FLYOUT_ZOOM
 DETAIL_MARGIN = 14
 DETAIL_MAX_H = 900                     # as tall as the Home panel
@@ -60,7 +57,11 @@ class PanelScene(OverlayScene):
         self.hold_timer.setSingleShot(True)
         self.hold_timer.timeout.connect(self._held)
         self.hold = None
-        self.anim_alpha, self.anim_zoom = 0.0, 0.86          # until it is asked to come in
+        self.anim_alpha, self.anim_zoom = 0.0, 1.0
+        self.anim_dy = self.css_h
+        self._flyout_picture = None
+        self._flyout_glass = None
+        self._deferred_glass = False
         self.home = None
         # The detail shown over the tiles (open_detail), and the panel's own size without it.
         self.detail = DetailContent(self, lambda: self.prefs, self.states, self.layout_detail,
@@ -260,6 +261,8 @@ class PanelScene(OverlayScene):
         sign = self.mini_hit(tv, e.x, e.y)
         if sign:
             self.actions.climate_step(tile, sign)
+        elif tv.form == "bar" and not render.bar_icon_rect(tv.w, tv.h).contains(QPointF(e.x, e.y)):
+            self.popover(tv, tile)
         elif not render.is_readonly(tile["domain"]):
             self.actions.quick_action(tile, flash=lambda: self.flash(tv))
         return True
@@ -290,22 +293,42 @@ class PanelScene(OverlayScene):
 
     def popover(self, tv, tile):
         """A hold or a right click: the tile's detail, over the panel."""
-        self.open_detail(tile["id"])
+        self.open_detail(tile["id"], source=tv)
 
     # -- a tile's detail, over the tiles ------------------------------------------------------------------------------
-    def open_detail(self, tile_id):
+    def open_detail(self, tile_id, source=None):
+        if self.detail_view is None and getattr(self, "closing_detail", None) is None:
+            if source is None:
+                candidates = self.home.tile_views() if self.home else self.tiles_views
+                source = next((v for v in candidates if v.tile["id"] == tile_id), None)
+            self.detail_origin = None
+            if source is not None:
+                x, y, k = source.in_scene()
+                rect = QRectF(x, y, source.w * k, source.h * k)
+                image = self.grab().toImage()
+                crop = QRectF(rect.x() * self.scale, rect.y() * self.scale,
+                              rect.width() * self.scale, rect.height() * self.scale).toAlignedRect()
+                self.detail_origin = (rect, image.copy(crop))
+                self.detail_source_id = tile_id
+                source.transition_hidden = True
         if not self.detail.open(tile_id):
             return
         opening = self.detail_view is None
+        closing = getattr(self, "closing_detail", None)
+        if closing is not None:
+            self.detail_view = closing
+            closing.no_hit = False
+            self.closing_detail = None
         self.detail_k = DETAIL_SCALE
         self.layout_detail()
         if opening:
             # the tiles recede and the detail comes forward, as a capsule's devices do
             self.root.no_hit = True
-            self.root.animate(DETAIL_MS, "out", alpha=0.0, zoom=0.94, blur=10.0)
+            self.root.animate(DETAIL_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0)
             v = self.detail_view
-            v.alpha, v.zoom, v.blur = 0.0, 1.06, 10.0
-            v.animate(DETAIL_MS, "out", alpha=1.0, zoom=1.0, blur=0.0)
+            if closing is None:
+                v.alpha, v.zoom, v.blur, v.progress = 0.0, 1.0, 0.0, 0.0
+            v.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0, progress=1.0)
             self.invalidate_glass()               # the liquid glass no longer blurs behind each tile
 
     def layout_detail(self):
@@ -315,14 +338,16 @@ class PanelScene(OverlayScene):
         old = self.detail_view
         k, m = DETAIL_SCALE, DETAIL_MARGIN
         base_w, base_h = self.base_css or (self.css_w, self.css_h)
-        room = max(base_h, DETAIL_MAX_H) - 2 * m
+        room = max(1, base_h - 2 * m)
+        k = min(getattr(self, "detail_k", k), k, max(1, base_w - 2 * m) / CARD_W,
+                room / (72 + 150))
         content = self.detail.build(max_h=room / k, fit=True)
         # as large as fits, and no larger than it was while this device is shown: a new state (a longer
         # song title) does not make it jump
-        k = self.detail_k = min(getattr(self, "detail_k", k), k, room / content.h)
-        w = max(base_w, CARD_W * k + 2 * m)
-        h = max(base_h, content.h * k + 2 * m)
-        overlay = Backing(0, 0, w, h, self)
+        k = self.detail_k = min(getattr(self, "detail_k", k), k, room / content.h,
+                              max(1, base_w - 2 * m) / CARD_W)
+        w, h = base_w, base_h
+        overlay = MorphBacking(0, 0, w, h, self, getattr(self, "detail_origin", None))
         overlay.interactive = True                # the empty space around it goes back
         overlay.on_press = lambda e: True
         overlay.on_click = lambda e: self.close_detail()
@@ -330,21 +355,35 @@ class PanelScene(OverlayScene):
         holder.scale = k
         holder.interactive = True                 # but not the empty space inside it, nor a click that a
         holder.on_press = lambda e: True          # control in it (a slider) leaves unhandled
-        holder.on_click = lambda e: True
+        holder.on_click = lambda e: self.detail_background_click(e)
         holder.add(content)
         overlay.add(holder)
         if old is not None:
+            controls.preserve_controls(self, old, overlay)
             overlay.alpha, overlay.zoom, overlay.blur = old.alpha, old.zoom, old.blur
-            old.stop_animation()
+            overlay.progress = old.progress
+            self.tweens.replace_view(old, overlay)
             self.layer.remove(old)
+        candidates = self.home.tile_views() if self.home else self.tiles_views
+        for tile in candidates:
+            tile.transition_hidden = tile.tile["id"] == getattr(self, "detail_source_id", None)
         self.layer.add(overlay)
         self.detail_view = overlay
         self.detail_css = (w, h)
-        controls.reattach_menu(self, overlay)    # a menu open over it stays, over the new card
         if (w, h) != (self.css_w, self.css_h):
             self.set_css_size(w, h)
             self.request_size()
+        controls.reattach_menu(self, overlay)
         self.request_paint()
+
+    def detail_background_click(self, event):
+        target = self.press_view
+        while target is not None and target is not self.detail_view:
+            if target.interactive and type(target) is not View and not isinstance(target, ScrollView):
+                return True
+            target = target.parent
+        self.close_detail()
+        return True
 
     def close_detail(self, animate=True):
         v = self.detail_view
@@ -352,19 +391,26 @@ class PanelScene(OverlayScene):
             return
         self.detail.tile = None
         self.detail_view = None
+        self.closing_detail = v
         self.root.no_hit = False
         self.close_popup()
 
         def gone():
+            if self.detail_view is None:
+                candidates = self.home.tile_views() if self.home else self.tiles_views
+                for tile in candidates:
+                    tile.transition_hidden = False
+            if getattr(self, "closing_detail", None) is v:
+                self.closing_detail = None
             self.layer.remove(v)
-            if self.base_css and self.base_css != (self.css_w, self.css_h):
+            if self.detail_view is None and self.base_css and self.base_css != (self.css_w, self.css_h):
                 self.set_css_size(*self.base_css)
                 self.request_size()
             self.request_paint()
         if animate:
             v.no_hit = True
-            v.animate(DETAIL_MS, "out", alpha=0.0, zoom=1.06, blur=10.0, done=gone)
-            self.root.animate(DETAIL_MS, "out", alpha=1.0, zoom=1.0, blur=0.0)
+            v.animate(DETAIL_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0, progress=0.0, done=gone)
+            self.root.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0)
         else:
             v.stop_animation()
             self.root.stop_animation()
@@ -510,7 +556,9 @@ class PanelScene(OverlayScene):
 
     def arm(self):
         """Placed but hidden: size itself, fetch its data and take its backdrop, held out of sight, then say so."""
-        self.anim_alpha, self.anim_zoom = 0.0, 0.86
+        if not self.isVisible() or self.anim_alpha <= 0:
+            self.anim_alpha, self.anim_dy = 0.0, self.css_h
+        self.anim_zoom = 1.0
         self.anim_origin = self.origin()
         self.tweens.cancel(self)
         self.moving = False
@@ -523,6 +571,8 @@ class PanelScene(OverlayScene):
             self.rebuild(keep_scroll=True)
             self.request_size(sync=True)
         self.start_glass()
+        if self.anim_alpha <= 0:
+            self.anim_dy = self.css_h       # final fitted height, completely behind the bottom edge
         if self.custom_bg():
             self.make_bg()
             threading.Thread(target=self.api.backdrop_armed, daemon=True).start()
@@ -535,7 +585,6 @@ class PanelScene(OverlayScene):
         self.arm_event = done
 
         def wait():
-            time.sleep(0.04)
             done.wait(patient)
             self.api.backdrop_armed()
         threading.Thread(target=wait, daemon=True).start()
@@ -550,26 +599,85 @@ class PanelScene(OverlayScene):
         self.start_glass()
 
     def flyout_enter(self):
+        self._prepare_flyout_picture()
         self.anim_origin = self.origin()
-        self.anim_alpha, self.anim_zoom = 0.0, 0.86
+        self.anim_zoom = 1.0
         self.moving = True                   # the glass sampler leaves the processor to the animation
-        self.tweens.animate(self, {"anim_zoom": 1.0}, 220, ENTER_CURVE, self._settled)
-        # opacity is full by 55% of the way in
-        self.tweens.animate(self, {"anim_alpha": 1.0}, 121, ENTER_CURVE, None)
+        self.tweens.animate(self, {"anim_dy": 0.0}, 333, ENTER_CURVE, self._settled)
+        self.tweens.animate(self, {"anim_alpha": 1.0}, 83, (0.0, 0.0, 1.0, 1.0), None)
 
     def flyout_leave(self):
+        self._prepare_flyout_picture()
         self.moving = True
-        self.tweens.animate(self, {"anim_alpha": 0.0, "anim_zoom": 0.92}, 130, LEAVE_CURVE, self._left)
+        self.tweens.animate(self, {"anim_dy": self.css_h}, 167, LEAVE_CURVE, self._left)
+        # Keep the pane legible while it retreats; fade only near the end.
+        self.tweens.animate(self, {"anim_alpha": 0.0}, 83, (0.0, 0.0, 1.0, 1.0), None, delay=84)
 
     def _settled(self):
         self.moving = False
+        self._flyout_picture = None
+        self._flyout_glass = None
+        if self._deferred_glass:
+            self._deferred_glass = False
+            super()._on_glass()
+        self.request_paint()
         self.sample_now.set()
 
     def _left(self):
         self.moving = False
+        self._flyout_picture = None
+        self._flyout_glass = None
         self.close_detail(animate=False)          # the next opening shows the tiles
         if self.home is not None:
             self.model.reset()
+
+    def _prepare_flyout_picture(self):
+        """Cache foreground separately: desktop sampling stays at its original screen coordinates."""
+        if self._flyout_picture is not None:
+            return
+        picture = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
+        picture.fill(Qt.transparent)
+        painter = QPainter(picture)
+        rect = QRectF(0, 0, self.pw, self.ph)
+        painter.drawImage(rect, self.content_image())
+        painter.end()
+        self._flyout_picture = picture
+        self._flyout_glass = self.glass if not self.system_glass else None
+
+    def _on_glass(self):
+        if getattr(self, "moving", False):
+            self.glass_queued.clear()
+            self._deferred_glass = True
+            return
+        super()._on_glass()
+
+    def _paint_now(self):
+        self._paint_pending = False
+        for field in self.fields:
+            field.place()
+        if getattr(self, "moving", False) and self._flyout_picture is not None:
+            # QWidget.update merges frames on Windows; this short cached transition follows the timer.
+            self.repaint()
+        else:
+            self.update()
+
+    def paintEvent(self, event):
+        picture = self._flyout_picture
+        if picture is None or not self.moving:
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setOpacity(self.fade_alpha * self.anim_alpha)
+        ratio = self.devicePixelRatioF() or 1.0
+        painter.save()
+        painter.scale(self.scale / ratio, self.scale / ratio)
+        painter.setClipPath(render.squircle(0, self.anim_dy, self.css_w, self.css_h, self.card_radius()))
+        painter.scale(ratio / self.scale, ratio / self.scale)
+        if self._flyout_glass is not None:
+            painter.drawImage(QRectF(0, 0, self.pw / ratio, self.ph / ratio), self._flyout_glass)
+        painter.translate(0, self.anim_dy * self.scale / ratio)
+        painter.drawImage(QRectF(0, 0, self.pw / ratio, self.ph / ratio), picture)
+        painter.restore()
+        painter.end()
 
     def escape(self):
         if self.popup is not None:
@@ -595,6 +703,48 @@ class Backing(View):
         p.setPen(Qt.NoPen)
         p.setBrush(style.readable_backing(self.scene.theme))
         p.drawPath(render.squircle(0, 0, self.w, self.h, self.panel.card_radius()))
+
+
+class MorphBacking(Backing):
+    """A source tile expands into the detail; text stays at its final size behind the moving clip."""
+    def __init__(self, x, y, w, h, panel, origin):
+        super().__init__(x, y, w, h, panel)
+        self.origin = origin
+        self.progress = 1.0
+
+    def frame(self):
+        t = max(0.0, min(1.0, self.progress))
+        source = self.origin[0] if self.origin else QRectF(self.w * .01, self.h * .01, self.w * .98, self.h * .98)
+        return QRectF(source.x() * (1-t), source.y() * (1-t),
+                      source.width() + (self.w-source.width()) * t,
+                      source.height() + (self.h-source.height()) * t)
+
+    def paint_tree(self, p):
+        if not self.visible:
+            return
+        t = max(0.0, min(1.0, self.progress))
+        rect = self.frame()
+        radius = min(32, rect.height() / 2) * (1-t) + self.panel.card_radius() * t
+        p.save()
+        p.translate(self.x, self.y)
+        p.setClipPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
+        opacity = p.opacity()
+        if self.origin and not self.origin[1].isNull() and t < 1:
+            p.setOpacity(opacity * max(0.0, 1-4*t))
+            p.drawImage(rect, self.origin[1])
+        p.setOpacity(opacity * t)
+        p.setPen(Qt.NoPen)
+        p.setBrush(style.readable_backing(self.scene.theme))
+        p.drawPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
+        for child in self.children:
+            child.paint_tree(p)
+        p.restore()
+
+    def hit(self, x, y):
+        got = super().hit(x, y)
+        if got is not self and not self.frame().contains(QPointF(x-self.x, y-self.y)):
+            return self if not self.no_hit else None
+        return got
 
 
 def create_panel(api):

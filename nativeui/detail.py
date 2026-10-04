@@ -9,8 +9,8 @@ import threading
 import time
 import traceback
 
-from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainterPath, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 
 from . import appearance, controls, kinds, render, style, ui
 from .overlay import OverlayScene, create_overlay
@@ -20,6 +20,7 @@ CARD_W = 320
 BODY_X, BODY_W = 14, 292
 BODY_MAX = 560
 CARD_MAX_H = 760                     # the tallest the detail card beside a widget is made
+SETTINGS_H = BODY_MAX + 60           # one viewport for every desktop widget's settings
 HISTORY_HOURS = 24
 
 HVAC_LABELS = {"off": "關閉", "cool": "冷氣", "heat": "暖氣", "heat_cool": "自動", "auto": "自動",
@@ -142,8 +143,10 @@ class DetailContent:
         if tile_id.startswith("home:"):
             entity = tile_id[5:]
             st = self.states.get(entity)
+            model = getattr(self.host, "model", None)
+            name = ((model.entity_by_id(entity) or {}).get("name") if model else "")
             return {"id": tile_id, "entity": entity, "domain": entity.split(".")[0],
-                    "room": ((st or {}).get("attributes") or {}).get("friendly_name") or entity,
+                    "room": ((st or {}).get("attributes") or {}).get("friendly_name") or name or entity,
                     "label": "", "icon": "", "on_mode": "cool", "temp_step": 1}
         return None
 
@@ -193,6 +196,8 @@ class DetailContent:
         """The content, CARD_W wide and as tall as it needs up to max_h: the rest scrolls, or, with `fit`, the
         tall controls are made shorter until it all fits (and it is as tall as it needs: the tray panel scales
         it to its room). Built again for the same tile, it keeps where it was scrolled to."""
+        self.panel_fit = fit
+        self.panel_layout = getattr(self.host, "kind", None) == "flyout"
         if not fit or self.edit:                # (the edit panel scrolls: it has every icon)
             self.tall = TALL_H
             return self._build(max_h)
@@ -204,6 +209,16 @@ class DetailContent:
             self.tall = max(TALL_MIN, self.tall - (out.h - max_h))
             out = self._build(float("inf"))
         self.tall_fit = self.tall               # no taller again while this device is shown: no jumping
+        if self.panel_layout and out.h > max_h:
+            # Fit only the controls. The header keeps the same font, width and alignment for every device.
+            scroll = self.body_scroll
+            body = scroll.content.children[0]
+            available = max(1, max_h - scroll.y)
+            body.scale = min(1.0, available / body.h)
+            body.x = (BODY_W - body.w * body.scale) / 2
+            scroll.h = scroll.content.h = body.h * body.scale
+            scroll.fade = 0
+            out.h = scroll.y + scroll.h
         return out
 
     def _build(self, max_h):
@@ -216,19 +231,21 @@ class DetailContent:
         title = tile.get("room") or ((state or {}).get("attributes") or {}).get("friendly_name") or tile["entity"]
         # the header: close, where it is and what it is, the edit panel
         left = 18
+        area = self.area_of(tile["entity"]) if self.area_of else ""
+        row_y = 24 if area or getattr(self, "panel_layout", False) else 12
         if self.on_close is not None:
-            out.add(Button(x=10, y=12, w=36, h=36, icon="mdi:close", icon_size=22, fill=None, hover_fill="btn_fill",
+            out.add(Button(x=10, y=row_y, w=36, h=36, icon="mdi:close", icon_size=22, fill=None, hover_fill="btn_fill",
                            on_click=lambda e: self.on_close()))
             left = 10 + 36 + 6
-        area = self.area_of(tile["entity"]) if self.area_of else ""
         tw = CARD_W - left - 10 - 36 - 8
         if area:
-            out.add(style.label("eyebrow", area, x=left, y=10, w=tw, overflow="ellipsis"))
-        out.add(style.label("title", title, x=left, y=26 if area else 18, w=tw, overflow="ellipsis"))
-        out.add(Button(x=CARD_W - 10 - 36, y=12, w=36, h=36, icon="mdi:cog", icon_size=20, fill=None,
+            out.add(style.label("eyebrow", area, x=left, y=6, w=tw, overflow="fade"))
+        heading = style.label("detail_title", title, x=left, y=row_y, cell_h=36, w=tw, overflow="fade")
+        out.add(heading)
+        out.add(Button(x=CARD_W - 10 - 36, y=row_y, w=36, h=36, icon="mdi:cog", icon_size=22, fill=None,
                        hover_fill="btn_fill", on_click=lambda e: self.set_edit(not self.edit), active=self.edit,
                        active_fill="btn_fill_strong", active_color="btn_text"))
-        top = 60
+        top = 72 if area or getattr(self, "panel_layout", False) else 60
         body = View(0, 0, BODY_W, 0)
         stack = Stack(body, 0, 4, BODY_W)
         if self.edit:
@@ -238,6 +255,8 @@ class DetailContent:
         content_h = stack.end() + 14
         body.h = content_h
         shown_h = max(60, min(content_h, max_h - top))
+        if self.edit and getattr(self.host, "kind", None) == "popover":
+            shown_h = max(60, max_h - top)
         scroll = ScrollView(BODY_X, top, BODY_W, shown_h, fade=24 if content_h > shown_h else 0)
         scroll.add(body)
         scroll.content.w, scroll.content.h = BODY_W, content_h
@@ -249,6 +268,9 @@ class DetailContent:
 
     # -- the edit panel ----------------------------------------------------------------------------------------
     def set_edit(self, on):
+        if self.edit == on:
+            return
+        self.host.close_popup()
         self.edit = on
         self.rebuilt()
 
@@ -267,7 +289,11 @@ class DetailContent:
             if onoff:
                 stack.place(style.label("label", appearance.FAMILIES[fam][0], w=BODY_W), 4, 4)
             stack.place(self.icon_grid(appearance.FAMILIES[fam][1], current, 36), 2, 8)
-        others = [i for fam, (_, icons) in appearance.FAMILIES.items() if fam not in can for i in icons]
+        groups = [icons for fam, (_, icons) in appearance.FAMILIES.items() if fam not in can]
+        others = [icons[row] for row in range(max(map(len, groups), default=0))
+                  for icons in groups if row < len(icons)][:14]
+        if current not in others and any(current in icons for icons in groups):
+            others[-1:] = [current]
         stack.place(style.label("section", "其他圖示", w=BODY_W, spacing=0.4), 12, 2)
         stack.place(style.label("caption", "只換圖示，不改變樣式；更多圖示請在下方輸入 MDI 名稱", w=BODY_W, wrap=True), 2, 8)
         stack.place(self.icon_grid(others, current, 30), 2, 8)
@@ -291,10 +317,13 @@ class DetailContent:
         grid = View(0, 0, BODY_W, 0)
         gap = 8
         per = max(1, int((BODY_W + gap) // (size + gap)))
-        for i, name in enumerate(icons):
-            r, c = divmod(i, per)
+        rows = (len(icons) + per - 1) // per
+        cells = [cell for row in style.grid(
+            QRectF(0, 0, per * size + (per-1)*gap, rows * size + max(0, rows-1)*gap),
+            per, rows, gap, gap) for cell in row] if rows else []
+        for name, cell in zip(icons, cells):
             chosen = name == current
-            b = Button(x=c * (size + gap), y=r * (size + gap), w=size, h=size, icon=name, icon_size=size * 0.52,
+            b = Button(x=cell.x(), y=cell.y(), w=cell.width(), h=cell.height(), icon=name, icon_size=size * 0.52,
                        ring="accent_blue" if chosen else None, fill="btn_fill_strong" if chosen else "btn_fill",
                        on_click=lambda e, n=name: self.set_icon(n))
             b.ring_width = 2
@@ -361,6 +390,49 @@ class DetailContent:
 
 
 
+class PageSnapshot(View):
+    """Outgoing page content, without its glass: both pages share one background."""
+    def __init__(self, image, w, h):
+        super().__init__(0, 0, w, h)
+        self.image, self.no_hit = image, True
+
+    def paint(self, p):
+        p.drawImage(QRectF(0, 0, self.w, self.h), self.image)
+
+
+class PageHolder(View):
+    """Cache page artwork so a frame morph composites pixels instead of repainting icon grids."""
+    def __init__(self, *args):
+        super().__init__(*args)
+        self._page_cache = None
+
+    def prepare_cache(self):
+        scale = self.scene.scale
+        if self._page_cache is None:
+            image = QImage(max(1,round(self.w*scale)),max(1,round(self.h*scale)),QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            painter.setRenderHints(QPainter.Antialiasing|QPainter.TextAntialiasing|QPainter.SmoothPixmapTransform)
+            painter.scale(scale,scale)
+            x,y,alpha = self.x,self.y,self.alpha
+            self.x,self.y,self.alpha = 0,0,1
+            try:
+                View.paint_tree(self,painter)
+            finally:
+                self.x,self.y,self.alpha = x,y,alpha
+                painter.end()
+            self._page_cache = image
+
+    def paint_tree(self,p):
+        if not self.visible or self.alpha <= 0:
+            return
+        self.prepare_cache()
+        p.save()
+        p.setOpacity(p.opacity()*self.alpha)
+        p.drawImage(QRectF(self.x+self.dx,self.y+self.dy,self.w,self.h),self._page_cache)
+        p.restore()
+
+
 class DetailCard(OverlayScene):
     """The detail card as a window of its own, over a desktop widget's tile."""
 
@@ -371,6 +443,16 @@ class DetailCard(OverlayScene):
         self.states = {}
         self.content = DetailContent(self, lambda: self.prefs, self.states, self.rebuild, on_close=self.close_card)
         self.owner = None
+        self.progress = 1.0
+        self.transition_source = None
+        self.transition_bounds = None
+        self.canvas_origin = None
+        self.detail_fit = None
+        self.detail_fits = {}
+        self.page_frame = View()
+        self.page_frame.scene = self
+        self.page_targets = None
+        self.page_mode = False
         self.seq = 0
         self.arm_event = None
         self.sampling = "live"
@@ -426,9 +508,80 @@ class DetailCard(OverlayScene):
     def card_radius(self):
         return self.t["radius_tile"]
 
+    def sync_source_cover(self):
+        source = getattr(self,"source_surface",None)
+        if source is not None and self.page_targets is not None and self.canvas_origin is not None:
+            frame = self.transition_frame()
+            source.set_transition_cover(QRectF(self.canvas_origin[0]+frame.x()*self.scale,
+                                               self.canvas_origin[1]+frame.y()*self.scale,
+                                               frame.width()*self.scale,frame.height()*self.scale))
+
+    def _paint_now(self):
+        self.sync_source_cover()
+        super()._paint_now()
+
+    def transition_glass_opacity(self):
+        return max(0.0, min(1.0, self.progress)) if self.transition_bounds is not None else 1.0
+
+    def transition_frame(self):
+        target = QRectF(self.page_frame.x, self.page_frame.y, self.page_frame.w, self.page_frame.h)
+        if self.transition_bounds is None:
+            return target
+        source = self.transition_bounds[0]
+        t = max(0.0, min(1.0, self.progress))
+        return QRectF(source.x() + (target.x()-source.x()) * t,
+                      source.y() + (target.y()-source.y()) * t,
+                      source.width() + (target.width()-source.width()) * t,
+                      source.height() + (target.height()-source.height()) * t)
+
+    def transition_clip(self):
+        if self.page_targets is None:
+            return None
+        rect = self.transition_frame()
+        return render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), self.t["radius_tile"])
+
+    def view_at(self, x, y):
+        frame = self.transition_clip()
+        if frame is not None and not frame.contains(QPointF(x, y)):
+            return None
+        return super().view_at(x, y)
+
     def paint_card(self, p):
-        render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme,
+        if self.page_targets is None:
+            render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme,
+                                radius=self.t["radius_tile"], plain=True)
+            return
+        target = self.transition_frame()
+        t = self.transition_glass_opacity()
+        image = self.transition_source[1] if self.transition_source else None
+        p.save()
+        if image is not None and not image.isNull() and t < 1:
+            p.setOpacity(p.opacity() * max(0.0, 1-4*t))
+            p.drawImage(self.transition_frame(), image)
+        p.restore()
+        p.save()
+        p.setOpacity(p.opacity() * t)
+        p.translate(target.x(), target.y())
+        render.draw_card_bg(p, target.width(), target.height(), self.t, self.style, self.theme,
                             radius=self.t["radius_tile"], plain=True)
+        p.restore()
+
+    def set_transition_source(self, anchor, image=None, tile_id=None, generation=None, source_dpi=None, source_work=None):
+        self.transition_generation = generation
+        same_dpi = (getattr(self, "metric_dpi", None) == source_dpi and
+                    getattr(self, "metric_work_area", None) == source_work)
+        self.metric_dpi = source_dpi
+        self.metric_work_area = source_work
+        if same_dpi and self.transition_bounds is not None and self.transition_source[0] == anchor and tile_id == getattr(self, "source_tile_id", None):
+            return
+        self.source_tile_id = tile_id
+        self.transition_source = (anchor, image) if anchor else None
+        self.transition_bounds = None
+        self.canvas_origin = None
+        self.page_targets = None
+        self.detail_fits.clear()
+        self.tweens.cancel(self.page_frame)
+        self.progress = 0.0 if anchor else 1.0
 
     def set_owner(self, kind):
         if kind != self.owner:
@@ -453,26 +606,45 @@ class DetailCard(OverlayScene):
     def open_tile(self, tile_id):
         if not self.content.open(tile_id):
             return
-        self.root.stop_animation()
-        self.root.alpha, self.root.dy = 0.0, 6.0
+        if self.transition_bounds is None:
+            self.root.stop_animation()
+            self.root.alpha, self.root.dy = 0.0, 6.0
         self.rebuild()
+        # A cached morph still has to restore its canvas position: the API first
+        # moves the hidden window to the source tile to select the correct monitor.
+        self.request_size()
         threading.Thread(target=lambda: self.api.set_popover_activatable(True), daemon=True).start()
 
     def enter(self):
-        self.root.animate(150, "out", alpha=1.0, dy=0.0)
+        if self.transition_bounds is not None:
+            self.tweens.animate(self, {"progress": 1.0}, 360, "spring", None)
+            self.root.animate(360, "spring", alpha=1.0, dy=0.0)
+        else:
+            self.root.animate(150, "out", alpha=1.0, dy=0.0)
 
     def close_card(self):
         if self.tile is None:
             return
+        snapshot = getattr(self.api, "get_popover_source_image", None)
+        if snapshot and self.transition_source:
+            image = snapshot(self.tile["id"])
+            if image is not None and not image.isNull():
+                self.transition_source = (self.transition_source[0], image)
         self.content.tile = None
         self.close_popup()
         threading.Thread(target=lambda: self.api.set_popover_activatable(False), daemon=True).start()
         self.root.animate(150, "out", alpha=0.0, dy=6.0)
 
+        generation = getattr(self, "transition_generation", None)
         def finish():
             if self.tile is None:
-                threading.Thread(target=self.api.close_popover, daemon=True).start()
-        QTimer.singleShot(170, finish)
+                close = (lambda: self.api.close_popover(expected_generation=generation)) if generation is not None else self.api.close_popover
+                threading.Thread(target=close, daemon=True).start()
+        if self.transition_bounds is not None:
+            self.root.animate(360, "spring", alpha=0.0, dy=0.0)
+            self.tweens.animate(self, {"progress": 0.0}, 360, "spring", finish)
+        else:
+            QTimer.singleShot(170, finish)
 
     def escape(self):
         if self.popup is not None:
@@ -520,35 +692,118 @@ class DetailCard(OverlayScene):
         self.update_metrics()
         self.seq += 1
         try:
-            self.api.resize_popover_window(self.pw, self.ph, self.seq)
+            if self.canvas_origin is not None:
+                self.api.resize_popover_window(self.pw, self.ph, self.seq, origin=self.canvas_origin)
+            else:
+                self.api.resize_popover_window(self.pw, self.ph, self.seq)
         except Exception:
             traceback.print_exc()
 
     def room(self):
         """How tall the card can be, in its own px: the work area of its screen, less a margin."""
+        work = getattr(self, "metric_work_area", None)
+        if work and self.scale:
+            return max(120.0, (work[3]-work[1]-24)/self.scale)
         screen = self.screen()
         if screen is None or not self.scale:
             return BODY_MAX + 67
-        return max(320.0, screen.availableGeometry().height() * screen.devicePixelRatio() / self.scale - 24)
+        return max(120.0, screen.availableGeometry().height() * screen.devicePixelRatio() / self.scale - 24)
 
     def rebuild(self):
         if self.tile is None:
             return
+        self.update_metrics()
+        changing_page = self.page_targets is not None and self.page_mode != self.content.edit
+        previous_holder = getattr(self, "page_holder", None) if self.page_targets is not None else None
+        outgoing = None
+        if changing_page:
+            image = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            painter.scale(self.scale, self.scale)
+            self.root.paint_tree(painter)
+            painter.end()
+            outgoing = PageSnapshot(image, self.css_w, self.css_h)
+        continuing = [v for v in self.root.children if isinstance(v, PageSnapshot)] if not changing_page else []
+        old_tree = View()
+        old_tree.children = list(self.root.children)
         self.root.clear()
         for f in list(self.fields):
             self.fields.remove(f)
         # all of it shown, as in the tray panel: the tall controls made shorter, then smaller if it must be
-        room = min(self.room(), CARD_MAX_H)
+        settings_scale = self.detail_fits.get((self.tile["id"], False), (None, None, 1.0))[2]
+        room = min(self.room(), SETTINGS_H if self.content.edit else CARD_MAX_H)
+        if self.content.edit:
+            room /= settings_scale
+        key = (self.tile["id"], self.content.edit)
+        fitted = self.detail_fits.get(key)
+        if fitted is not None:
+            room = fitted[1]
         view = self.content.build(max_h=room, fit=True)
-        k = min(1.0, room / view.h)
-        holder = View(0, 0, CARD_W * k, view.h * k)
+        k = fitted[2] if fitted else (settings_scale if self.content.edit else min(1.0, room / view.h))
+        height = fitted[3] if fitted else view.h * k
+        self.detail_fit = (key, room, k, height)
+        self.detail_fits[key] = self.detail_fit
+        holder = PageHolder(0, 0, CARD_W * k, height)
         view.scale = k
         holder.add(view)
+        # Reserve both pages in one canvas once. Only the visible rounded frame moves;
+        # the window and desktop capture stay still throughout a page change.
+        if self.page_targets is None:
+            ax, ay, aw, ah = self.transition_source[0] if self.transition_source else (0, 0, 0, 0)
+            place = getattr(self.api, "_popover_origin", None)
+            sizes = {False: (holder.w, holder.h), True: (holder.w, min(self.room(), SETTINGS_H))}
+            boxes = {}
+            for mode, (width, page_h) in sizes.items():
+                tx, ty = (place(round(width*self.scale), round(page_h*self.scale)) if place else None) or (ax, ay)
+                boxes[mode] = QRectF(tx, ty, width*self.scale, page_h*self.scale)
+            union = boxes[False].united(boxes[True])
+            if self.transition_source:
+                union = union.united(QRectF(ax, ay, aw, ah))
+            left, top = union.x(), union.y()
+            self.page_targets = {mode: QRectF((box.x()-left)/self.scale, (box.y()-top)/self.scale,
+                                               box.width()/self.scale, box.height()/self.scale)
+                                 for mode, box in boxes.items()}
+            target = self.page_targets[self.content.edit]
+            self.page_frame.x, self.page_frame.y = target.x(), target.y()
+            self.page_frame.w, self.page_frame.h = target.width(), target.height()
+            self.page_mode = self.content.edit
+            if self.transition_source:
+                source = QRectF((ax-left)/self.scale, (ay-top)/self.scale, aw/self.scale, ah/self.scale)
+                self.transition_bounds = (source, self.page_targets[False], union.width()/self.scale, union.height()/self.scale)
+            self.canvas_origin = (round(left), round(top)) if place else None
+            self.set_css_size(union.width()/self.scale, union.height()/self.scale)
+            self.request_size()
+        target = self.page_targets[self.content.edit]
+        holder.x, holder.y = target.x(), target.y()
+        for snapshot in continuing:
+            self.root.add(snapshot)
+        if outgoing is not None:
+            self.root.add(outgoing)
         self.root.add(holder)
+        if changing_page:
+            self.page_mode = self.content.edit
+        elif previous_holder is not None:
+            holder.alpha = previous_holder.alpha
+            self.tweens.replace_view(previous_holder, holder)
+        self.page_holder = holder
+        if not changing_page:
+            controls.preserve_controls(self, old_tree, holder)
         controls.reattach_menu(self, view)      # a menu open over it stays, over the new card
+        holder.prepare_cache()
+        if changing_page:
+            if outgoing is not None:
+                outgoing.animate(200, "out", alpha=0.0, done=lambda: self.root.remove(outgoing))
+            self.page_frame.animate(360, "spring", x=target.x(), y=target.y(), w=target.width(), h=target.height())
+            holder.alpha = 0.0
+            holder.animate(200, "out", alpha=1.0)
+            # Both pictures are one crossfade, including under a busy GUI thread.
+            started = time.monotonic()
+            for tween in self.tweens.running:
+                if tween["view"] is outgoing or tween["view"] is holder or tween["view"] is self.page_frame:
+                    tween["t0"] = started
         self.body_scroll = self.content.body_scroll
-        self.set_css_size(CARD_W * k, view.h * k)
-        self.request_size()
         for f in self.fields:
             f.place()
         self.request_paint()
@@ -581,6 +836,10 @@ def centered(stack, view, mt=0, mb=0):
     return stack.place(row, mt, mb)
 
 
+def mode_bar(card, items):
+    return controls.ModeBar(items, size=36 if getattr(card, "panel_layout", False) else 44 if getattr(card, "panel_fit", False) else 52)
+
+
 def big_value(stack, text, state, mt=6):
     """The state, large, and how long ago it changed; the label is returned to follow a slider."""
     label = style.label("display", text, w=BODY_W, align="c")
@@ -599,15 +858,18 @@ def cards(card, stack, items):
     gap = 10
     w = (BODY_W - gap) / 2 if len(items) > 1 else min(BODY_W, 190)
     for i in range(0, len(items), 2):
-        row = View(0, 0, BODY_W, 62)
+        row_h = 50 if getattr(card, "panel_layout", False) else 54 if getattr(card, "panel_fit", False) else 62
+        row = View(0, 0, BODY_W, row_h)
         pair = items[i:i + 2]
         left = (BODY_W - (len(pair) * w + (len(pair) - 1) * gap)) / 2
         for j, (icon, title, value, options, pick) in enumerate(pair):
             current = next((v for v, lab in options if lab == value), None)
-            mc = controls.ModeCard(w, icon, title, value, options, pick, current)
+            mc = controls.ModeCard(w, icon, title, value, options, pick, current,
+                                   compact=getattr(card, "panel_fit", False))
+            mc.h = row_h
             mc.x = left + j * (w + gap)
             row.add(mc)
-        stack.place(row, 8, 8)
+        stack.place(row, 6 if getattr(card, "panel_layout", False) else 8, 8)
 
 
 def build_onoff(card, stack, tile, state):
@@ -666,7 +928,7 @@ def build_light(card, stack, tile, state):
            ("mdi:brightness6", view == "brightness", lambda: card.set_light_view("brightness"))]
     if temps and on:
         bar.append(("mdi:thermometer", view == "temp", lambda: card.set_light_view("temp")))
-    centered(stack, controls.ModeBar(bar), 4, 14)
+    centered(stack, mode_bar(card, bar), 4, 8 if getattr(card, "panel_layout", False) else 14)
     swatches = []
     if temps:
         for k in (2700, 3500, 4500, 6000):
@@ -683,9 +945,9 @@ def build_light(card, stack, tile, state):
             controls.open_colors(sw, tuple(rgb[:3]) if rgb else None,
                                  lambda c: card.call("light", "turn_on", entity, {"rgb_color": list(c)}))
     if swatches:
-        sw = controls.Swatches(BODY_W, swatches, pick)
+        sw = controls.Swatches(BODY_W, swatches, pick, size=32 if getattr(card, "panel_layout", False) else 46)
         sw.key, sw.open = "colors", False
-        stack.place(sw, 4, 14)
+        stack.place(sw, 4, 8 if getattr(card, "panel_layout", False) else 14)
     effects = attrs.get("effect_list") or []
     if effects and on:
         cards(card, stack, [("mdi:auto-fix", "特效", attrs.get("effect") or "無",
@@ -716,7 +978,7 @@ def build_fan(card, stack, tile, state):
     centered(stack, controls.TallSlider(TALL_W, card.tall, pct, 0, 100, "accent_blue", step=step,
                                         on_input=lambda v: setattr(label, "text", ("%d%%" % v) if v else render.tr("關閉")),
                                         on_commit=commit), 4, 14)
-    centered(stack, controls.ModeBar([("mdi:power", on, lambda: (card.optimistic(entity, {"state": "off" if on else "on"}),
+    centered(stack, mode_bar(card, [("mdi:power", on, lambda: (card.optimistic(entity, {"state": "off" if on else "on"}),
                                                                  card.call("fan", "toggle", entity)))]), 4, 14)
     presets = attrs.get("preset_modes") or []
     if presets:
@@ -766,19 +1028,20 @@ def build_climate(card, stack, tile, state):
     def commit(v):
         card.optimistic(entity, {"attributes": dict(attrs, temperature=v)})
         card.call("climate", "set_temperature", entity, {"temperature": v})
-    dial = controls.Dial(card.tall + 16, target, lo, hi, step, current, HVAC_LABELS.get(mode, mode),
+    dial = controls.Dial(min(BODY_W, card.tall + (44 if getattr(card, "panel_layout", False) else 16)), target, lo, hi, step, current, HVAC_LABELS.get(mode, mode),
                          None if mode == "off" else render.HVAC_COLORS.get(mode, "accent_cyan"), on_commit=commit)
     centered(stack, dial, 0, 0)
 
     def stepper(delta):
         if target is not None:
             commit(max(lo, min(hi, round((target + delta) * 10) / 10)))
-    row = View(0, 0, BODY_W, 52)
+    button_size = 36 if getattr(card, "panel_layout", False) else 44 if getattr(card, "panel_fit", False) else 52
+    row = View(0, 0, BODY_W, button_size)
     for i, (sign, delta) in enumerate((("mdi:minus", -step), ("mdi:plus", step))):
-        b = Button(x=BODY_W / 2 + (-12 - 52 if i == 0 else 12), y=0, w=52, h=52, icon=sign, icon_size=22,
+        b = Button(x=BODY_W / 2 + (-12 - button_size if i == 0 else 12), y=0, w=button_size, h=button_size, icon=sign, icon_size=22,
                    fill=None, ring="ink2", hover_fill="btn_fill", on_click=lambda e, d=delta: stepper(d))
         row.add(b)
-    stack.place(row, 0, 14)
+    stack.place(row, 0, 8 if getattr(card, "panel_layout", False) else 14)
     items = [("mdi:power" if mode == "off" else "mdi:thermostat", "模式", HVAC_LABELS.get(mode, mode),
               [(m, HVAC_LABELS.get(m, m)) for m in (attrs.get("hvac_modes") or ["off", "cool", "heat", "auto"])],
               lambda m: (card.optimistic(entity, {"state": m}),
@@ -809,7 +1072,7 @@ def build_cover(card, stack, tile, state):
                                             on_input=lambda v: setattr(label, "text", "%d%%" % v),
                                             on_commit=lambda v: card.call("cover", "set_cover_position", entity,
                                                                          {"position": int(v)})), 4, 14)
-    centered(stack, controls.ModeBar([
+    centered(stack, mode_bar(card, [
         ("mdi:arrow-up", s == "open", lambda: card.call("cover", "open_cover", entity)),
         ("mdi:stop", False, lambda: card.call("cover", "stop_cover", entity)),
         ("mdi:arrow-down", s == "closed", lambda: card.call("cover", "close_cover", entity))]), 4, 14)
@@ -824,10 +1087,10 @@ def build_media(card, stack, tile, state):
     side = card.tall - 24
     centered(stack, controls.Picture(side, side, art, card.api.get_picture, card.run_on_ui_thread), 4, 16)
     title = attrs.get("media_title") or STATE_TEXT.get("media", {}).get(s) or s
-    stack.place(style.label("headline", title, w=BODY_W, overflow="ellipsis"), 0, 2)
+    stack.place(style.label("headline", title, w=BODY_W, overflow="fade"), 0, 2)
     artist = attrs.get("media_artist") or attrs.get("app_name") or ""
     if artist:
-        stack.place(style.label("secondary", artist, w=BODY_W, overflow="ellipsis"), 0, 10)
+        stack.place(style.label("secondary", artist, w=BODY_W, overflow="fade"), 0, 10)
     if attrs.get("media_duration"):
         def seek(s):
             card.optimistic(entity, {"attributes": dict(attrs, media_position=s,
@@ -888,7 +1151,7 @@ def build_vacuum(card, stack, tile, state):
     s = state.get("state") if state else ""
     cleaning = s == "cleaning"
     big_value(stack, STATE_TEXT["vacuum"].get(s, s or "無法連線"), state)
-    centered(stack, controls.ModeBar([
+    centered(stack, mode_bar(card, [
         ("mdi:pause" if cleaning else "mdi:play", cleaning,
          lambda: card.call("vacuum", "pause" if cleaning else "start", tile["entity"])),
         ("mdi:home-import-outline", s == "returning", lambda: card.call("vacuum", "return_to_base", tile["entity"]))]),

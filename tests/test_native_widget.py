@@ -49,8 +49,9 @@ class FakeApi:
         self.calls.append(("service", domain, service, entity, extra))
         return {"ok": True}
 
-    def open_popover(self, tile_id, x, y, w, h, kind):
+    def open_popover(self, tile_id, x, y, w, h, kind, source_image=None):
         self.calls.append(("popover", tile_id, x, y, w, h, kind))
+        self.source_image = source_image
 
     def open_settings_window(self):
         self.calls.append(("settings",))
@@ -110,6 +111,44 @@ def done(win):
 
 
 class TileForms(unittest.TestCase):
+    def test_source_stays_visible_while_arming_and_outside_the_morph_cover(self):
+        from PySide6.QtCore import QRectF
+        api,win,surf=make([tile(i,"light") for i in range(4)],size="2x4")
+        try:
+            surf.prepare_transition("t0")
+            x,y,w,h=surf.rects[0]
+            px,py=round((x+w*.75)*surf.scale),round((y+h*.5)*surf.scale)
+            self.assertGreater(surf.grab().toImage().pixelColor(px,py).alpha(),0)
+            self.assertEqual(surf.backdrop_image().pixelColor(px,py).alpha(),0)
+            rect=nw._rect(surf._hwnd)
+            surf.set_transition_cover(QRectF(rect[0]+x*surf.scale,rect[1]+y*surf.scale,
+                                             w*.5*surf.scale,h*surf.scale))
+            surf.set_transition_tile("t0")
+            image=surf.grab().toImage()
+            self.assertGreater(image.pixelColor(px,py).alpha(),0)
+            left=round((x+w*.25)*surf.scale)
+            self.assertEqual(image.pixelColor(left,py).alpha(),0)
+            surf.set_transition_tile(None)
+            self.assertIsNone(surf.capture_transition_tile)
+        finally:
+            done(win)
+    def test_hidden_source_snapshot_uses_latest_state_without_showing_the_tile(self):
+        api, win, surf = make([tile(0,"switch")], size="1x1",
+                              states={"switch.e0": {"state": "off", "attributes": {}}})
+        try:
+            before = surf.transition_image("t0")
+            surf.set_transition_tile("t0")
+            surf.push_states([("switch.e0", {"state": "on", "attributes": {}})])
+            pump(40)
+            current = surf.transition_image("t0")
+            self.assertNotEqual(before, current)
+            self.assertEqual(surf.transition_tile, "t0")
+            hidden = surf.grab().toImage()
+            self.assertEqual(hidden.pixelColor(hidden.width()//2, hidden.height()//2).alpha(), 0)
+            surf.set_transition_tile(None)
+            self.assertEqual(surf.transition_image("t0"), current)
+        finally:
+            done(win)
     def test_form_by_count(self):
         for count, form in ((8, "small"), (4, "bar"), (2, "big"), (1, "big")):
             tiles = [tile(i, "light") for i in range(count)]
@@ -125,6 +164,27 @@ class TileForms(unittest.TestCase):
 
 
 class Taps(unittest.TestCase):
+    def test_bar_icon_toggles_and_text_opens_detail_with_a_source_picture(self):
+        api, win, surf = make([tile(0, "light"), tile(1, "light")], size="2x2",
+                              states={"light.e0": {"state": "off", "attributes": {}}})
+        try:
+            self.assertEqual(surf.form, "bar")
+            x, y, w, h = surf.rects[0]
+            scale = surf.scale / surf.devicePixelRatioF()
+            def click(lx, ly):
+                QTest.mouseClick(surf, Qt.LeftButton, pos=QPoint(round((x+lx)*scale), round((y+ly)*scale)))
+                pump(100)
+            click(73, h/2)
+            self.assertTrue([c for c in api.calls if c[:3] == ("service", "light", "toggle")])
+            api.calls.clear()
+            click(180, h/2)
+            self.assertTrue([c for c in api.calls if c[0] == "popover"])
+            self.assertFalse([c for c in api.calls if c[0] == "service"])
+            self.assertFalse(api.source_image.isNull())
+            self.assertEqual(surf._tile_at(x+1, y+1), -1)
+        finally:
+            done(win)
+
     def test_tap_toggles_a_light_and_shows_it_at_once(self):
         t = tile(0, "light", "light.desk")
         api, win, surf = make([t], states={"light.desk": {"state": "off", "attributes": {}}})

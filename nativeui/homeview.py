@@ -39,19 +39,19 @@ class Pill(View):
         self.measure()
 
     def _press(self, on):
-        self.zoom = 0.96 if on else 1.0
-        self.changed()
+        self.animate(140 if on else 240, "spring", zoom=0.97 if on else 1.0)
         return True
 
     def measure(self):
-        tw = max(ui.text_width(render.tr(self.cat["title"]), ui.font(23, QFont.Bold)),
-                 ui.text_width(render.tr(self.info["sub"]), ui.font(19, QFont.Medium)))
+        tw = max(ui.text_width(render.tr(self.cat["title"]), style.font("home_pill")),
+                 ui.text_width(render.tr(self.info["sub"]), style.font("home_pill_sub")),
+                 max(ui.text_width(render.tr(text), style.font("home_pill_sub")) for text in
+                     ("全部已鎖上", "99 個未鎖上", "99 個播放中", "99 個開著")))
         self.w = 9 + 52 + 14 + tw + 30
 
     def set_info(self, info, active):
         if info != self.info or active != self.active:
             self.info, self.active = info, active
-            self.measure()
             self.changed()
 
     def paint(self, p):
@@ -73,18 +73,17 @@ class Pill(View):
         render.draw_icon(p, self.info.get("icon") or self.cat["icon"], (tint.red(), tint.green(), tint.blue(), 1.0),
                          QRectF(9 + 12, 9 + 12, 28, 28))
         c1 = t["on_text1"] if self.active else t["off_text1"]
-        title_f, sub_f = ui.font(23, QFont.Bold), ui.font(19, QFont.Medium)
-        tm, sm = QFontMetricsF(title_f), QFontMetricsF(sub_f)
-        th, sh = 23 * 1.15, 19 * 1.2
+        title_f, sub_f = style.font("home_pill"), style.font("home_pill_sub")
+        x = 75
+        th, sh = 27, 23
         top = (self.h - th - sh) / 2
-        p.setBrush(ui.resolve(self.scene, c1))
-        p.drawPath(render.text_path(QPointF(0, 0), title_f, render.tr(self.cat["title"]), 9 + 52 + 14,
-                                    top + (th - tm.height() / 10) / 2 + tm.ascent() / 10))
-        col = ui.resolve(self.scene, c1)
-        col.setAlphaF(0.8)
-        p.setBrush(col)
-        p.drawPath(render.text_path(QPointF(0, 0), sub_f, render.tr(self.info["sub"]), 9 + 52 + 14,
-                                    top + th + (sh - sm.height() / 10) / 2 + sm.ascent() / 10))
+        for text, f, y, height, color in (
+                (self.cat["title"], title_f, top, th, ui.resolve(self.scene, c1)),
+                (self.info["sub"], sub_f, top + th, sh, ui.resolve(self.scene, "ink2"))):
+            render.draw_text_fade(p, render.tr(text), f, color,
+                                  QRectF(x, y, self.w - x - 30, height), False)
+
+
 
 
 class Chip(View):
@@ -97,8 +96,9 @@ class Chip(View):
         self.text, self.key, self.active, self.off, self.add = text, key, active, off, add
         self.on_x = None
         self.on_click = lambda e: (self.on_x(key) if self.x_button and self.hit_x(e.x, e.y) and self.on_x else on_click(key))
-        self.on_press = lambda e: True
-        self.w = ui.text_width(render.tr(text), ui.font(22, QFont.DemiBold)) + 44
+        self.on_press = lambda e: self._press(True)
+        self.on_release = lambda e: self._press(False)
+        self.w = min(HOME_SPAN - 52, ui.text_width(render.tr(text), style.font("home_chip")) + 44)
         self.x_button = x_button
         if x_button:
             self.w += 12 + 40
@@ -117,17 +117,27 @@ class Chip(View):
         # On the chosen one (filled with the ink) the words are solid white, or near black in the dark theme:
         # in the panel's own tint they looked cut out of the capsule.
         color = ("#ffffff" if self.scene.theme == "light" else "#111216") if self.active else "ink1"
-        f = ui.font(22, QFont.DemiBold)
-        fm = QFontMetricsF(f)
-        p.setPen(Qt.NoPen)
-        p.setBrush(ui.resolve(self.scene, color))
-        base = (self.h - fm.height() / 10) / 2 + fm.ascent() / 10
-        p.drawPath(render.text_path(QPointF(0, 0), f, render.tr(self.text), 22, base))
+        f = style.font("home_chip")
+        render.draw_text_fade(p, render.tr(self.text), f, ui.resolve(self.scene, color),
+                              QRectF(22, 0, self.w - 44 - (52 if self.x_button else 0), self.h), False)
         if self.x_button:
             style.remove_badge(p, QRectF(self.w - 22 - 40, 8, 40, 30), shadow=False)
 
+    def _press(self, on):
+        self.animate(140 if on else 240, "spring", zoom=0.97 if on else 1.0)
+        return True
+
     def hit_x(self, x, y):
         return self.x_button and self.w - 62 <= x <= self.w - 22 and 8 <= y <= 38
+
+
+class MembershipButton(Button):
+    """The same remove mark used by every editable tile."""
+    def paint(self, p):
+        if self.active:
+            style.remove_badge(p, QRectF(0, 0, self.w, self.h))
+        else:
+            super().paint(p)
 
 
 class HomeView(EditMixin, View):
@@ -138,6 +148,7 @@ class HomeView(EditMixin, View):
         self.m.panel = panel.prefs.get("panel") or self.m.panel
         self.m.states = panel.states
         self.pills = {}
+        self.pill_widths = {}
         self.sig = ""
         self.loading = False
         self.data_loaded = bool(self.m.entities)
@@ -234,8 +245,16 @@ class HomeView(EditMixin, View):
         if cat is not None:
             self.cat_scroll_keep = cat.offset
 
-    def build(self):
+    def build(self, transition=False):
+        old_main = getattr(self, "main", None)
+        old_cat = getattr(self, "cat_view", None)
+        old_tiles = {v.tile["id"]: v for v in old_cat.content.children if isinstance(v, TileView)} if old_cat else {}
+        old_body = getattr(self, "body", None)
+        old_sheet = getattr(self, "sheet_view", None)
+        self.sheet_view = None
         self.keep_scrolls()
+        summary_offset = getattr(getattr(self, "summary", None), "offset", 0)
+        rooms_offset = getattr(getattr(self, "rooms_row", None), "offset", 0)
         self.clear()
         self.pills = {}
         self.status_labels = []
@@ -258,6 +277,7 @@ class HomeView(EditMixin, View):
         self.summary = ScrollView(PAD, PAD + 66, W - 2 * PAD, 70, horizontal=True, fade=44)
         self.add(self.summary)
         self.build_summary()
+        self.summary.scroll_to(summary_offset)
         # the stage: rooms in front, a capsule's devices behind
         self.stage = View(2, STAGE_Y, W - 4, STAGE_H)
         self.stage.clip = True
@@ -266,15 +286,43 @@ class HomeView(EditMixin, View):
         self.main = View(0, 0, W - 4, STAGE_H)
         self.stage.add(self.main)
         self.build_rooms_row(names, hidden)
+        self.rooms_row.scroll_to(rooms_offset)
         self.build_body()
         self.cat_view = ScrollView(0, 0, W - 4, STAGE_H, fade=36)
         self.cat_view.on_press = lambda e: True
         self.cat_view.on_click = lambda e: self.cat_background_click()
         self.stage.add(self.cat_view)
-        self.build_category()
-        self.apply_category_state(animate=False)
+        if transition and not m.category and old_cat is not None:
+            self.stage.remove(self.cat_view)
+            self.cat_view = old_cat
+            self.stage.add(old_cat)
+        else:
+            self.build_category()
+        if old_main is None:
+            self.apply_category_state(animate=False)
+        else:
+            for old, new in ((old_main, self.main), (old_cat, self.cat_view)):
+                if old is not None:
+                    new.alpha, new.zoom, new.blur = old.alpha, old.zoom, old.blur
+                    new.zoom_origin = old.zoom_origin
+                    self.panel.tweens.replace_view(old, new)
+            self.main.no_hit = bool(m.category)
+            self.cat_view.no_hit = not bool(m.category)
+        for tile in self.cat_view.content.children:
+            old = old_tiles.get(tile.tile["id"]) if isinstance(tile, TileView) else None
+            if old is not None and old is not tile:
+                tile.alpha, tile.dy = old.alpha, old.dy
+                self.panel.tweens.replace_view(old, tile)
+        if old_body is not None:
+            self.body.alpha = old_body.alpha
+            self.panel.tweens.replace_view(old_body, self.body)
         if m.sheet:
             self.build_sheet()
+            if old_sheet is not None:
+                self.sheet_view.alpha, self.sheet_view.zoom = old_sheet.alpha, old_sheet.zoom
+                self.panel.tweens.replace_view(old_sheet, self.sheet_view)
+        self.stage.h = self.main.h = self.cat_view.h = self.h - STAGE_Y - PAD
+        self.body.h = self.stage.h - 74
         self.refresh_status()
         self.panel.request_paint()
 
@@ -284,12 +332,12 @@ class HomeView(EditMixin, View):
         self.main.interactive = False
         self.cat_view.interactive = False
         if on:
-            self.main.animate(ms, "out", alpha=0.0, zoom=0.94, blur=10.0)
+            self.main.animate(ms, "spring", alpha=0.0, zoom=0.98, blur=0.0)
             self.cat_view.visible = True
-            self.cat_view.animate(ms, "out", alpha=1.0, zoom=1.0, blur=0.0)
+            self.cat_view.animate(ms, "spring", alpha=1.0, zoom=1.0, blur=0.0)
         else:
-            self.main.animate(ms, "out", alpha=1.0, zoom=1.0, blur=0.0)
-            self.cat_view.animate(ms, "out", alpha=0.0, zoom=1.06, blur=10.0)
+            self.main.animate(ms, "spring", alpha=1.0, zoom=1.0, blur=0.0)
+            self.cat_view.animate(ms, "spring", alpha=0.0, zoom=1.0, blur=0.0)
         self.main.no_hit = on
         self.cat_view.no_hit = not on
 
@@ -307,6 +355,7 @@ class HomeView(EditMixin, View):
         self.summary.clear()
         for cat, members, info in self.m.visible_categories():
             pill = Pill(cat, info, self.toggle_category)
+            pill.w = self.pill_widths.setdefault(cat["id"], pill.w)
             pill.set_info(info, self.m.category == cat["id"])
             self.pills[cat["id"]] = pill
             self.summary.add(pill)
@@ -399,9 +448,11 @@ class HomeView(EditMixin, View):
         """A room's heading: its name, its status, and when editing a button to switch it off or on."""
         m = self.m
         row = View(0, 0, HOME_SPAN, 38)
-        name = style.label("home_room", m.room_label(key), x=8, y=0, lh=1.3)
+        name = style.label("home_room", m.room_label(key), x=8, y=0,
+                           w=min(HOME_SPAN * 0.55, ui.text_width(render.tr(m.room_label(key)), style.font("home_room")) + 2),
+                           overflow="fade", lh=1.3)
         row.add(name)
-        status = style.label("home_status", "", x=8 + name.w + 14, y=4, lh=1.3)
+        status = style.label("home_status", "", x=8 + name.w + 14, y=4, w=HOME_SPAN - name.w - 30, overflow="fade", lh=1.3)
         self.status_labels.append((status, key))
         row.add(status)
         row.name_label, row.key = name, key
@@ -410,6 +461,7 @@ class HomeView(EditMixin, View):
             btn = Button("顯示房間" if off else "隱藏房間", size=18, weight=QFont.Bold, h=38, pad=20,
                          on_click=lambda e, key=key, off=off: self.toggle_room_hidden(key, off))
             btn.x = HOME_SPAN - btn.w
+            status.w = max(0, btn.x - status.x - 10)
             row.add(btn)
             if key != OTHER_ROOM:
                 self.attach_room_reorder_section(row)
@@ -500,7 +552,8 @@ class HomeView(EditMixin, View):
         tv.on_press = lambda ev: True
         tv.on_click = lambda ev: True
         tv.alpha = 1.0 if chosen else 0.4
-        btn = Button("−" if chosen else "＋", size=17, weight=QFont.Bold, w=34, h=34, fill="accent_red" if chosen else "accent_green",
+        btn = MembershipButton(icon="mdi:close" if chosen else "mdi:plus", icon_size=18, active=chosen,
+                               w=34, h=34, fill="accent_red" if chosen else "accent_green",
                      hover_fill="accent_red" if chosen else "accent_green", color="white",
                      on_click=lambda ev, e=e, chosen=chosen: self.toggle_cat_member(e, chosen))
         btn.fill = (255, 91, 74, 0.96) if chosen else (52, 199, 89, 0.96)
@@ -516,18 +569,17 @@ class HomeView(EditMixin, View):
         cat = next((c for c in CATEGORIES if c["id"] == m.category), None)
         if cat is None:
             return
-        title = cat["title"] + ("　" + m.room_label(m.room) if m.room else "")
-        t = style.label("home_category", render.tr(title), x=12 + 8, y=6 + 4, lh=1.3, spacing=-0.3)
+        title = cat["title"]
+        t = style.label("home_category", render.tr(title), x=20, y=10, w=HOME_SPAN - 16, overflow="fade", lh=1.3, spacing=-0.3)
         cv.add(t)
         if m.cat_editing:
-            cv.add(style.label("home_hint", "按 − 不顯示該配件，按 ＋ 加回", x=12 + 8 + t.w + 16, y=6 + 12, lh=1.3))
+            cv.add(style.label("home_hint", "按 × 不顯示該配件，按 ＋ 加回", x=20, y=54, w=HOME_SPAN - 16, overflow="fade", lh=1.3))
         everyone = [e for e in m.category_all(cat) if (not m.room or m.room_key(e.get("area")) == m.room)] \
             if m.cat_editing else m.category_members(cat)
         groups = {}
         for e in everyone:
             groups.setdefault(m.room_key(e.get("area")), []).append(e)
-        y = 6 + 4 + 32 * 1.3 + 16
-        n = 0
+        y = 96 if m.cat_editing else 68
         for key in sorted(groups, key=m.room_sort_key):
             title = style.label("home_room", m.room_label(key), x=12 + 8, y=y, lh=1.3)
             cv.add(title)
@@ -539,15 +591,11 @@ class HomeView(EditMixin, View):
                 r = layout[e["entity_id"]]
                 tv = self.category_node(e)
                 tv.x, tv.y = 12 + r["x"] * (TILE_W + GAP), y + r["y"] * (TILE_H + GAP)
-                tv.alpha, tv.zoom = 0.0, 0.82
-                tv.pop_index = n
-                n += 1
                 cv.add(tv)
                 rows = max(rows, r["y"] + r["h"])
             y += rows * (TILE_H + GAP) - GAP + 18
         cv.content.w, cv.content.h = W - 4, y
         cv.scroll_to(self.cat_scroll_keep)
-        self.pop_in()
 
     def layout_for_dense(self, entities):
         """grid-auto-flow: dense: each tile in the first free place, in order, ignoring saved places."""
@@ -558,19 +606,12 @@ class HomeView(EditMixin, View):
             items.append({"id": e["entity_id"], "w": w, "h": h, "order": i, "x": None, "y": None})
         return home_layout(items)
 
-    def pop_in(self):
-        if not self.m.category:
-            return
-        for v in self.cat_view.content.children:
-            i = getattr(v, "pop_index", None)
-            if i is None:
-                continue
-            target = 0.4 if (self.m.cat_editing and not self.m.category_chosen(v.entity)) else 1.0
-            QTimer.singleShot(60 + i * 28, lambda v=v, target=target: v.animate(360, "back", alpha=target, zoom=1.0))
-
     def toggle_category(self, cat_id):
         m = self.m
+        previous = m.category
         m.cat_editing = False
+        source = self.pills.get(cat_id)
+        origin = ((source.x - self.summary.offset + source.w / 2) / self.stage.w, 0) if source else (0.5, 0)
         if m.category == cat_id:
             m.category = None
         else:
@@ -578,8 +619,20 @@ class HomeView(EditMixin, View):
             m.editing = False
             m.sheet = False
         self.cat_scroll_keep = 0.0
-        self.build()
+        self.build(transition=True)
+        self.cat_view.zoom_origin = origin
         self.apply_category_state(animate=True)
+        tiles = [v for v in self.cat_view.content.children if isinstance(v, TileView)]
+        for index, tile in enumerate(tiles):
+            if tile.y - self.cat_view.offset > self.cat_view.h or tile.y + tile.h < self.cat_view.offset:
+                continue
+            if m.category:
+                fresh = self.cat_view.alpha == 0 or previous is not None
+                if fresh:
+                    tile.alpha, tile.dy = 0.0, 120.0
+                tile.animate(420, "spring", alpha=1.0, dy=0.0, delay=min(index * 32, 128) if fresh else 0)
+            else:
+                tile.stop_animation()
 
     def cat_background_click(self):
         """The empty space around a capsule's devices: leaves editing, or the capsule."""
@@ -612,6 +665,8 @@ class HomeView(EditMixin, View):
 
     def chip_click(self, key):
         m = self.m
+        old_body = self.body
+        changing = key != m.room and not m.editing
         if m.editing and key != "":
             s = m.hidden_chips()
             if key in s:
@@ -622,8 +677,25 @@ class HomeView(EditMixin, View):
             self.persist()
         else:
             m.room = key
+        self.body_scroll_keep = 0
+        if getattr(self, "body", None) is not None:
+            self.body.scroll_to(0)
         self.build()
         self.apply_category_state(animate=False)
+        if changing:
+            self.body.animate(0, alpha=1.0)
+            old_body.no_hit = True
+            self.main.add(old_body)
+            old_body.animate(200, "spring", alpha=0.0, done=lambda: self.main.remove(old_body))
+            tiles = [child for section in self.sections for child in getattr(section, "grid", View()).children
+                     if isinstance(child, TileView)]
+            _, top, k = self.body.in_scene()
+            for index, tile in enumerate(tiles):
+                _, y, _ = tile.in_scene()
+                if y > top + self.body.h * k or y + tile.h * k < top:
+                    continue
+                tile.alpha, tile.dy = 0.0, 120.0
+                tile.animate(420, "spring", alpha=1.0, dy=0.0, delay=min(index * 32, 128))
 
     def toggle_room_hidden(self, key, off):
         if key == OTHER_ROOM:
@@ -671,13 +743,25 @@ class HomeView(EditMixin, View):
     # -- the add sheet: devices that were removed -----------------------------------------------------------------------------------
     def open_sheet(self):
         self.m.sheet = True
+        old = getattr(self, "sheet_view", None)
         self.build()
         self.apply_category_state(animate=False)
+        self.sheet_view.zoom_origin = (0.85, 0)
+        if old is None:
+            self.sheet_view.alpha, self.sheet_view.zoom = 0.0, 0.98
+        self.sheet_view.animate(320, "spring", alpha=1.0, zoom=1.0)
 
     def close_sheet(self):
         self.m.sheet = False
-        self.build()
-        self.apply_category_state(animate=False)
+        sheet = self.sheet_view
+        if sheet is None:
+            return
+        sheet.no_hit = True
+        def gone():
+            self.remove(sheet)
+            if self.sheet_view is sheet:
+                self.sheet_view = None
+        sheet.animate(320, "spring", alpha=0.0, zoom=0.98, done=gone)
 
     def build_sheet(self):
         m = self.m
@@ -733,7 +817,7 @@ class HomeView(EditMixin, View):
 
         def paint(p):
             base(row, p)
-            f1, f2 = ui.font(23, QFont.DemiBold), ui.font(19, QFont.Medium)
+            f1, f2 = ui.font(23, QFont.DemiBold), style.font("home_pill_sub")
             m1, m2 = QFontMetricsF(f1), QFontMetricsF(f2)
             p.setPen(Qt.NoPen)
             p.setBrush(ui.resolve(row.scene, "ink1"))

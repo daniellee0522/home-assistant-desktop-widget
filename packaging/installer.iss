@@ -44,6 +44,7 @@ SetupMutex=HAWidgetsSetup
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
+Source: "stop_running_widgets.ps1"; Flags: dontcopy
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "ha_widgets_config.json,widget.log,hang_report.txt"
 
 [InstallDelete]
@@ -70,6 +71,22 @@ end;
 function ShouldLaunch: Boolean;
 begin
   Result := (not TestInstall) and (ExpandConstant('{param:nolaunch|0}') <> '1');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+  Shell, Parameters: String;
+begin
+  Result := '';
+  if TestInstall then exit;
+  { Restart Manager only sees files in the destination; portable copies use other paths. }
+  ExtractTemporaryFile('stop_running_widgets.ps1');
+  Shell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\stop_running_widgets.ps1') + '"';
+  if (not Exec(Shell, Parameters, '', SW_HIDE, ewWaitUntilTerminated, ExitCode)) or (ExitCode <> 0) then
+    Result := 'Please quit older HA Widgets copies before upgrading.';
 end;
 
 function ExistingStartupShortcut: Boolean;

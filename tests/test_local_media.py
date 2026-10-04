@@ -1,5 +1,6 @@
 """This computer's player (local_media.py) and how the Api routes to it."""
 import ast
+import asyncio
 import datetime
 import json
 import os
@@ -7,7 +8,8 @@ import sys
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -45,6 +47,114 @@ class Changes(unittest.TestCase):
             "media_title": "B", "media_position": 15, "media_position_updated_at": at(0)}}))
         self.assertTrue(self.lm._changed({"state": "paused", "attributes": {
             "media_title": "A", "media_position": 15, "media_position_updated_at": at(0)}}))
+
+
+class Transitions(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        with patch.object(local_media, 'AVAILABLE', False):
+            self.lm = local_media.LocalMedia(Mock())
+        self.clock = Mock(return_value=10.0)
+        clock_patch = patch.object(local_media, 'time', SimpleNamespace(monotonic=self.clock))
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        states_patch = patch.dict(local_media._STATES, {'playing': 'playing', 'paused': 'paused', 'idle': 'idle'})
+        states_patch.start()
+        self.addCleanup(states_patch.stop)
+        self.lm._thumbnail = AsyncMock(return_value=b'new cover')
+        self.session = Mock()
+        self.session.source_app_user_model_id = 'chrome.exe'
+        self.props = Mock(title='Short A', artist='Channel', thumbnail=Mock())
+        self.session.try_get_media_properties_async = AsyncMock(return_value=self.props)
+        self.session.get_playback_info.return_value.playback_status = 'playing'
+        self.session.get_timeline_properties.return_value = Mock(
+            end_time=datetime.timedelta(seconds=30), start_time=datetime.timedelta(),
+            position=datetime.timedelta(seconds=2), last_updated_time=datetime.datetime.now(datetime.timezone.utc))
+        self.lm._session = AsyncMock(return_value=self.session)
+
+    async def test_short_switch_keeps_track_and_cover_until_next_track(self):
+        await self.lm._read()
+        first = self.lm._last
+        self.lm.on_state.reset_mock()
+        self.props.title = ''
+        self.session.get_playback_info.return_value.playback_status = 'idle'
+        self.lm._props_dirty = True
+        self.lm._thumbnail.reset_mock()
+        await self.lm._read()
+        self.clock.return_value = 10.15
+        self.lm._session.return_value = None
+        await self.lm._read()
+        self.assertIs(self.lm._last, first)
+        self.assertEqual(self.lm.art, b'new cover')
+        self.lm._thumbnail.assert_not_awaited()
+        self.lm.on_state.assert_not_called()
+        self.lm._session.return_value = self.session
+        self.props.title = 'Short B'
+        self.session.get_playback_info.return_value.playback_status = 'playing'
+        await self.lm._read()
+        self.assertEqual(self.lm._last['attributes']['media_title'], 'Short B')
+        self.lm.on_state.assert_called_once()
+        self.assertIsNone(self.lm._transition_until)
+
+    async def test_real_stop_expires_even_when_gap_changes_shape(self):
+        await self.lm._read()
+        self.lm.on_state.reset_mock()
+        self.props.title = ''
+        await self.lm._read()
+        deadline = self.lm._transition_until
+        self.lm._session.return_value = None
+        self.clock.return_value = deadline - 0.01
+        await self.lm._read()
+        self.lm.on_state.assert_not_called()
+        self.clock.return_value = deadline
+        await self.lm._read()
+        self.assertEqual(self.lm._last['state'], 'off')
+        self.assertIsNone(self.lm.art)
+        self.lm.on_state.assert_called_once()
+
+    async def test_pause_and_initial_empty_state_are_immediate(self):
+        self.lm._session.return_value = None
+        await self.lm._read()
+        self.assertEqual(self.lm._last['state'], 'off')
+        self.lm._session.return_value = self.session
+        await self.lm._read()
+        self.lm.on_state.reset_mock()
+        self.session.get_playback_info.return_value.playback_status = 'paused'
+        await self.lm._read()
+        self.assertEqual(self.lm._last['state'], 'paused')
+        self.lm.on_state.assert_called_once()
+
+    async def test_empty_metadata_while_playing_is_bounded_and_next_gap_gets_new_deadline(self):
+        await self.lm._read()
+        self.props.title = ''
+        await self.lm._read()
+        self.clock.return_value = 10.3
+        await self.lm._read()
+        self.assertEqual(self.lm._last['attributes']['media_title'], '')
+        self.props.title = 'Short B'
+        await self.lm._read()
+        self.props.title = ''
+        self.clock.return_value = 12.0
+        await self.lm._read()
+        self.assertEqual(self.lm._transition_until, 12.3)
+        self.assertEqual(self.lm._last['attributes']['media_title'], 'Short B')
+
+    async def test_transition_retries_promptly_and_keeps_events_arriving_during_read(self):
+        self.lm.active = True
+
+        async def read():
+            self.lm._transition_until = 10.3
+            self.lm._wake_event.set()  # Windows posts another change while reading properties.
+
+        async def wait(awaitable, timeout):
+            self.assertEqual(timeout, local_media.TRANSITION_POLL_S)
+            self.assertTrue(self.lm._wake_event.is_set())
+            await awaitable
+            raise asyncio.CancelledError
+
+        self.lm._read = read
+        with patch.object(local_media.asyncio, 'wait_for', side_effect=wait):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.lm._main()
 
 
 class Routing(unittest.TestCase):

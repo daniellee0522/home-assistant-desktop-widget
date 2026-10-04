@@ -14,6 +14,7 @@ from ctypes import wintypes
 
 import pystray
 from PIL import Image, ImageDraw, ImageFont
+from app_version import running_version
 
 # Segoe Fluent Icons (Windows 11), then Segoe MDL2 Assets (Windows 10).
 # Same codepoint for "Home" in both.
@@ -128,7 +129,9 @@ def _follow_taskbar_theme(icon):
 
 def build_tray_icon(on_activate, on_toggle_visibility, on_open_settings,
                     on_toggle_theme, on_refresh, on_quit):
+    version = running_version()
     menu = pystray.Menu(
+        pystray.MenuItem("HA Widgets " + version, None, enabled=False),
         # Invisible default item: what a left click runs (the tray panel).
         pystray.MenuItem("", on_activate, default=True, visible=False),
         pystray.MenuItem("Show / Hide on desktop", on_toggle_visibility),
@@ -138,6 +141,6 @@ def build_tray_icon(on_activate, on_toggle_visibility, on_open_settings,
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
     )
-    icon = pystray.Icon("ha_widgets", _make_image(), "HA Widgets", menu)
+    icon = pystray.Icon("ha_widgets", _make_image(), "HA Widgets " + version, menu)
     _follow_taskbar_theme(icon)
     return icon

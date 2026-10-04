@@ -16,8 +16,8 @@ import time
 import traceback
 from ctypes import wintypes
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPixmap
+from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRectF, Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QMenu, QWidget
 
 import qtshell
@@ -312,12 +312,84 @@ class _Surface(GlassMixin, QWidget):
         return [(round(x * s), round((y - off) * s), round(w * s), round(h * s), round(self.tcol["radius_tile"] * s))
                 for x, y, w, h in self.rects if 0 <= y - off and y - off + h <= H]
 
+    def set_transition_tile(self, tile_id=None):
+        self.transition_tile = tile_id
+        if tile_id is None:
+            self.capture_transition_tile = None
+            self.transition_cover = None
+        self.repaint()
+
+    def prepare_transition(self, tile_id):
+        self.capture_transition_tile = tile_id
+
+    def set_transition_cover(self, rect):
+        if rect != getattr(self, "transition_cover", None):
+            self.transition_cover = rect
+            self.update()
+
+    def _tile_path(self, tile_id):
+        index = next((i for i,t in enumerate(self.tiles) if t["id"] == tile_id), -1)
+        if index < 0 or index >= len(self.rects):
+            return None
+        x,y,w,h = self.rects[index]
+        ratio = self.scale/self.dpi
+        return render.squircle(x*ratio, (y-self.scroll)*ratio, w*ratio, h*ratio,
+                               self.tcol["radius_tile"]*ratio)
+
+    def _paint_image(self, hidden_tile=None):
+        image = QImage(self.pw,self.ph,QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        image.setDevicePixelRatio(self.dpi)
+        painter = QPainter(image)
+        hole = self._tile_path(hidden_tile)
+        if hole is not None:
+            outer = QPainterPath()
+            outer.addRect(QRectF(0,0,self.pw/self.dpi,self.ph/self.dpi))
+            painter.setClipPath(outer.subtracted(hole))
+        self._paint_contents(painter)
+        painter.end()
+        return image
+
+    def backdrop_image(self):
+        """Capture without the lifted tile, while the visible source can stay in place."""
+        return self._paint_image(getattr(self,"capture_transition_tile",None))
+
+    def transition_image(self, tile_id):
+        """The live source tile, rendered offscreen even while its on-screen copy is hidden."""
+        index = next((i for i, tile in enumerate(self.tiles) if tile["id"] == tile_id), -1)
+        if index < 0 or index >= len(self.rects):
+            return None
+        x, y, w, h = self.rects[index]
+        self.overlay = self.overlay_dim = None
+        image = self._paint_image()
+        return image.copy(round(x*self.scale), round((y-self.scroll)*self.scale),
+                          round(w*self.scale), round(h*self.scale))
+
     def paintEvent(self, event):
+        p = QPainter(self)
+        p.scale(self.dpi/(self.devicePixelRatioF() or 1), self.dpi/(self.devicePixelRatioF() or 1))
+        tile_id = getattr(self, "transition_tile", None)
+        hole = self._tile_path(tile_id)
+        if hole is not None:
+            outer = QPainterPath()
+            outer.addRect(QRectF(0, 0, self.pw/self.dpi, self.ph/self.dpi))
+            cover = getattr(self,"transition_cover",None)
+            source_rect = _rect(self._hwnd) if cover is not None else None
+            if source_rect:
+                covered = render.squircle((cover.x()-source_rect[0])/self.dpi,
+                                           (cover.y()-source_rect[1])/self.dpi,
+                                           cover.width()/self.dpi,cover.height()/self.dpi,
+                                           self.tcol["radius_tile"]*self.scale/self.dpi)
+                hole = hole.intersected(covered)
+            p.setClipPath(outer.subtracted(hole))
+        self._paint_contents(p)
+        p.end()
+
+    def _paint_contents(self, p):
         if self.overlay is None:
             self.overlay = self._draw(False)
         if self.dim_t > 0 and self.overlay_dim is None:
             self.overlay_dim = self._draw(True)
-        p = QPainter(self)
         if self.glass is not None and not self.system_glass:
             p.drawImage(0, 0, self.glass)
         if self.dim_t <= 0:
@@ -342,7 +414,6 @@ class _Surface(GlassMixin, QWidget):
             p.drawImage(0, 0, self.mix)
         if self.wkind == "clock":
             self._paint_ticks(p)
-        p.end()
 
     def _paint_ticks(self, p):
         now = datetime.datetime.now()
@@ -489,7 +560,8 @@ class _Surface(GlassMixin, QWidget):
     def _tile_at(self, x, y):
         y += self.scroll
         for i, (tx, ty, tw, th) in enumerate(self.rects):
-            if tx <= x < tx + tw and ty <= y < ty + th:
+            if tx <= x < tx + tw and ty <= y < ty + th and \
+                    render.squircle(tx, ty, tw, th, self.tcol["radius_tile"]).contains(QPointF(x, y)):
                 return i
         return -1
 
@@ -638,7 +710,14 @@ class _Surface(GlassMixin, QWidget):
             return
         if self._tile_at(x, y) != i:
             return                                # let go somewhere else: cancelled
+        if self.form == "bar":
+            tx, ty, tw, th = self.rects[i]
+            if not render.bar_icon_rect(tw, th).contains(QPointF(x - tx, y + self.scroll - ty)):
+                self.facade.popover(tile)
+                return
         if render.is_readonly(tile["domain"]):
+            if self.form == "bar":
+                self.facade.popover(tile)
             return
         self.facade.quick_action(tile, i)
 
@@ -909,8 +988,12 @@ class NativeWidget:
             (w, h), x, y = render.widget_size(surf.size_key), 0, surf.scroll
         sx = rect[0] + round(x * surf.scale)
         sy = rect[1] + round((y - surf.scroll) * surf.scale)
+        source_image = surf.transition_image(tile["id"])
+        if source_image is None:
+            source_image = surf.grab().toImage().copy(round(x * surf.scale), round((y - surf.scroll) * surf.scale),
+                                                    round(w * surf.scale), round(h * surf.scale))
         threading.Thread(target=self.api.open_popover, args=(
-            tile["id"], sx, sy, round(w * surf.scale), round(h * surf.scale), self.api._widget_kind(self.widget_id)),
+            tile["id"], sx, sy, round(w * surf.scale), round(h * surf.scale), self.api._widget_kind(self.widget_id), source_image),
             daemon=True).start()
 
     def quick_action(self, tile, index):

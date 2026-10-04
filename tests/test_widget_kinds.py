@@ -151,7 +151,10 @@ class OnTheDesktop(unittest.TestCase):
                                                "tiles": [T("scene.home", "scene")]})["kind"], "tiles")
         api, win, surf = make([T("scene.home", "scene", "回家"), T("light.a", "light")], "tiles", "2x2")
         self.assertEqual(len(surf.rects), 2)
-        QTest.mouseClick(surf, Qt.LeftButton, pos=TW.centre(surf, 0))
+        from PySide6.QtCore import QPoint
+        x, y, w, h = surf.rects[0]
+        s = surf.scale / surf.devicePixelRatioF()
+        QTest.mouseClick(surf, Qt.LeftButton, pos=QPoint(round((x + 73) * s), round((y + h / 2) * s)))
         TW.pump(150)
         self.assertTrue([c for c in api.calls if c[0] == "service" and c[3] == "scene.home"])
         TW.done(win)

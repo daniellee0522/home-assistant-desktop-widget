@@ -3,6 +3,7 @@ import multiprocessing
 import multiprocessing.spawn
 from pathlib import Path
 import sys
+import subprocess
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -33,6 +34,14 @@ def main():
         assert worker._process is not None and worker._process.is_alive(), 'Packaged worker did not start'
         assert frame is None or len(frame) == 16 * 16 * 4
         print('PASS: packaged EXE imported its capture worker and completed a native request.')
+        if '--stop-test' in sys.argv:
+            subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',
+                            '-ExecutionPolicy', 'Bypass', '-File',
+                            str(Path(__file__).with_name('stop_running_widgets.ps1')),
+                            '-TestRoot', str(executable.parent)], check=True)
+            worker._process.join(8)
+            assert not worker._process.is_alive(), 'Verified packaged process remained running'
+            print('PASS: upgrade helper stopped only the isolated packaged build.')
     finally:
         worker.close()
         del sys.frozen
