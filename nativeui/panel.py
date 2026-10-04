@@ -11,7 +11,7 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QCursor, QImage, QPainter
 
-from . import render, screens
+from . import render, screens, ui
 from .actions import TileActions
 from . import controls, style
 from .detail import CARD_W, DetailContent
@@ -52,6 +52,7 @@ class PanelScene(OverlayScene):
         self.tiles_views = []
         self.grid_scroll = None
         self._bg_made = None                 # (what it was made from, the picture): see make_bg
+        self._card_picture = None
         self.arm_event = None
         self.hold_timer = QTimer(self)
         self.hold_timer.setSingleShot(True)
@@ -112,7 +113,19 @@ class PanelScene(OverlayScene):
         return self.t["radius_panel"]
 
     def paint_card(self, p):
-        render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme)
+        key = (self.pw, self.ph, self.scale, self.css_w, self.css_h, self.theme, self.style, id(self.t))
+        if self._card_picture is None or self._card_picture[0] != key:
+            image = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+            painter.scale(self.scale, self.scale)
+            try:
+                render.draw_card_bg(painter, self.css_w, self.css_h, self.t, self.style, self.theme)
+            finally:
+                painter.end()
+            self._card_picture = (key, image)
+        p.drawImage(QRectF(0, 0, self.pw / self.scale, self.ph / self.scale), self._card_picture[1])
 
     # -- states -----------------------------------------------------------------------------------------
     def _load_states(self):
@@ -351,7 +364,7 @@ class PanelScene(OverlayScene):
         overlay.interactive = True                # the empty space around it goes back
         overlay.on_press = lambda e: True
         overlay.on_click = lambda e: self.close_detail()
-        holder = View((w - CARD_W * k) / 2, m, CARD_W, content.h)
+        holder = ui.CachedView((w - CARD_W * k) / 2, m, CARD_W, content.h)
         holder.scale = k
         holder.interactive = True                 # but not the empty space inside it, nor a click that a
         holder.on_press = lambda e: True          # control in it (a slider) leaves unhandled
@@ -379,7 +392,7 @@ class PanelScene(OverlayScene):
     def detail_background_click(self, event):
         target = self.press_view
         while target is not None and target is not self.detail_view:
-            if target.interactive and type(target) is not View and not isinstance(target, ScrollView):
+            if target.interactive and type(target) not in (View, ui.CachedView) and not isinstance(target, ScrollView):
                 return True
             target = target.parent
         self.close_detail()

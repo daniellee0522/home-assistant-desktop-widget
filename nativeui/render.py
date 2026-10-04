@@ -10,6 +10,7 @@ import mmap
 import os
 import re
 import sys
+from functools import lru_cache
 
 from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
@@ -137,6 +138,11 @@ def rgba(c, alpha=None):
 def squircle(x, y, w, h, r, steps=16):
     """The fourth-power superellipse corner every rounded shape uses
     (corner-shape: superellipse(2)); same points as traceSuperellipse."""
+    return QPainterPath(_squircle(x, y, w, h, r, steps))
+
+
+@lru_cache(maxsize=512)
+def _squircle(x, y, w, h, r, steps):
     r = min(r, w / 2, h / 2)
     pts = []
     for cx, cy, start in ((x + w - r, y + r, -90), (x + w - r, y + h - r, 0),

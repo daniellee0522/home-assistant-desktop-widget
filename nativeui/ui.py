@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QLineEdit, QWidget
 
 from . import render, style
 from .glass import GlassMixin
+from .animation_clock import FrameTimer
 
 # ---------------------------------------------------------------------------------------
 # colours
@@ -197,14 +198,24 @@ class View:
     def changed(self):
         self.invalidate_cached_ancestors()
         if self.scene:
-            self.scene.request_paint()
+            self.scene.request_paint(invalidate=False)
 
     def invalidate_cached_ancestors(self, include_self=True):
         view = self if include_self else self.parent
         while view is not None:
             if hasattr(view,"_page_cache"):
                 view._page_cache = None
+            if hasattr(view, "_fade_cache"):
+                view._fade_cache = None
             view = view.parent
+
+    def invalidate_cached_tree(self):
+        if hasattr(self, "_page_cache"):
+            self._page_cache = None
+        if hasattr(self, "_fade_cache"):
+            self._fade_cache = None
+        for child in self.children:
+            child.invalidate_cached_tree()
 
     def in_scene(self):
         """(x, y, k): the view's top-left in the scene, and how many scene px one of its own px is
@@ -246,10 +257,13 @@ class View:
                 p.setClipPath(render.squircle(0, 0, self.w, self.h, self.radius))
             else:
                 p.setClipRect(QRectF(0, 0, self.w, self.h))
-        self.paint(p)
-        for c in self.children:
-            c.paint_tree(p)
+        self._paint_contents(p)
         p.restore()
+
+    def _paint_contents(self, p):
+        self.paint(p)
+        for child in self.children:
+            child.paint_tree(p)
 
     # -- the pointer ----------------------------------------------------------------------
     def contains(self, x, y):
@@ -548,6 +562,37 @@ class Slider(View):
         p.drawEllipse(QPointF(cx, self.h / 2), 11, 11)
 
 
+class CachedView(View):
+    """Keep subtree artwork while its outer opacity, position or zoom moves."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._page_cache = None
+        self._page_key = None
+
+    def _paint_contents(self, p):
+        self.prepare_cache()
+        image = self._page_cache
+        s = self.scene.scale * self.in_scene()[2]
+        p.drawImage(QRectF(0, 0, image.width() / s, image.height() / s), image)
+
+    def prepare_cache(self):
+        s = self.scene.scale * self.in_scene()[2]
+        key = (self.w, self.h, s, self.scene.theme, self.scene.style, self.scene.language)
+        if self._page_cache is None or self._page_key != key:
+            image = QImage(max(1, math.ceil(self.w * s)), max(1, math.ceil(self.h * s)),
+                           QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+            painter.scale(s, s)
+            try:
+                super()._paint_contents(painter)
+            finally:
+                painter.end()
+            self._page_cache, self._page_key = image, key
+
+
 class ScrollView(View):
     """A clipped box whose content scrolls: the wheel, and scroll_to; no scroll bars. Its ends fade out where
     there is more beyond them (style.SCROLL_FADE px, or `fade`; 0 for none, as under glass drawn per tile)."""
@@ -559,6 +604,7 @@ class ScrollView(View):
         self.horizontal = horizontal
         self.fade = fade
         self.offset = 0.0
+        self._fade_cache = None
         super().add(self.content)
         self.on_wheel = self._wheel
         self.interactive = True
@@ -935,10 +981,27 @@ class Tweens:
     def __init__(self, scene):
         self.scene = scene
         self.running = []
-        self.timer = QTimer(scene)
-        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer = FrameTimer(scene)
         self.timer.setInterval(16)
         self.timer.timeout.connect(self.tick)
+        self._paused_at = None
+
+    def pause(self):
+        if self._paused_at is None:
+            self._paused_at = time.monotonic()
+        self.timer.stop()
+        self.scene.set_animation_active(False)
+
+    def resume(self):
+        if self._paused_at is None:
+            return
+        elapsed = time.monotonic() - self._paused_at
+        for tween in self.running:
+            tween["t0"] += elapsed
+        self._paused_at = None
+        if self.running:
+            self.scene.set_animation_active(True)
+            self.timer.start()
 
     def animate(self, view, props, ms, ease, done, delay=0):
         # Retarget a spring from its displayed value and velocity.
@@ -955,23 +1018,33 @@ class Tweens:
             for k, v in props.items():
                 setattr(view, k, v)
             self.scene.request_paint()
+            if not self.running:
+                self.timer.stop()
+                self.scene.set_animation_active(False)
             if done:
                 done()
             return
+        if not self.running and self._paused_at is None:
+            self.scene.set_animation_active(True)
+            self.scene.prepare_animation()
+        now = self._paused_at if self._paused_at is not None else time.monotonic()
         self.running.append({"view": view, "props": dict(props), "start": start, "ms": ms, "ease": ease,
-                             "t0": time.monotonic() + delay / 1000, "done": done,
+                             "t0": now + delay / 1000, "done": done,
                              "initial_velocity": velocity, "velocity": dict(velocity)})
         screen = self.scene.screen() if hasattr(self.scene, "screen") else None
         rate = screen.refreshRate() if screen is not None else 60
         interval = max(4, min(16, int(1000 / max(60, rate))))
         if self.timer.interval() != interval:
             self.timer.setInterval(interval)
-        self.timer.start()
+        if self._paused_at is None and not self.timer.isActive():
+            self.scene.set_animation_active(True)
+            self.timer.start()
 
     def cancel(self, view):
         self.running = [t for t in self.running if t["view"] is not view]
         if not self.running:
             self.timer.stop()
+            self.scene.set_animation_active(False)
 
     def replace_view(self, old, new):
         """A rebuilt view inherits the current presentation and the original timeline."""
@@ -982,6 +1055,8 @@ class Tweens:
                 tween["view"] = new
 
     def tick(self):
+        if self._paused_at is not None:
+            return
         now = time.monotonic()
         finished = []
         for t in self.running:
@@ -1026,8 +1101,10 @@ class Tweens:
                 invalidate(include_self=False)
         if not self.running:
             self.timer.stop()
+            self.scene.set_animation_active(False)
         # only the window's own fade and scale moved: what is drawn in it did not
-        self.scene.request_paint(content=any(t["view"] is not self.scene or "progress" in t["props"] for t in self.running + finished))
+        self.scene.request_paint(content=any(t["view"] is not self.scene or "progress" in t["props"] for t in self.running + finished),
+                                 invalidate=False)
 
 
 # ---------------------------------------------------------------------------------------
@@ -1048,12 +1125,14 @@ class Scene(GlassMixin, QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.root = View()
+        self.root = CachedView()
         self.root.scene = self
         self.layer = View()               # above the root: menus and the toast
         self.layer.scene = self
         self.popup = None
         self.fields = []
+        self.animation_active = False
+        self._deferred_animation_glass = False
         self.tweens = Tweens(self)
         self.capture = None
         self.hover_view = None
@@ -1076,6 +1155,14 @@ class Scene(GlassMixin, QWidget):
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_: self._system_theme_changed())
 
     # -- theme and size ----------------------------------------------------------------------
+    def hideEvent(self, event):
+        self.tweens.pause()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.tweens.resume()
+
     def resolve_theme(self):
         theme = self.theme_raw
         if theme == "auto":
@@ -1133,10 +1220,13 @@ class Scene(GlassMixin, QWidget):
         return self.t["radius_panel"]
 
     # -- painting ---------------------------------------------------------------------------------
-    def request_paint(self, content=True):
+    def request_paint(self, content=True, invalidate=True):
         """`content`: what is drawn changed (not only the window's own fade or scale)."""
         if content:
             self._content_dirty = True
+            if invalidate:
+                self.root.invalidate_cached_tree()
+                self.layer.invalidate_cached_tree()
         if not self._paint_pending:
             self._paint_pending = True
             QTimer.singleShot(0, self._paint_now)
@@ -1193,7 +1283,37 @@ class Scene(GlassMixin, QWidget):
         # as it did when every new glass drew the views again.
         if time.monotonic() - self._content_at > 0.25:
             self._content_dirty = True
+            self.root.invalidate_cached_tree()
+            self.layer.invalidate_cached_tree()
         super().glass_changed()
+
+    def set_animation_active(self, active):
+        if self.animation_active == active:
+            return
+        self.animation_active = active
+        if not active:
+            if self._deferred_animation_glass:
+                self._deferred_animation_glass = False
+                self._on_glass()
+            self.sample_now.set()
+
+    def prepare_animation(self):
+        # Build static artwork before starting the timeline, including panes at
+        # zero opacity. The first visible frame then only composites pixels.
+        def prepare(view):
+            for child in view.children:
+                prepare(child)
+            if isinstance(view, CachedView) and view.visible and view.w > 0 and view.h > 0:
+                view.prepare_cache()
+        prepare(self.root)
+        prepare(self.layer)
+
+    def _on_glass(self):
+        if self.animation_active:
+            self.glass_queued.clear()
+            self._deferred_animation_glass = True
+            return
+        super()._on_glass()
 
     def content_image(self):
         img = self._content
@@ -1255,6 +1375,16 @@ class Scene(GlassMixin, QWidget):
         s = p.transform().m11()
         ox, oy, fx, fy = on_pixels(p, view.x + view.dx, view.y + view.dy)
         w, h = math.ceil(view.w * s) + 1, math.ceil(view.h * s) + 1
+        key = (w, h, s, fx, fy, view.offset, view.extent(), view.fade_px(),
+               view.zoom, view.zoom_origin, view.scale, view.blur)
+        cached = view._fade_cache
+        if cached is not None and cached[0] == key:
+            p.save()
+            p.setOpacity(p.opacity() * view.alpha)
+            p.resetTransform()
+            p.drawImage(ox, oy, cached[1])
+            p.restore()
+            return
         img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         q = QPainter(img)
@@ -1262,10 +1392,12 @@ class Scene(GlassMixin, QWidget):
         q.translate(fx, fy)
         q.scale(s, s)
         q.translate(-view.x - view.dx, -view.y - view.dy)
-        saved, fade = view.fade, view.fade_px()
-        view.fade = 0
-        view.paint_tree(q)
-        view.fade = saved
+        saved, fade, alpha = view.fade, view.fade_px(), view.alpha
+        view.fade, view.alpha = 0, 1.0
+        try:
+            view.paint_tree(q)
+        finally:
+            view.fade, view.alpha = saved, alpha
         q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         edge = min(0.45, fade / max(1.0, view.w if view.horizontal else view.h))
         left = view.offset > 0.5
@@ -1278,7 +1410,9 @@ class Scene(GlassMixin, QWidget):
         grad.setColorAt(1, QColor(0, 0, 0, 0 if right else 255))
         q.fillRect(0, 0, w, h, QBrush(grad))
         q.end()
+        view._fade_cache = (key, img)
         p.save()
+        p.setOpacity(p.opacity() * view.alpha)
         p.resetTransform()
         p.drawImage(ox, oy, img)
         p.restore()

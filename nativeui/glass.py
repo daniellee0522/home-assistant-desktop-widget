@@ -167,7 +167,7 @@ class GlassMixin:
                 if still and taken and not self.sample_now.is_set():
                     self.sample_now.wait(0.5)
                     continue
-                if getattr(self, "moving", False):
+                if getattr(self, "moving", False) or getattr(self, "animation_active", False):
                     time.sleep(0.02)             # the window is coming in or going away: not now
                     continue
                 if not self.wants_glass():       # nothing of the desktop shows: no looks at it until it does
@@ -215,6 +215,15 @@ class GlassMixin:
                     continue
                 if abs(shot["w"] - pw) > 3 or abs(shot["h"] - ph) > 3:
                     last_hash = None
+                    continue
+                # Keep a capture already in flight, including its hash. Discarding
+                # it would force another full capture on a still desktop.
+                while (getattr(self, "moving", False) or getattr(self, "animation_active", False)) and not self._stop.is_set():
+                    self._stop.wait(0.02)
+                if self._stop.is_set():
+                    break
+                if generation != self._glass_generation:
+                    last_hash, taken = None, False
                     continue
                 picture = Image.frombytes("RGB", (shot["blur_w"], shot["blur_h"]), raw)
                 last_hash = shot.get("hash")

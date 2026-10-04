@@ -283,7 +283,7 @@ class HomeView(EditMixin, View):
         self.stage.clip = True
         self.stage.radius = 28
         self.add(self.stage)
-        self.main = View(0, 0, W - 4, STAGE_H)
+        self.main = ui.CachedView(0, 0, W - 4, STAGE_H)
         self.stage.add(self.main)
         self.build_rooms_row(names, hidden)
         self.rooms_row.scroll_to(rooms_offset)

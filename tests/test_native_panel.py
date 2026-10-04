@@ -1225,6 +1225,39 @@ class FitsItsMonitor(unittest.TestCase):
 
 
 class HeaderAndFlyout(unittest.TestCase):
+    def test_added_effects_keep_the_active_frame_clock(self):
+        from unittest.mock import patch
+        win, sc = make_panel(FakeApi("home"))
+        try:
+            with patch.object(sc.tweens.timer, "start", wraps=sc.tweens.timer.start) as start:
+                sc.flyout_enter()
+                sc.flyout_leave()
+                sc.flyout_enter()
+                start.assert_called_once()
+        finally:
+            win.dispose()
+
+    def test_hidden_animation_pauses_and_state_rebuild_keeps_it_for_resume(self):
+        win, sc = make_panel(FakeApi("home"))
+        try:
+            sc.home.toggle_category("light")
+            pump(40)
+            sc.hide()
+            before = sc.home.cat_view.alpha, sc.home.cat_view.zoom
+            self.assertFalse(sc.tweens.timer.isActive())
+            pump(60)
+            sc.push_states([("light.a", {"state": "off", "attributes": {}})])
+            self.assertEqual((sc.home.cat_view.alpha, sc.home.cat_view.zoom), before)
+            self.assertFalse(sc.tweens.timer.isActive())
+            sc.show()
+            self.assertEqual((sc.home.cat_view.alpha, sc.home.cat_view.zoom), before)
+            self.assertTrue(sc.tweens.timer.isActive())
+            pump(650)
+            self.assertEqual(sc.home.cat_view.alpha, 1)
+            self.assertFalse(sc.tweens.timer.isActive())
+        finally:
+            win.dispose()
+
     def test_cached_flyout_submits_its_frame_before_returning_to_event_loop(self):
         win, sc = make_panel(FakeApi("home"))
         try:

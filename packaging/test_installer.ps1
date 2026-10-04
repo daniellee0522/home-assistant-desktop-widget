@@ -35,6 +35,8 @@ if ((Get-Item -LiteralPath $installedExe).VersionInfo.ProductVersion -ne $buildI
     throw 'Installed executable and build manifest versions differ.'
 }
 $originalExeHash = (Get-FileHash -LiteralPath $installedExe).Hash
+$qtCore = Join-Path $testDestination '_internal\PySide6\Qt6Core.dll'
+$originalQtHash = if (Test-Path -LiteralPath $qtCore) { (Get-FileHash -LiteralPath $qtCore).Hash } else { $null }
 '{"ha_token":"","tiles":[],"theme":"light","test_marker":"keep-on-upgrade"}' |
     Set-Content -LiteralPath $userConfig -Encoding utf8
 $configHash = (Get-FileHash -LiteralPath $userConfig).Hash
@@ -44,11 +46,19 @@ $internal = Join-Path $testDestination '_internal'
 New-Item -ItemType Directory -Force -Path $internal | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $internal 'PySide6') | Out-Null
 Set-Content -LiteralPath (Join-Path $internal 'PySide6\Qt6Core.dll') -Value 'stale Qt dependency fixture'
+Set-Content -LiteralPath (Join-Path $internal 'obsolete-upgrade-fixture.dll') -Value 'obsolete dependency fixture'
 Set-Content -LiteralPath (Join-Path $internal 'icuuc.dll') -Value 'incompatible old ICU fixture'
 Set-Content -LiteralPath (Join-Path $internal 'icudt78.dll') -Value 'obsolete ICU data fixture'
 Invoke-TestInstall 'upgrade'
-if (Test-Path -LiteralPath (Join-Path $internal 'PySide6\Qt6Core.dll')) {
+if ($originalQtHash) {
+    if ((Get-FileHash -LiteralPath $qtCore).Hash -ne $originalQtHash) {
+        throw 'Upgrade did not restore the current Qt dependency.'
+    }
+} elseif (Test-Path -LiteralPath $qtCore) {
     throw 'Upgrade retained an incompatible dependency from the old layout.'
+}
+if (Test-Path -LiteralPath (Join-Path $internal 'obsolete-upgrade-fixture.dll')) {
+    throw 'Upgrade retained an obsolete dependency.'
 }
 if ((Get-FileHash -LiteralPath $installedExe).Hash -ne $originalExeHash) { throw 'Upgrade did not restore application files.' }
 if ((Get-FileHash -LiteralPath $userConfig).Hash -ne $configHash) { throw 'Upgrade changed user settings.' }

@@ -1,9 +1,10 @@
 """Native panel header and flyout motion review, with measured paint costs."""
 import json
+import argparse
 from pathlib import Path
 import sys
 import time
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QTimer, Qt
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
@@ -12,7 +13,16 @@ from tools import glass_review as R
 
 
 def main():
-    out = ROOT / "visual/panel-motion"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--qt-clock", action="store_true", help="Compare against the Windows Qt timer backend")
+    args = parser.parse_args()
+    if args.qt_clock:
+        class PreciseQtTimer(QTimer):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.setTimerType(Qt.PreciseTimer)
+        T.ui.FrameTimer = PreciseQtTimer
+    out = ROOT / ("visual/panel-motion-qt" if args.qt_clock else "visual/panel-motion")
     out.mkdir(parents=True, exist_ok=True)
     results = []
     for theme in ("light", "dark"):
@@ -78,6 +88,7 @@ def main():
             gaps = sorted((b[1]-a[1])*1000 for a,b in zip(times,times[1:]) if a[0]==b[0])
             tick_gaps = sorted((b[1]-a[1])*1000 for a,b in zip(ticks,ticks[1:]) if a[0]==b[0])
             results.append(dict(theme=theme, samples=len(costs),
+                                clock="qt" if args.qt_clock else "high-resolution",
                                 screen_hz=scene.screen().refreshRate(),
                                 timer_ms=scene.tweens.timer.interval(),
                                 tick_gap_median_ms=round(tick_gaps[len(tick_gaps)//2],2),
@@ -87,6 +98,9 @@ def main():
                                 frame_gap_median_ms=round(gaps[len(gaps)//2], 2),
                                 frame_gap_p95_ms=round(gaps[min(len(gaps)-1,int(len(gaps)*.95))], 2)))
         finally:
+            scene.stop()
+            if scene._glass_thread:
+                scene._glass_thread.join(1)
             win.dispose()
     (out / "performance.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2))
