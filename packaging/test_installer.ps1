@@ -42,9 +42,14 @@ $configHash = (Get-FileHash -LiteralPath $userConfig).Hash
 Set-Content -LiteralPath $installedExe -Value 'old executable fixture' -Encoding ascii
 $internal = Join-Path $testDestination '_internal'
 New-Item -ItemType Directory -Force -Path $internal | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $internal 'PySide6') | Out-Null
+Set-Content -LiteralPath (Join-Path $internal 'PySide6\Qt6Core.dll') -Value 'stale Qt dependency fixture'
 Set-Content -LiteralPath (Join-Path $internal 'icuuc.dll') -Value 'incompatible old ICU fixture'
 Set-Content -LiteralPath (Join-Path $internal 'icudt78.dll') -Value 'obsolete ICU data fixture'
 Invoke-TestInstall 'upgrade'
+if (Test-Path -LiteralPath (Join-Path $internal 'PySide6\Qt6Core.dll')) {
+    throw 'Upgrade retained an incompatible dependency from the old layout.'
+}
 if ((Get-FileHash -LiteralPath $installedExe).Hash -ne $originalExeHash) { throw 'Upgrade did not restore application files.' }
 if ((Get-FileHash -LiteralPath $userConfig).Hash -ne $configHash) { throw 'Upgrade changed user settings.' }
 if ((Test-Path -LiteralPath (Join-Path $internal 'icuuc.dll')) -or

@@ -48,6 +48,10 @@ Source: "stop_running_widgets.ps1"; Flags: dontcopy
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "ha_widgets_config.json,widget.log,hang_report.txt"
 
 [InstallDelete]
+; The dependency layout changes between PyInstaller/Qt versions. Overlaying
+; files leaves older PySide6 DLLs ahead of the new ones in the loader search.
+; MigrateSettings runs at ssInstall before dependency cleanup.
+Type: filesandordirs; Name: "{app}\_internal"
 ; Remove incompatible Poppler ICU accidentally shipped in version 1.1.0.
 Type: files; Name: "{app}\_internal\icuuc.dll"
 Type: files; Name: "{app}\_internal\icudt78.dll"
