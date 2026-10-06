@@ -1254,6 +1254,7 @@ class Scene(GlassMixin, QWidget):
         # which Qt maps by its ratio, missed what it pointed at).
         q = self.devicePixelRatioF() or 1.0
         clip = self.transition_clip()
+        p.save()
         if clip is not None:
             transform = p.transform()
             p.scale(self.scale / q, self.scale / q)
@@ -1264,6 +1265,7 @@ class Scene(GlassMixin, QWidget):
             p.setOpacity(p.opacity() * self.transition_glass_opacity())
             p.drawImage(QRectF(0, 0, self.glass.width() / q, self.glass.height() / q), self.glass)
             p.restore()
+        p.restore()
         # What is on the card is drawn once into a picture and that picture is what is painted: the glass
         # behind it changes up to sixty times a second while the views do not, and drawing them again for
         # each new glass costs a few ms where the picture costs a tenth of one. Coming in or going away
@@ -1277,6 +1279,9 @@ class Scene(GlassMixin, QWidget):
 
     def transition_clip(self):
         return None
+
+    def popup_bounds(self):
+        return QRectF(0, 0, self.css_w, self.css_h)
 
     def glass_changed(self):
         # A view changed without asking to be drawn again shows at the latest within a quarter second,
@@ -1324,8 +1329,13 @@ class Scene(GlassMixin, QWidget):
             q.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
             q.scale(self.scale, self.scale)
             try:
+                q.save()
+                clip = self.transition_clip()
+                if clip is not None:
+                    q.setClipPath(clip)
                 self.paint_card(q)
                 self.root.paint_tree(q)
+                q.restore()
                 self.layer.paint_tree(q)
             finally:
                 q.end()                         # (a painter left open on a picture brings Qt down when it is freed)

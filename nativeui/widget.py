@@ -17,7 +17,7 @@ import traceback
 from ctypes import wintypes
 
 from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRectF, Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QMenu, QWidget
 
 import qtshell
@@ -25,6 +25,7 @@ import qtshell
 from . import kinds, render
 from .actions import TileActions
 from .glass import GlassMixin
+from .animation_clock import FrameTimer
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.GetDpiForWindow.argtypes = [ctypes.c_void_p]
@@ -119,8 +120,9 @@ class _Surface(GlassMixin, QWidget):
         self.mix = None
         self.init_glass()
         self.dim_t, self.dim_from, self.dim_target = 0.0, 0.0, False
+        self._face_time, self._ahead = None, None      # the clock's next minute, drawn ahead (see _second)
         self.dim_clock = QElapsedTimer()
-        self.dim_timer = QTimer(self)
+        self.dim_timer = FrameTimer(self)
         self.dim_timer.setInterval(16)
         self.dim_timer.timeout.connect(self._step_dim)
         self.flash = {}                           # tile index -> started (monotonic)
@@ -159,15 +161,22 @@ class _Surface(GlassMixin, QWidget):
             self._shown_once = True
             QTimer.singleShot(0, self._first_shown)
         self.sample_now.set()
+        if self._gpu_receiver is not None:
+            self._gpu_receiver.queue(foreground=True)
         self._schedule_tick()
 
     def hideEvent(self, e):
         super().hideEvent(e)
+        self.dim_timer.stop()
+        self.dim_t = 1.0 if self.dim_target else 0.0
+        if self._gpu_receiver is not None:
+            self._gpu_receiver.hide()
         self.second_timer.stop()
 
     def _first_shown(self):
         self.facade.events.shown.fire()
         self.relayout()
+        self._prepare_gpu_glass()
         self.start_glass()
         self.extras_timer.start()
         QTimer.singleShot(0, self.refresh_extras)
@@ -176,6 +185,8 @@ class _Surface(GlassMixin, QWidget):
         super().moveEvent(e)
         pos = e.pos()
         self.facade.events.moved.fire(pos.x(), pos.y())
+        if self._gpu_receiver is not None:
+            self._gpu_receiver.queue(foreground=True)
         if self._hwnd:
             dpi = _user32.GetDpiForWindow(self._hwnd) / 96.0
             if dpi and abs(dpi - self.dpi) > 0.01:
@@ -245,6 +256,7 @@ class _Surface(GlassMixin, QWidget):
             self.facade.invalidate_backdrop()
         if "sampling" in changed:
             self.sample_now.set()
+        self._prepare_gpu_glass()
 
     def relayout(self):
         """Size, scale and the tiles' places: after a change of size, zoom, tiles or monitor."""
@@ -271,7 +283,63 @@ class _Surface(GlassMixin, QWidget):
         self.tcol = render.tokens(self.theme, False, self.style)
         render.set_language(self.language)
         self.overlay = self.overlay_dim = None
+        self._prepare_gpu_glass()
         self.update()
+
+    def _prepare_gpu_glass(self):
+        from .widget_glass import prepare
+        prepare(self)
+
+    def _gpu_window_rect(self):
+        return _rect(self.cache_hwnd())
+
+    def _gpu_foreground_image(self):
+        # The native foreground remains the source of all words, icons and
+        # controls. Only its final blend with the glass is moved to the GPU.
+        return self._paint_image(gpu_snapshot=False)
+
+    def _gpu_foreground_layers(self):
+        previous = self.dim_t
+        try:
+            receiver = self._gpu_receiver
+            lit = getattr(receiver, 'foreground_image', None)
+            # At rest only the dim face is visible. Clock/state updates need
+            # not paint the hidden solid face too. A wake regenerates it before
+            # the first blended frame, including all states received at rest.
+            if not (self.dim_target and previous == 1.0 and lit is not None
+                    and lit.width() == self.pw and lit.height() == self.ph):
+                self.dim_t = 0.0
+                lit = self._gpu_foreground_image()
+                if receiver is not None:
+                    receiver.lit_stale = False
+            elif receiver is not None:
+                receiver.lit_stale = True
+            self.dim_t = 1.0
+            dim = self._gpu_foreground_image()
+            return lit, dim
+        finally:
+            self.dim_t = previous
+
+    def _gpu_card_mask(self, hidden_tile=None):
+        hole = self._tile_path(hidden_tile) if hidden_tile is not None else self._transition_hole()
+        key = (self.pw, self.ph, self.glass_card()[2] * self.scale, self.dpi)
+        if hole is None and getattr(self, "_card_mask_made", (None,))[0] == key:
+            return self._card_mask_made[1]
+        image = QImage(self.pw, self.ph, QImage.Format_ARGB32)
+        image.fill(0)
+        p = QPainter(image)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(Qt.white)
+        p.drawPath(render.squircle(0, 0, self.pw, self.ph, self.glass_card()[2] * self.scale))
+        if hole is not None:
+            p.scale(self.dpi, self.dpi)
+            p.setCompositionMode(QPainter.CompositionMode_Clear)
+            p.drawPath(hole)
+        p.end()
+        if hole is None:
+            self._card_mask_made = (key, image)
+        return image
 
     def _ui(self):
         now = time.monotonic()
@@ -288,8 +356,9 @@ class _Surface(GlassMixin, QWidget):
         else:
             extras = self.extras
             if self.wkind == "clock":                     # its ring is drawn live, in paintEvent
-                now = datetime.datetime.now()
-                self._drawn_minute = now.replace(second=0, microsecond=0)
+                now = self._face_time or datetime.datetime.now()
+                if self._face_time is None:
+                    self._drawn_minute = now.replace(second=0, microsecond=0)
                 extras = dict(extras, live_ticks=True, now=now, font=self.clock_font)
             got = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
                                     self.scale, dim, self.style, self._ui(), self.theme_raw, extras)
@@ -336,17 +405,20 @@ class _Surface(GlassMixin, QWidget):
         return render.squircle(x*ratio, (y-self.scroll)*ratio, w*ratio, h*ratio,
                                self.tcol["radius_tile"]*ratio)
 
-    def _paint_image(self, hidden_tile=None):
+    def _paint_image(self, hidden_tile=None, gpu_snapshot=True):
+        if gpu_snapshot and self._gpu_receiver is not None and self._gpu_receiver.visible:
+            return self._gpu_receiver.snapshot(hidden_tile)
         image = QImage(self.pw,self.ph,QImage.Format_ARGB32_Premultiplied)
         image.fill(Qt.transparent)
         image.setDevicePixelRatio(self.dpi)
         painter = QPainter(image)
-        hole = self._tile_path(hidden_tile)
+        hole = (self._tile_path(hidden_tile) if hidden_tile is not None else
+                self._transition_hole() if not gpu_snapshot else None)
         if hole is not None:
             outer = QPainterPath()
             outer.addRect(QRectF(0,0,self.pw/self.dpi,self.ph/self.dpi))
             painter.setClipPath(outer.subtracted(hole))
-        self._paint_contents(painter)
+        self._paint_contents(painter, include_glass=gpu_snapshot)
         painter.end()
         return image
 
@@ -365,32 +437,51 @@ class _Surface(GlassMixin, QWidget):
         return image.copy(round(x*self.scale), round((y-self.scroll)*self.scale),
                           round(w*self.scale), round(h*self.scale))
 
+    def _transition_hole(self):
+        hole = self._tile_path(getattr(self, "transition_tile", None))
+        cover = getattr(self, 'transition_cover', None)
+        source_rect = _rect(self._hwnd) if cover is not None else None
+        if hole is not None and source_rect:
+            covered = render.squircle((cover.x()-source_rect[0])/self.dpi,
+                                       (cover.y()-source_rect[1])/self.dpi,
+                                       cover.width()/self.dpi, cover.height()/self.dpi,
+                                       self.tcol['radius_tile']*self.scale/self.dpi)
+            hole = hole.intersected(covered)
+        return hole
+
     def paintEvent(self, event):
+        if self._gpu_receiver is not None and self._gpu_receiver.visible:
+            p = QPainter(self)
+            p.setCompositionMode(QPainter.CompositionMode_Source)
+            p.fillRect(self.rect(), Qt.transparent)
+            # A completely transparent layered HWND has no native hit-test
+            # pixels. Keep a one-byte alpha input backing under the compositor.
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 1))
+            p.scale(self.scale / self.devicePixelRatioF(), self.scale / self.devicePixelRatioF())
+            cw, ch = render.widget_size(self.size_key)
+            p.drawPath(render.squircle(0, 0, cw, ch, self.tcol['radius_panel']))
+            p.end()
+            self._gpu_receiver.queue(foreground=True)
+            return
+        if self._gpu_receiver is not None and self.wants_glass():
+            self._gpu_receiver.queue(foreground=True)
         p = QPainter(self)
         p.scale(self.dpi/(self.devicePixelRatioF() or 1), self.dpi/(self.devicePixelRatioF() or 1))
-        tile_id = getattr(self, "transition_tile", None)
-        hole = self._tile_path(tile_id)
+        hole = self._transition_hole()
         if hole is not None:
             outer = QPainterPath()
             outer.addRect(QRectF(0, 0, self.pw/self.dpi, self.ph/self.dpi))
-            cover = getattr(self,"transition_cover",None)
-            source_rect = _rect(self._hwnd) if cover is not None else None
-            if source_rect:
-                covered = render.squircle((cover.x()-source_rect[0])/self.dpi,
-                                           (cover.y()-source_rect[1])/self.dpi,
-                                           cover.width()/self.dpi,cover.height()/self.dpi,
-                                           self.tcol["radius_tile"]*self.scale/self.dpi)
-                hole = hole.intersected(covered)
             p.setClipPath(outer.subtracted(hole))
         self._paint_contents(p)
         p.end()
 
-    def _paint_contents(self, p):
-        if self.overlay is None:
+    def _paint_contents(self, p, include_glass=True):
+        if self.overlay is None and self.dim_t < 1:     # fully dimmed, the lit face is not on show
             self.overlay = self._draw(False)
         if self.dim_t > 0 and self.overlay_dim is None:
             self.overlay_dim = self._draw(True)
-        if self.glass is not None and not self.system_glass:
+        if include_glass and self.glass is not None and not self.system_glass:
             p.drawImage(0, 0, self.glass)
         if self.dim_t <= 0:
             p.drawPixmap(0, 0, self.overlay)
@@ -434,8 +525,20 @@ class _Surface(GlassMixin, QWidget):
             self.second_timer.stop()
             return
         now = datetime.datetime.now()
-        if self._drawn_minute is not None and now.replace(second=0, microsecond=0) != self._drawn_minute:
-            self.overlay = self.overlay_dim = None          # a new minute: the digits again
+        minute = now.replace(second=0, microsecond=0)
+        if self._drawn_minute is not None and minute != self._drawn_minute:
+            self.overlay = None                             # a new minute: the digits again
+            ahead, self._ahead = self._ahead, None
+            self.overlay_dim = ahead[1] if ahead is not None and ahead[0] == minute else None
+        elif self.dim_target and now.second >= 58 and self._ahead is None and self._drawn_minute is not None:
+            # Dimmed, the next minute's face is drawn now, a moment before it is needed, instead of in
+            # the frame the minute changes.
+            coming = minute + datetime.timedelta(minutes=1)
+            self._face_time = coming
+            try:
+                self._ahead = (coming, self._draw(True))
+            finally:
+                self._face_time = None
         self.update()
         self._next_second(now)
 
@@ -475,7 +578,7 @@ class _Surface(GlassMixin, QWidget):
         """The tiles and a chart stand on glass; a clock, a calendar, the weather, a camera and a player have a
         solid face of their own, and want the desktop's picture only while dimmed (clear glass then) or when
         they are empty (the bare card)."""
-        if self.wkind in ("tiles", "chart") or self.dim_target:
+        if self.wkind in ("tiles", "chart") or self.dim_target or self.dim_t > 0:
             return True
         return self.wkind not in kinds.NO_DEVICES and not kinds.shown(self.wkind, self.tiles)
 
@@ -512,8 +615,23 @@ class _Surface(GlassMixin, QWidget):
         if on == self.dim_target:
             return
         self.dim_target = on
+        if self._gpu_receiver is not None:
+            receiver = self._gpu_receiver
+            receiver.queue(foreground=(not receiver.visible or self.wkind == 'clock'
+                                       or getattr(receiver, 'lit_stale', False)))
         self.dim_from = self.dim_t
         self.dim_clock.start()
+        receiver = self._gpu_receiver
+        self.dim_timer.vsync = receiver is not None
+        clock = receiver.clock if receiver is not None else None
+        if self.dim_timer.shared_clock is not clock:
+            self.dim_timer.stop()
+        if receiver is not None and receiver.clock is not None:
+            self.dim_timer.vsync_waiter = receiver.clock.timer.vsync_waiter
+            self.dim_timer.shared_clock = receiver.clock
+        else:
+            self.dim_timer.shared_clock = None
+        self.dim_timer.setInterval(max(1, round(1000 / self._glass_refresh_rate)))
         self.dim_timer.start()
         if on:
             self.sample_now.set()                 # a solid face turning to glass: a picture of the desktop now
@@ -536,7 +654,10 @@ class _Surface(GlassMixin, QWidget):
             self.dim_timer.stop()
             if not self.dim_target:
                 self.overlay_dim = None
-        self.update()
+        if self._gpu_receiver is not None and self._gpu_receiver.visible:
+            self._gpu_receiver.queue()
+        else:
+            self.update()
 
     def _wake(self):
         """The first touch of a dimmed widget only wakes it, every widget at once."""

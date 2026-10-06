@@ -42,7 +42,17 @@ def on_display_change(fn):
     _display_hooks.append(fn)
 
 
+_last_display_event = [-1e9]
+
+
+def display_unsettled(within=4.0):
+    """True while the displays are changing or just did (a TDR, a monitor coming or going, a resume): Windows
+    then moves windows by itself, and where they are is not where their owner put them."""
+    return time.monotonic() - _last_display_event[0] < within
+
+
 def _display_changed(*args):
+    _last_display_event[0] = time.monotonic()
     if _display_timer is not None:
         _display_timer.start(500)
 
@@ -75,6 +85,9 @@ class _PowerFilter(QAbstractNativeEventFilter):
                 # Only signal here: recovery can block and must not run inside
                 # Windows' synchronous power broadcast on the GUI thread.
                 _resume_pending.set()
+                _last_display_event[0] = time.monotonic()
+            elif msg.message == 0x007E:  # WM_DISPLAYCHANGE: before Qt's own screen signals, and without them on a TDR
+                _last_display_event[0] = time.monotonic()
         return False, 0
 
 # How long the GUI thread may go without answering before it counts as stuck.

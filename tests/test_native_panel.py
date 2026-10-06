@@ -6,6 +6,7 @@ import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "windows:fontengine=freetype")
+os.environ["HA_WIDGET_DCOMP"] = "0"        # the tests below follow the panel's own drawing; the compositor's has its own
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import Qt                                          # noqa: E402
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import QApplication                             # noqa: E
 
 app = QApplication.instance() or QApplication([])
 
-from nativeui import detail, panel, ui                                  # noqa: E402
+from nativeui import dcomp, detail, panel, ui                           # noqa: E402
 from nativeui.ui import Ev                                              # noqa: E402
 
 
@@ -1080,6 +1081,58 @@ class DetailOverThePanel(unittest.TestCase):
 
 
 class GlassStaysOnAStillDesktop(unittest.TestCase):
+    def test_live_panel_notices_motion_after_several_unchanged_captures(self):
+        calls = []
+        api = FakeApi("grid", tiles_of(1))
+        def backdrop(kind, last_hash, pw, ph, *args):
+            calls.append(time.monotonic())
+            if 1 < len(calls) < 9:
+                return {"unchanged": True, "hash": 1, "paced": False, "ms": 0}
+            color = (20, 40, 60) if len(calls) == 1 else (80, 160, 120)
+            return dict(w=pw, h=ph, blur_w=8, blur_h=8, blur_raw=bytes(color) * 64,
+                        hash=len(calls), paced=False, ms=0)
+        api.get_desktop_backdrop = backdrop
+        win, sc = make_panel(api)
+        try:
+            sc.sampling = "live"
+            boundary = time.monotonic()
+            sc.start_glass()
+            pump(450)
+            self.assertGreaterEqual(len(calls), 9)
+            self.assertEqual(sc.raw_latest.pixelColor(0, 0).getRgb()[:3], (80, 160, 120))
+            recent = [t for t in calls if t >= boundary]
+            self.assertLess(max(b-a for a,b in zip(recent,recent[1:])), .15)
+        finally:
+            win.dispose()
+
+    def test_compositor_accepts_new_desktop_frames_while_the_panel_moves(self):
+        from unittest.mock import patch, Mock
+        from nativeui import dcomp
+        from PySide6.QtGui import QImage
+        calls = []
+        api = FakeApi("grid", tiles_of(1))
+        def backdrop(kind, last_hash, pw, ph, x, y, *args):
+            calls.append((pw, ph, x, y))
+            return dict(w=pw, h=ph, blur_w=8, blur_h=8, blur_raw=bytes([40, 80, 120]) * 64,
+                        hash=len(calls), paced=True)
+        api.get_desktop_backdrop = backdrop
+        win, sc = make_panel(api)
+        try:
+            sc.style, sc.sampling, sc.moving = "liquid", "live", True
+            sc._compositor_capture = (100, 200, sc.pw, sc.ph + 80)
+            slider = Mock()
+            with patch.object(dcomp, 'slider', return_value=slider):
+                sc.start_glass()
+                pump(150)
+                self.assertGreaterEqual(len(calls), 3)
+                slider.queue_glass.assert_called()
+                self.assertIsInstance(slider.queue_glass.call_args.args[0], QImage)
+                self.assertGreaterEqual(slider.queue_glass.call_count, 2)
+                self.assertTrue(all(c == (sc.pw, sc.ph + 80, 100, 200) for c in calls[-3:]))
+        finally:
+            sc._compositor_capture = None
+            win.dispose()
+
     def test_in_flight_old_backdrop_cannot_become_the_first_new_glass(self):
         import threading
         from PIL import Image
@@ -1225,6 +1278,292 @@ class FitsItsMonitor(unittest.TestCase):
 
 
 class HeaderAndFlyout(unittest.TestCase):
+    def test_reversal_refreshes_changed_desktop_pixels_without_replacing_material(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        api = FakeApi("home")
+        color, captures = [40], []
+        def backdrop(kind, last_hash, pw, ph, *args):
+            captures.append(color[0])
+            return dict(w=pw, h=ph, blur_w=8, blur_h=8,
+                        blur_raw=bytes([color[0], 80, 110]) * 64,
+                        hash=color[0], paced=True)
+        api.get_desktop_backdrop = backdrop
+        win, sc = make_panel(api)
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                sc.style = "liquid"
+                sc.sampling = "still"
+                sc.flyout_enter()
+                slider = sc._compositor_slider
+                if slider is None:
+                    self.skipTest("no DirectComposition here")
+                material = slider.material
+                with patch.object(material, 'update', wraps=material.update) as upload:
+                    pump(60)
+                    color[0] = 130
+                    sc.flyout_leave()
+                    self.assertEqual(sc._compositor_background[1].pixelColor(0, 0).red(), 130)
+                    pump(25)
+                    self.assertTrue(any(c.args[0].pixelColor(0, 0).red() == 130 for c in upload.call_args_list))
+                    color[0] = 210
+                    sc.flyout_enter()
+                    self.assertEqual(sc._compositor_background[1].pixelColor(0, 0).red(), 210)
+                    pump(400)
+                    self.assertTrue(sc._compositor_resting)
+                    self.assertIs(slider.material, material)
+                    self.assertTrue(any(c.args[0].pixelColor(0, 0).red() == 210 for c in upload.call_args_list))
+                before = len(captures)
+                pump(120)
+                self.assertLessEqual(len(captures) - before, 1)
+        finally:
+            win.dispose()
+
+    def test_rapid_reversal_keeps_the_same_live_material(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        from PySide6.QtGui import QImage, QColor
+        win, sc = make_panel(FakeApi("home"))
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                sc.style = "liquid"
+                sc.raw_latest = QImage(8, 8, QImage.Format_RGB888)
+                sc.raw_latest.fill(QColor(60, 80, 100))
+                sc.flyout_enter()
+                slider = sc._compositor_slider
+                if slider is None:
+                    self.skipTest("no DirectComposition here")
+                material = slider.material
+                # A pump of 20 ms lasts 31 ms where Windows' timer keeps its 15.6 ms steps; a reversal's
+                # short slide must not be finished by the clock meanwhile.
+                sc._time_slide = lambda ms, real=sc._time_slide: real(ms * 10)
+                with patch.object(slider, 'show', wraps=slider.show) as show:
+                    bounds = sc.size()
+                    for cycle in range(12):
+                        pump(20)
+                        sc.flyout_leave()
+                        pump(20)
+                        self.assertTrue(win.prepare_for_show())
+                        sc.flyout_enter()
+                        if cycle == 5:
+                            sc.push_states([("light.a", {"state": "off", "attributes": {}})])
+                            self.assertEqual(sc.size(), bounds)
+                            self.assertEqual(sc._sliding[0], "enter")
+                        self.assertIs(slider.material, material)
+                    show.assert_not_called()
+                del sc._time_slide                          # the last slide ends on its own clock again
+                sc._time_slide(sc._sliding[1] + 30)
+                pump(400)
+                self.assertTrue(sc._compositor_resting)
+                self.assertTrue(slider.shown)
+                self.assertTrue(sc.isVisible())
+                self.assertIs(slider.material, material)
+        finally:
+            win.dispose()
+
+    def test_reopening_invalidates_native_exit_timer(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        win, sc = make_panel(FakeApi("home"))
+        token = [1]
+        finished = []
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                sc.flyout_enter()
+                pump(60)
+                win.leave_and_hide(lambda: token[0] == 1, 210, lambda: finished.append(1))
+                pump(35)
+                token[0] = 2
+                win.prepare_for_show()
+                win.show()
+                sc.flyout_enter()
+                pump(420)
+                self.assertTrue(sc.isVisible())
+                self.assertEqual(finished, [])
+                self.assertIsNone(sc._sliding)
+                win.leave_and_hide(lambda: token[0] == 2, 210, lambda: finished.append(2))
+                pump(250)
+                self.assertFalse(sc.isVisible())
+                self.assertEqual(finished, [2])
+        finally:
+            win.dispose()
+
+    def test_opening_captures_fresh_background_at_exact_window_height(self):
+        from unittest.mock import Mock
+        from PySide6.QtGui import QImage, QColor
+        win, sc = make_panel(FakeApi("home"))
+        try:
+            sc.style = "liquid"
+            sc.raw_latest = QImage(8, 8, QImage.Format_RGB888)
+            sc.raw_latest.fill(QColor(10, 20, 30))
+            sc.api.get_desktop_backdrop = Mock(return_value=dict(
+                w=sc.pw, h=sc.ph, blur_w=8, blur_h=8,
+                blur_raw=bytes([90, 100, 110]) * 64))
+            glass, card = sc._slide_layers((sc.pw, sc.ph), at=(100, 200))
+            self.assertEqual(glass.pixelColor(sc.pw // 2, sc.ph // 2).red(), 90)
+            sc.api.get_desktop_backdrop.assert_called_once()
+            sc.raw_latest = sc.glass = None
+            glass, card = sc._slide_layers((sc.pw, sc.ph), at=(100, 200))
+            self.assertIsNotNone(glass)
+            self.assertEqual(glass.pixelColor(sc.pw // 2, sc.ph // 2).red(), 90)
+            sc._compositor_capture = (100, 200, sc.pw, sc.ph)
+            fresh = QImage(8, 8, QImage.Format_RGB888)
+            fresh.fill(QColor(130, 140, 150))
+            sc._compositor_raw = (sc._compositor_capture, fresh, sc._compositor_epoch, time.monotonic())
+            sc._on_glass()
+            sc.api.get_desktop_backdrop.return_value = {"skip": True}
+            glass, _ = sc._slide_layers((sc.pw, sc.ph), at=(100, 200))
+            self.assertEqual(glass.pixelColor(sc.pw // 2, sc.ph // 2).red(), 130)
+        finally:
+            win.dispose()
+
+    def test_late_background_from_previous_open_is_rejected(self):
+        from unittest.mock import Mock
+        from PySide6.QtGui import QImage
+        win, sc = make_panel(FakeApi("home"))
+        try:
+            sc._compositor_capture = (100, 100, 400, 700)
+            sc._compositor_epoch = 7
+            sc._compositor_presented_at = 20.0
+            slider = Mock()
+            sc._compositor_slider = slider
+            image = QImage(8, 8, QImage.Format_RGB888)
+            for epoch, captured in [(6, 21.0), (7, 19.0)]:
+                sc._compositor_raw = (sc._compositor_capture, image, epoch, captured)
+                sc._on_glass()
+                slider.queue_glass.assert_not_called()
+            sc._compositor_raw = (sc._compositor_capture, image, 7, 22.0)
+            sc._on_glass()
+            slider.queue_glass.assert_called_once_with(image)
+            self.assertEqual(sc._compositor_presented_at, 22.0)
+        finally:
+            win.dispose()
+
+    def test_animated_backdrop_does_not_change_renderer_at_the_end(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        from PySide6.QtGui import QImage, QColor
+        from PIL import Image, ImageChops
+        from dxgi_capture import DesktopDuplication
+        api = FakeApi("home")
+        settings = dict(api._prefs(), glass_style="liquid", theme="dark")
+        api._prefs = lambda: settings
+        frozen = [False]
+        calls = []
+        def backdrop(kind, last_hash, pw, ph, *args):
+            calls.append(time.monotonic())
+            value = 70 if frozen[0] else 40 + len(calls) % 5 * 20
+            return dict(w=pw, h=ph, blur_w=8, blur_h=8, blur_raw=bytes([value, 80, 110]) * 64,
+                        hash=len(calls), paced=True)
+        api.get_desktop_backdrop = backdrop
+        win, sc = make_panel(api)
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                slider = dcomp.slider()
+                if slider is None:
+                    self.skipTest("no DirectComposition here")
+                sc.move(100, 100)
+                dcomp._user32.SetWindowPos(sc.cache_hwnd(), -1, 0, 0, 0, 0, 0x13)
+                sc.prepare_for_show()
+                sc.flyout_enter()
+                sc._slide_timer.stop()
+                pump(210)
+                frozen[0] = True
+                pump(90)
+                material = slider.material
+                dcomp._user32.SetWindowDisplayAffinity(slider.hwnd, 0)
+                capture = DesktopDuplication()
+                rect = dcomp.window_rect(sc.cache_hwnd())
+                def frame():
+                    raw = capture.grab(*rect)[1]
+                    img = QImage(raw, rect[2], rect[3], rect[2] * 4, QImage.Format_ARGB32).copy()
+                    img = img.copy(30, sc.ph // 2, sc.pw - 60, sc.ph // 3)
+                    return Image.frombytes('RGBA', (img.width(), img.height()), img.constBits().tobytes())
+                before = frame()
+                sc._finish_slide()
+                pump(60)
+                after = frame()
+                self.assertTrue(sc._compositor_resting)
+                self.assertIs(slider.material, material)
+                self.assertTrue(slider.shown)
+                self.assertGreater(len(calls), 8)
+                self.assertLessEqual(max(hi for lo, hi in ImageChops.difference(before, after).getextrema()), 3)
+        finally:
+            dcomp._user32.SetWindowDisplayAffinity(slider.hwnd, 0x11) if slider is not None else None
+            win.dispose()
+
+    def test_live_compositor_glass_keeps_native_fields_and_rebuilds_working(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        from PySide6.QtGui import QImage, QColor
+        api = FakeApi("home", [{"id": "sp", "entity": "media_player.s", "domain": "media_player", "room": "喇叭", "label": ""}])
+        win, sc = make_panel(api)
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                if dcomp.slider() is None:
+                    self.skipTest("no DirectComposition here")
+                sc.style = "liquid"
+                sc.raw_latest = QImage(8, 8, QImage.Format_RGB888)
+                sc.raw_latest.fill(QColor(60, 80, 100))
+                sc.flyout_enter()
+                pump(panel.ENTER_MS + 150)
+                self.assertTrue(sc._compositor_resting)
+                sc.open_detail("sp")
+                pump(400)
+                sc.detail.set_edit(True)
+                pump(250)
+                field = next(f for f in sc.fields if f.edit is not None and f.edit.isVisible())
+                field.edit.setFocus()
+                field.edit.setText("玻璃測試")
+                material = dcomp.slider().material
+                sc.push_states([("media_player.s", {"state": "playing", "attributes": {"volume_level": .3}})])
+                pump(80)
+                self.assertEqual(field.edit.text(), "玻璃測試")
+                self.assertTrue(field.edit.isVisible())
+                self.assertTrue(sc._compositor_resting)
+                self.assertIs(dcomp.slider().material, material)
+                win.hide()
+                self.assertFalse(dcomp.slider().shown)
+                self.assertIsNone(sc._compositor_capture)
+        finally:
+            win.dispose()
+
+    def test_first_open_after_theme_change_starts_hidden_with_fresh_artwork(self):
+        from unittest.mock import patch
+        from nativeui import dcomp
+        from PySide6.QtGui import QImage, QColor
+        api = FakeApi("grid", tiles_of(1))
+        win, sc = make_panel(api)
+        try:
+            with patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+                if dcomp.slider() is None:
+                    self.skipTest("no DirectComposition here")
+                previous = None
+                for theme in ("dark", "light", "dark"):
+                    win.hide()
+                    sc.apply_prefs(dict(api._prefs(), theme=theme, panel_theme="follow", glass_style="liquid"))
+                    sc.raw_latest = QImage(8, 8, QImage.Format_RGB888)
+                    sc.raw_latest.fill(QColor(60, 80, 100))
+                    win.prepare_for_show()
+                    self.assertEqual(sc.anim_alpha, 0)
+                    self.assertIsNone(sc._sliding)
+                    win.show()
+                    sc.flyout_enter()
+                    self.assertEqual(sc._sliding[0], "enter")
+                    self.assertEqual(sc.anim_alpha, 0)
+                    self.assertTrue(dcomp.slider().visible())
+                    frame = sc.content_image()
+                    if previous is not None:
+                        self.assertNotEqual(frame.cacheKey(), previous.cacheKey())
+                    previous = frame
+                    self.assertEqual(sc._card_picture[0][5], theme)
+                    pump(panel.ENTER_MS + 150)
+                    self.assertIsNone(sc._sliding)
+                    self.assertTrue(dcomp.slider().shown)
+                    self.assertTrue(sc._compositor_resting)
+        finally:
+            win.dispose()
+
     def test_added_effects_keep_the_active_frame_clock(self):
         from unittest.mock import patch
         win, sc = make_panel(FakeApi("home"))
@@ -1291,7 +1630,7 @@ class HeaderAndFlyout(unittest.TestCase):
         finally:
             win.dispose()
 
-    def test_desktop_glass_pixels_stay_fixed_while_panel_boundary_moves(self):
+    def test_glass_stays_fixed_inside_exact_moving_card_without_bottom_mask(self):
         from PySide6.QtGui import QImage, QPainter, QColor
         win, sc = make_panel(FakeApi("home"))
         try:
@@ -1300,9 +1639,13 @@ class HeaderAndFlyout(unittest.TestCase):
             for y in range(glass.height()):
                 painter.fillRect(0, y, glass.width(), 1, QColor(y % 251, 50, 180))
             painter.end()
-            sc._flyout_glass = glass
-            sc._flyout_picture = QImage(sc.pw, sc.ph, QImage.Format_ARGB32_Premultiplied)
-            sc._flyout_picture.fill(Qt.transparent)
+            sc.glass = glass
+            from unittest.mock import patch
+            foreground = QImage(sc.pw, sc.ph, QImage.Format_ARGB32_Premultiplied)
+            foreground.fill(Qt.transparent)
+            with patch.object(sc, "content_image", return_value=foreground):
+                sc._prepare_flyout_picture()
+            self.assertEqual(sc._flyout_glass, glass)
             sc.anim_alpha, sc.moving = 1, True
             shots = []
             for distance in (.1, .25):
@@ -1312,6 +1655,10 @@ class HeaderAndFlyout(unittest.TestCase):
             self.assertGreater(shots[0].pixelColor(x,y).alpha(), 0)
             self.assertEqual(shots[0].pixelColor(x,y), shots[1].pixelColor(x,y))
             self.assertEqual(shots[1].pixelColor(x,int(shots[1].height()*.1)).alpha(), 0)
+            self.assertGreater(shots[1].pixelColor(0, shots[1].height() - 1).alpha(), 0)
+            top = round(sc.anim_dy * sc.scale)  # grab's QImage is in physical pixels
+            self.assertEqual(shots[1].pixelColor(0, top).alpha(), 0)
+            self.assertGreater(shots[1].pixelColor(x, top + 2).alpha(), 0)
         finally:
             win.dispose()
 
@@ -1360,29 +1707,163 @@ class HeaderAndFlyout(unittest.TestCase):
             sc.flyout_leave()
             sc.flyout_enter()
             self.assertIs(sc._flyout_picture, picture)
-            pump(410)
+            pump(panel.ENTER_MS + 160)
             self.assertIsNone(sc._flyout_picture)
             self.assertFalse(sc._deferred_glass)
             self.assertEqual(sc.states["light.l0"]["state"], "on")
         finally:
             win.dispose()
 
-    def test_flyout_starts_below_the_visible_edge_and_fades_late_on_exit(self):
+    def test_flyout_slides_in_and_out_from_behind_the_bottom_edge_without_fading(self):
         win, sc = make_panel(FakeApi("grid", tiles_of(1)))
         try:
             sc.anim_dy, sc.anim_alpha = sc.css_h, 0
             sc.flyout_enter()
-            self.assertEqual(sc.anim_dy, sc.css_h)
-            pump(410)
+            self.assertEqual((sc.anim_dy, sc.anim_alpha), (sc.css_h, 1))
+            pump(panel.ENTER_MS + 80)
             self.assertEqual((sc.anim_dy, sc.anim_alpha), (0, 1))
             sc.flyout_leave()
             pump(45)
             self.assertGreater(sc.anim_dy, 0)
             self.assertEqual(sc.anim_alpha, 1)
-            pump(170)
-            self.assertEqual((sc.anim_dy, sc.anim_alpha), (sc.css_h, 0))
+            pump(panel.LEAVE_MS + 60)
+            self.assertEqual((sc.anim_dy, sc.anim_alpha), (sc.css_h, 1))
         finally:
             win.dispose()
+
+    def test_animation_uses_raw_backdrop_instead_of_the_resting_glass_mask(self):
+        from PySide6.QtGui import QColor, QImage
+        from unittest.mock import Mock
+        win, sc = make_panel(FakeApi("grid", tiles_of(1)))
+        try:
+            raw = QImage(8, 8, QImage.Format_RGB888)
+            raw.fill(QColor(20, 40, 60))
+            sc.latest = raw
+            sc.mask = None
+            sc._make_glass()
+            self.assertEqual(sc.glass.pixelColor(0, sc.ph - 1).alpha(), 0)
+            old_size = sc.size()
+            for glass_style in ("classic", "windows", "liquid"):
+                sc.style = glass_style
+                sc.raw_latest = raw
+                glass, card = sc._slide_layers((sc.pw, sc.ph + 80))
+                self.assertEqual(glass.pixelColor(0, sc.ph - 1).alpha(), 255)
+                self.assertEqual(glass.pixelColor(0, sc.ph + 40).getRgb(), (20, 40, 60, 255))
+                self.assertEqual(card.pixelColor(sc.pw // 2, sc.ph + 40).alpha(), 0)
+                self.assertEqual(sc.size(), old_size)
+            sc.api.get_desktop_backdrop = Mock(return_value={"blur_raw": bytes([90, 80, 70]) * 4,
+                                                            "blur_w": 2, "blur_h": 2})
+            glass, _ = sc._slide_layers((sc.pw, sc.ph + 80), at=(100, 200))
+            self.assertEqual(glass.pixelColor(0, sc.ph + 40).getRgb(), (90, 80, 70, 255))
+            sc.api.get_desktop_backdrop.assert_called_once_with("flyout", None, sc.pw, sc.ph + 80, 100, 200, 0)
+        finally:
+            win.dispose()
+
+    def test_glass_compositor_keeps_original_motion_and_uses_an_inner_corner_clip(self):
+        from PySide6.QtGui import QImage
+        from unittest.mock import Mock, patch
+        win, sc = make_panel(FakeApi("grid", tiles_of(1)))
+        try:
+            for theme in ("light", "dark"):
+                for glass_style in ("classic", "liquid", "windows"):
+                    sc.theme, sc.style = theme, glass_style
+                    sc.t = panel.render.tokens(theme, style=glass_style)
+                    sc.glass = QImage(sc.pw, sc.ph, QImage.Format_ARGB32_Premultiplied)
+                    sc.glass.fill(Qt.white)
+                    original = sc.glass.copy()
+                    glass, card = sc._slide_layers((sc.pw + 1, sc.ph + 1))
+                    self.assertEqual(glass.pixelColor(0, sc.ph - 1).alpha(), 255)
+                    self.assertEqual(glass.pixelColor(sc.pw, sc.ph).alpha(), 0)
+                    slider = Mock()
+                    with patch.object(dcomp, "slider", return_value=slider), \
+                            patch.object(dcomp, "window_rect", return_value=(0, 0, sc.pw, sc.ph)), \
+                            patch.object(panel.screens, "monitor_at", return_value=Mock(
+                                rect=(0, 0, sc.pw, sc.ph + 160), work=(0, 0, sc.pw, sc.ph + 80))), \
+                            patch.object(sc, "cache_hwnd", return_value=1):
+                        self.assertTrue(sc._compositor_slide(True))
+                        self.assertEqual(slider.show.call_args.args[0][3], sc.ph + 80)
+                        radius = slider.show.call_args.args[4]
+                        self.assertEqual(radius, min(sc.card_radius(), sc.css_w / 2, sc.css_h / 2) * sc.scale)
+                        columns = slider.show.call_args.kwargs["columns"]
+                        path = panel.render.squircle(0, 0, sc.css_w * sc.scale, sc.css_h * sc.scale, radius)
+                        from PySide6.QtCore import QPointF
+                        for left, right, top, bottom in columns:
+                            for x in (left + .001, right - .001):
+                                self.assertTrue(path.contains(QPointF(x, top + .001)))
+                                self.assertTrue(path.contains(QPointF(x, bottom - .001)))
+                        slider.slide.assert_called_with(sc.ph + 80 + 24, 0.0, panel.ENTER_MS / 1000, panel.ENTER_CURVE)
+                        sc._finish_slide()
+                        slider.next_composition.reset_mock()
+                        self.assertTrue(sc._compositor_slide(False))
+                        slider.slide.assert_called_with(0.0, sc.ph + 80 + 24, panel.LEAVE_MS / 1000, panel.LEAVE_CURVE)
+                        self.assertFalse(slider.show.call_args.kwargs["wait"])
+                        slider.next_composition.assert_not_called()
+                        sc._finish_slide()
+                    self.assertEqual(sc.glass, original)
+        finally:
+            win.dispose()
+
+    def test_compositor_slide_hands_the_panel_over_and_back(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"HA_WIDGET_DCOMP": "1"}):
+            win, sc = make_panel(FakeApi("grid", tiles_of(1)))
+            try:
+                dcomp._state["failed"] = False
+                slider = dcomp.slider()
+                if slider is None:
+                    self.skipTest("no DirectComposition here")
+                from PySide6.QtGui import QColor, QImage
+                sc.style = "liquid"
+                sc.raw_latest = QImage(8, 8, QImage.Format_RGB888)
+                sc.raw_latest.fill(QColor(80, 120, 160))
+                sc.anim_dy, sc.anim_alpha = sc.css_h, 0
+                sc.flyout_enter()
+                self.assertEqual(sc._sliding[0], "enter")
+                self.assertTrue(slider.shown)
+                self.assertIsNotNone(slider.material)
+                material = slider.material
+                self.assertTrue(sc.moving)
+                columns = list(slider.mask_columns)
+                bounds = sc.size()
+                sc.states["light.l0"] = {"state": "on", "attributes": {}}
+                sc.rebuild()
+                self.assertEqual(sc._sliding[0], "enter")
+                self.assertEqual(slider.mask_columns, columns)
+                self.assertEqual(sc.size(), bounds)
+                self.assertIs(slider.material, material)
+                pump(panel.ENTER_MS + 35)
+                self.assertIsNotNone(sc._compositor_capture)  # keep sampling through the final blend
+                pump(115)
+                self.assertIsNone(sc._sliding)
+                self.assertIsNotNone(sc._compositor_capture)
+                self.assertTrue(sc._compositor_resting)
+                self.assertTrue(slider.shown)
+                self.assertIs(slider.material, material)
+                self.assertFalse(slider.material_timer.isActive())
+                self.assertEqual((sc.anim_dy, sc.anim_alpha), (0, 1))
+                self.assertFalse(sc.moving)
+                sc.flyout_leave()
+                self.assertEqual(sc._sliding[0], "leave")
+                self.assertTrue(slider.shown)
+                pump(panel.LEAVE_MS + 150)
+                self.assertIsNone(sc._sliding)
+                self.assertFalse(slider.shown)
+                self.assertEqual(sc.anim_alpha, 0)
+                self.assertFalse(sc.moving)
+                for kind, start in (("enter", sc.flyout_enter), ("leave", sc.flyout_leave),
+                                    ("enter", sc.flyout_enter), ("leave", sc.flyout_leave)):
+                    start()                             # (the helper, hidden, lies where it was last put)
+                    self.assertEqual(sc._sliding[0], kind)
+                    self.assertTrue(slider.visible(), kind)
+                    pump(panel.ENTER_MS + 150)
+                    self.assertEqual(slider.shown, kind == "enter")
+                sc.flyout_enter()                       # reversed before it ends: the first is taken to its end
+                sc.flyout_leave()
+                self.assertEqual(sc._sliding[0], "leave")
+                pump(panel.LEAVE_MS + 150)
+                self.assertFalse(slider.shown)
+            finally:
+                win.dispose()
 
     def test_header_controls_and_title_share_a_row_after_state_rebuild(self):
         from nativeui import style
@@ -1424,7 +1905,7 @@ class HeaderAndFlyout(unittest.TestCase):
             self.assertEqual((sc.anim_dy, sc.anim_alpha), current)
             self.assertEqual(sc.anim_zoom, 1)
             self.assertEqual((sc.width(), sc.height(), sc.css_w, sc.css_h), size)
-            pump(380)
+            pump(panel.ENTER_MS + 120)
             self.assertAlmostEqual(sc.anim_dy, 0)
             self.assertAlmostEqual(sc.anim_alpha, 1)
             self.assertFalse(sc.moving)

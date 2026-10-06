@@ -143,6 +143,27 @@ def details(theme="light"):
     return sheet(shots, 4)
 
 
+def desktop_detail_bounds(theme="light"):
+    """The whole desktop detail and settings on a narrow work area at each zoom."""
+    import test_desktop_popup_bounds as TB
+    shots = []
+    for zoom in (100, 150, 200):
+        win, card = TB.DesktopPopupBounds().make_card(zoom)
+        try:
+            prefs = card.api._prefs()
+            card.api._prefs = lambda: dict(prefs, theme=theme)
+            card.apply_prefs(card.api._prefs())
+            for editing in (False, True):
+                card.set_edit(editing)
+                pump(450)
+                img = card.content_image().copy()
+                img.setDevicePixelRatio(1)
+                shots.append(img)
+        finally:
+            win.dispose()
+    return sheet(shots, 2)
+
+
 def editor(theme="light"):
     import test_native_settings as TS
     api = TS.FakeApi()
@@ -231,11 +252,55 @@ def surfaces():
                   for theme, dim in (("light", False), ("dark", False), ("dark", True))], 3)
 
 
+def panel_glass_clip():
+    """Compositor's stationary glass and moving foreground, over contrasting desktops."""
+    import test_native_panel as T
+    images = []
+    for theme in ("light", "dark"):
+        api = T.FakeApi("grid", T.tiles_of(1))
+        prefs = dict(api._prefs(), theme=theme)
+        api._prefs = lambda: prefs
+        win, sc = T.make_panel(api)
+        try:
+            sc.latest = QImage(8, 8, QImage.Format_RGB888)
+            sc.latest.fill(QColor("#b4cfdf" if theme == "light" else "#263c50"))
+            sc._make_glass()
+            extent = sc.ph + round(sc.ph * .4)
+            glass, card = sc._slide_layers((sc.pw, extent))
+            for background in ("#ffffff", "#101010"):
+                for offset in (0, round(sc.ph * .35)):
+                    image = QImage(sc.pw, extent, QImage.Format_ARGB32_Premultiplied)
+                    image.fill(QColor(background))
+                    p = QPainter(image)
+                    p.setRenderHint(QPainter.Antialiasing)
+                    from PySide6.QtGui import QPainterPath
+                    clip = QPainterPath()
+                    radius = min(sc.card_radius(), sc.css_w / 2, sc.css_h / 2) * sc.scale
+                    outline = render.squircle(0, 0, sc.css_w * sc.scale, sc.css_h * sc.scale, radius)
+                    columns = panel.dcomp.outline_columns([(p.x(), p.y()) for p in outline.toFillPolygon()],
+                                                          sc.css_w * sc.scale, sc.css_h * sc.scale, radius)
+                    for left, right, top, bottom in columns:
+                        clip.addRect(QRectF(left, top + offset, right - left, bottom - top))
+                    p.save()
+                    p.setClipPath(clip)
+                    p.drawImage(0, 0, glass)
+                    p.restore()
+                    p.drawImage(0, offset, card)
+                    p.end()
+                    images.append(image)
+        finally:
+            win.dispose()
+    return sheet(images, 4)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     render.set_language("en")
     failed = []
     for name, make in (("widgets", widgets), ("details", details), ("editor", editor), ("home", home),
+                       ("panel-glass-clip", panel_glass_clip),
+                       ("desktop-detail-bounds", desktop_detail_bounds),
+                       ("desktop-detail-bounds-dark", lambda: desktop_detail_bounds("dark")),
                        ("details-dark", lambda: details("dark")), ("editor-dark", lambda: editor("dark")),
                        ("home-dark", lambda: home("dark")), ("categories", categories),
                        ("categories-dark", lambda: categories("dark")), ("materials", materials), ("surfaces", surfaces)):
@@ -250,6 +315,8 @@ def main():
         print(target, img.width(), img.height())
     from tools import glass_review
     glass_review.main(OUT / "glass")
+    from tools import gpu_glass_review
+    gpu_glass_review.main()
     from tools import settings_review
     settings_review.main(OUT / "settings-review")
     from tools import panel_motion_review

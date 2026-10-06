@@ -16,6 +16,7 @@ while, and rebuilt after the desktop is lost (mode change, secure desktop,
 GPU reset).
 """
 
+import contextlib
 import ctypes
 import threading
 import time
@@ -60,6 +61,12 @@ IID_IDXGIFactory1 = _GUID.parse("770aae78-f26f-4dba-a829-253c83d1b387")
 IID_IDXGIOutput1 = _GUID.parse("00cddea8-939b-4b83-a340-a685226666cc")
 IID_ID3D11Texture2D = _GUID.parse("6f15aaf2-d208-4e89-9ab4-489535d34f9c")
 IID_ID3D10Multithread = _GUID.parse("9b7e4e00-342c-4106-a19f-4f2704f689f0")
+IID_IDXGIDevice = _GUID.parse("54ec77fa-1377-44e6-8c32-88fd5f44c84c")
+IID_IDXGIResource = _GUID.parse("035f3ab4-482e-4e50-b41f-8a7f8bd8960b")
+IID_IDXGIKeyedMutex = _GUID.parse("9d8e1289-d7b3-465f-8126-250e349af85d")
+# How long a side waits for the other to let go of the shared desktop copy (ms): each holds it only
+# while it issues a copy command.
+_MUTEX_WAIT_MS = 20
 
 
 class _OUTPUT_DESC(ctypes.Structure):
@@ -98,6 +105,34 @@ class _BOX(ctypes.Structure):
 
 class _MAPPED(ctypes.Structure):
     _fields_ = [("pData", _vp), ("RowPitch", ctypes.c_uint), ("DepthPitch", ctypes.c_uint)]
+
+
+class _ADAPTER_DESC(ctypes.Structure):
+    _fields_ = [("Description", ctypes.c_wchar * 128), ("VendorId", ctypes.c_uint),
+                ("DeviceId", ctypes.c_uint), ("SubSysId", ctypes.c_uint),
+                ("Revision", ctypes.c_uint), ("DedicatedVideoMemory", ctypes.c_size_t),
+                ("DedicatedSystemMemory", ctypes.c_size_t), ("SharedSystemMemory", ctypes.c_size_t),
+                ("LuidLow", ctypes.c_uint), ("LuidHigh", ctypes.c_int)]
+
+
+def _address(pointer):
+    return int(getattr(pointer, "value", pointer) or 0)
+
+
+def _adapter_luid(adapter):
+    """(low, high) of an IDXGIAdapter, the identity two devices share when on one GPU."""
+    desc = _ADAPTER_DESC()
+    _call(adapter, 8, ctypes.byref(desc), argtypes=(_vp,), what="GetDesc")
+    return desc.LuidLow, desc.LuidHigh
+
+
+def _device_luid(dxgi_device):
+    adapter = _vp()
+    _call(dxgi_device, 7, ctypes.byref(adapter), argtypes=(_vp,), what="GetAdapter")
+    try:
+        return _adapter_luid(adapter)
+    finally:
+        _release(adapter)
 
 
 class DxgiError(OSError):
@@ -211,8 +246,12 @@ def _untransposer(rotation):
 class _Output:
     """One duplicated output and a GPU copy of its desktop."""
 
-    def __init__(self, device, context, output1, desc):
+    def __init__(self, device, context, output1, desc, luid=None):
         self.context = context
+        self.luid = luid           # the adapter this output lives on
+        self.mutex = None          # keyed mutex of `copy`, when a renderer on the same adapter may read it
+        self.handle = None         # `copy`'s shared handle
+        self.opened = {}           # reader device -> (its view of `copy`, its mutex)
         self.device = device
         self.desktop = (desc.Desktop.left, desc.Desktop.top,
                         desc.Desktop.right, desc.Desktop.bottom)
@@ -225,6 +264,8 @@ class _Output:
         self.copy_size = (0, 0)
         self.staging = None
         self.staging_size = (0, 0)
+        self._batch_seq = None
+        self._batch = {}
         # Counts the frames this output has taken. It starts from the clock,
         # not zero, so that after a rebuild (the duplication is released when
         # nothing has asked for a while) a caller's older `after` still reads
@@ -253,14 +294,18 @@ class _Output:
         return part, desktop_to_texture(local, self.rotation, w, h)
 
     def close(self):
+        self._unshare()
         for attr in ("staging", "copy", "dup"):
             _release(getattr(self, attr))
             setattr(self, attr, None)
 
-    def _texture(self, w, h, staging):
+    def _texture(self, w, h, staging, shared=False):
+        # A shared texture needs a bind flag (shader resource, 8) and a keyed mutex (0x100) to order
+        # the two devices' commands on the GPU.
         desc = _TEX2D_DESC(w, h, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 1, 0,
                            D3D11_USAGE_STAGING if staging else D3D11_USAGE_DEFAULT,
-                           0, D3D11_CPU_ACCESS_READ if staging else 0, 0)
+                           8 if shared else 0, D3D11_CPU_ACCESS_READ if staging else 0,
+                           0x100 if shared else 0)
         tex = _vp()
         _call(self.device, 5, ctypes.byref(desc), None, ctypes.byref(tex),
               argtypes=(_vp, _vp, _vp), what="CreateTexture2D")
@@ -326,19 +371,58 @@ class _Output:
         """Patch the rectangles this frame changed into `copy`."""
         tw, th = self._texture_size()
         if self.copy_size != (tw, th):
+            self._unshare()
             _release(self.copy)
             self.copy = None
-            self.copy = self._texture(tw, th, staging=False)
+            try:
+                self.copy = self._texture(tw, th, staging=False, shared=True)
+                self._share()
+            except (DxgiError, OSError):
+                self._unshare()
+                _release(self.copy)
+                self.copy = self._texture(tw, th, staging=False)
             self.copy_size = (tw, th)
             self.valid = None
         whole = (0, 0, tw, th)
         boxes = [whole] if self.valid is None else [
             hit for hit in (_intersect(r, whole) for r in changed) if hit]
-        for l, t, r, b in boxes:
-            _call(self.context, 46, self.copy, 0, l, t, 0, frame, 0,
-                  ctypes.byref(_BOX(l, t, 0, r, b, 1)),
-                  restype=None, argtypes=_COPY_REGION_ARGS)
+        with self._held():
+            for l, t, r, b in boxes:
+                _call(self.context, 46, self.copy, 0, l, t, 0, frame, 0,
+                      ctypes.byref(_BOX(l, t, 0, r, b, 1)),
+                      restype=None, argtypes=_COPY_REGION_ARGS)
         self.valid = whole
+
+    def _share(self):
+        """Give `copy` a shared handle and a keyed mutex so that a renderer's device can read it."""
+        self.mutex = _query(self.copy, IID_IDXGIKeyedMutex, "QueryInterface(KeyedMutex)")
+        resource = _query(self.copy, IID_IDXGIResource, "QueryInterface(Resource)")
+        try:
+            handle = _vp()
+            _call(resource, 8, ctypes.byref(handle), argtypes=(_vp,), what="GetSharedHandle")
+            self.handle = handle.value
+        finally:
+            _release(resource)
+
+    def _unshare(self):
+        for texture, mutex in self.opened.values():
+            _release(mutex)
+            _release(texture)
+        self.opened = {}
+        _release(getattr(self, "mutex", None))
+        self.mutex = self.handle = None
+
+    @contextlib.contextmanager
+    def _held(self):
+        """The keyed mutex of `copy`, held while commands that read or write it are issued."""
+        mutex = getattr(self, "mutex", None)
+        taken = bool(mutex) and _call(mutex, 8, 0, _MUTEX_WAIT_MS,
+                                      argtypes=(ctypes.c_uint64, ctypes.c_uint)) == 0
+        try:
+            yield
+        finally:
+            if taken:
+                _call(mutex, 9, 0, argtypes=(ctypes.c_uint64,))
 
     def changed_since(self, tex_rect, after):
         """True if `tex_rect` may have changed after frame `after`."""
@@ -353,6 +437,8 @@ class _Output:
 
     def read(self, tex_rect):
         """(BGRA bytes, pitch, w, h) of `tex_rect` from the kept copy."""
+        if self._batch_seq == self.seq and tex_rect in self._batch:
+            return self._batch[tex_rect]
         if not self.copy or not self.valid or _intersect(tex_rect, self.valid) != tex_rect:
             return None
         l, t, r, b = tex_rect
@@ -363,9 +449,10 @@ class _Output:
             sw, sh = max(w, self.staging_size[0]), max(h, self.staging_size[1])
             self.staging = self._texture(sw, sh, staging=True)
             self.staging_size = (sw, sh)
-        _call(self.context, 46, self.staging, 0, 0, 0, 0, self.copy, 0,
-              ctypes.byref(_BOX(l, t, 0, r, b, 1)),
-              restype=None, argtypes=_COPY_REGION_ARGS)
+        with self._held():
+            _call(self.context, 46, self.staging, 0, 0, 0, 0, self.copy, 0,
+                  ctypes.byref(_BOX(l, t, 0, r, b, 1)),
+                  restype=None, argtypes=_COPY_REGION_ARGS)
         mapped = _MAPPED()
         _call(self.context, 14, self.staging, 0, D3D11_MAP_READ, 0, ctypes.byref(mapped),
               argtypes=(_vp, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, _vp), what="Map")
@@ -377,17 +464,70 @@ class _Output:
                   argtypes=(_vp, ctypes.c_uint))
         return data, pitch, w, h
 
+    def read_batch(self, rects):
+        """One GPU readback for the active windows, with their pixels kept separate.
+
+        Copy each rectangle into a horizontal atlas, then Map once. Several
+        independent Maps stall the immediate context once per widget. No
+        scaling, sampling or shared refraction is involved here.
+        """
+        rects = list(dict.fromkeys(rects))
+        if self._batch_seq == self.seq:
+            return
+        self._batch_seq, self._batch = None, {}
+        if len(rects) < 2 or not self.copy or not self.valid:
+            return
+        if any(_intersect(rect, self.valid) != rect for rect in rects):
+            return
+        width = sum(r - l for l, t, r, b in rects)
+        height = max(b - t for l, t, r, b in rects)
+        # Stay inside D3D11 texture limits and bound temporary CPU memory.
+        if width > 16384 or height > 16384 or width * height > 16_000_000:
+            return
+        if self.staging_size[0] < width or self.staging_size[1] < height:
+            _release(self.staging)
+            self.staging = None
+            sw, sh = max(width, self.staging_size[0]), max(height, self.staging_size[1])
+            self.staging = self._texture(sw, sh, staging=True)
+            self.staging_size = (sw, sh)
+        placements, offset = [], 0
+        with self._held():
+            for l, t, r, b in rects:
+                _call(self.context, 46, self.staging, 0, offset, 0, 0, self.copy, 0,
+                      ctypes.byref(_BOX(l, t, 0, r, b, 1)),
+                      restype=None, argtypes=_COPY_REGION_ARGS)
+                placements.append((offset, r - l, b - t))
+                offset += r - l
+        mapped = _MAPPED()
+        _call(self.context, 14, self.staging, 0, D3D11_MAP_READ, 0, ctypes.byref(mapped),
+              argtypes=(_vp, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, _vp), what="Map")
+        try:
+            from PIL import Image
+            pitch = mapped.RowPitch
+            # Cut each window straight out of the mapped memory: one native
+            # copy apiece, not a copy of the whole atlas and then a Python
+            # slice for every row while other threads wait for the GIL.
+            view = (ctypes.c_char * (pitch * height)).from_address(mapped.pData)
+            atlas = Image.frombuffer("RGBA", (pitch // 4, height), view, "raw", "RGBA", pitch, 1)
+            for rect, (offset, w, h) in zip(rects, placements):
+                self._batch[rect] = (atlas.crop((offset, 0, offset + w, h)).tobytes(), w * 4, w, h)
+        finally:
+            _call(self.context, 15, self.staging, 0, restype=None,
+                  argtypes=(_vp, ctypes.c_uint))
+        self._batch_seq = self.seq
+
 # ---------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------
 
 class _Read:
-    def __init__(self, rect, after, timeout):
+    def __init__(self, rect, after, timeout, pixels=True):
         self.rect = rect
         self.after = after
         self.deadline = time.monotonic() + timeout
         self.done = threading.Event()
         self.result = None
+        self.pixels = pixels
 
 
 class DesktopDuplication:
@@ -411,8 +551,83 @@ class DesktopDuplication:
         self._broken_until = 0.0
         self._failures = 0
         self._log = None
+        self._luids = {}           # reader device -> its adapter's identity
         # Counts the desktop frames received, so that anyone watching
         # several rectangles can wait for "the screen changed" once.
+
+    def _reader_luid(self, device):
+        key = _address(device)
+        if key not in self._luids:
+            dxgi_device = _query(device, IID_IDXGIDevice, "QueryInterface(Device)")
+            try:
+                self._luids[key] = _device_luid(dxgi_device)
+            finally:
+                _release(dxgi_device)
+        return self._luids[key]
+
+    def gpu_source(self, rect, device):
+        """(output, texture rectangle) when the desktop rectangle `rect` (x, y, w, h) can be copied on the
+        GPU into a texture of `device`: one unrotated output that holds it, on the same adapter, whose
+        copy of the desktop is shared."""
+        l, t, w, h = rect
+        want = (l, t, l + w, t + h)
+        if not _address(device):
+            return None
+        with self._gpu:
+            found = None
+            for out in self._outputs:
+                part, tex = out.texture_rect(want)
+                if not part:
+                    continue
+                if (found is not None or part != want or not out.mutex or not out.handle
+                        or _untransposer(out.rotation) is not None
+                        or not out.copy or not out.valid or _intersect(tex, out.valid) != tex):
+                    return None
+                found = (out, tex)
+            if found is None:
+                return None
+            try:
+                if found[0].luid != self._reader_luid(device):
+                    return None
+            except (DxgiError, OSError, ValueError):
+                return None
+            return found
+
+    def copy_region(self, rect, destination, device, context):
+        """Copy desktop `rect` into `destination`, a texture of `device`, entirely on the GPU: the
+        renderer's own commands, ordered after the capture's by the copy's keyed mutex. The frame
+        cursor, or None."""
+        with self._gpu:
+            got = self.gpu_source(rect, device)
+            if got is None:
+                return None
+            out, (l, t, r, b) = got
+            key = _address(device)
+            opened = out.opened.get(key)
+            try:
+                if opened is None:
+                    while len(out.opened) >= 8:          # readers that came and went leave their views behind
+                        old = out.opened.pop(next(iter(out.opened)))
+                        _release(old[1])
+                        _release(old[0])
+                    texture = _vp()
+                    _call(device, 28, _vp(out.handle), ctypes.byref(IID_ID3D11Texture2D),
+                          ctypes.byref(texture), argtypes=(_vp, _vp, _vp), what="OpenSharedResource")
+                    mutex = _query(texture, IID_IDXGIKeyedMutex, "QueryInterface(KeyedMutex)")
+                    opened = out.opened[key] = (texture, mutex)
+                texture, mutex = opened
+                if _call(mutex, 8, 0, _MUTEX_WAIT_MS,
+                         argtypes=(ctypes.c_uint64, ctypes.c_uint)) != 0:
+                    return None
+                try:
+                    _call(context, 46, destination, 0, 0, 0, 0, texture, 0,
+                          ctypes.byref(_BOX(l, t, 0, r, b, 1)),
+                          restype=None, argtypes=_COPY_REGION_ARGS)
+                finally:
+                    _call(mutex, 9, 0, argtypes=(ctypes.c_uint64,))
+            except DxgiError:
+                return None
+            return ((out.name, out.seq),)
 
     def set_logger(self, fn):
         self._log = fn
@@ -427,12 +642,13 @@ class DesktopDuplication:
     def available(self):
         return time.monotonic() >= self._broken_until
 
-    def grab(self, x, y, w, h, after=None, timeout=1.0):
+    def grab(self, x, y, w, h, after=None, timeout=1.0, pixels=True, interest_rects=None):
         if w <= 0 or h <= 0 or not self.available():
             return None
-        read = _Read((x, y, x + w, y + h), after, timeout)
+        read = _Read((x, y, x + w, y + h), after, timeout, pixels)
         with self._lock:
-            self._interest[read.rect] = time.monotonic()
+            for rect in interest_rects if interest_rects is not None else (read.rect,):
+                self._interest[rect] = time.monotonic()
             if not self._thread or not self._thread.is_alive():
                 self._thread = threading.Thread(
                     target=self._run, daemon=True, name="dxgi-capture")
@@ -543,6 +759,7 @@ class DesktopDuplication:
     @staticmethod
     def _build_adapter(d3d11, adapter, outputs, devices):
         device = context = None
+        luid = None
         o = 0
         while True:
             output = _vp()
@@ -560,9 +777,10 @@ class DesktopDuplication:
                 if device is None:
                     device, context = _create_device(d3d11, adapter)
                     devices.append((device, context))
+                    luid = _adapter_luid(adapter)
                 output1 = _query(output, IID_IDXGIOutput1, "QueryInterface(Output1)")
                 try:
-                    outputs.append(_Output(device, context, output1, desc))
+                    outputs.append(_Output(device, context, output1, desc, luid))
                 finally:
                     _release(output1)
             finally:
@@ -628,6 +846,19 @@ class DesktopDuplication:
                           or out.changed_since(tex, after[out.name])
                           for out, _, tex in parts))
         if changed:
+            if not read.pixels:
+                if any(not out.copy or out.valid is None or _intersect(tex, out.valid) != tex
+                       for out, _, tex in parts):
+                    return False
+                read.result = (frame, b'')
+                return True
+            # The first reader of this desktop frame also brings back the
+            # other active windows. Their readers reuse their own exact pixels.
+            with self._lock:
+                interested = list(self._interest)
+            for out, _, _ in parts:
+                rectangles = [out.texture_rect(rect)[1] for rect in interested]
+                out.read_batch([rect for rect in rectangles if rect])
             data = self._compose(read.rect, parts)
             if data is None:
                 return False           # the copy is filled on the next frame

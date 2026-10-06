@@ -63,9 +63,9 @@ class CaptureApi(FakeApi):
         if key not in self.cache:
             bg = desktop(w, h, self.pattern)
             if self.prefs["glass_style"] == "liquid":
-                level = min(0.3, self.prefs["liquid_blur"] / 100)
+                level = self.prefs["liquid_blur"] / 100
                 scale, pre, post = scope["_liquid_params"](level)
-                small = bg.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.Resampling.BOX)
+                small = bg if scale == 1 else bg.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.Resampling.BOX)
                 small = small.filter(ImageFilter.GaussianBlur(pre))
                 if scale > 2:
                     small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))), Image.Resampling.HAMMING)
@@ -90,15 +90,29 @@ def pump_until(predicate, timeout=5):
     raise RuntimeError("Native glass worker did not produce a frame")
 
 
-def create(style="classic", theme="light", pattern="busy", level=0, zoom=100):
+def create(style="classic", theme="light", pattern="busy", level=0, zoom=100, gpu=False):
     api = CaptureApi(style, theme, pattern, level, zoom)
+    if gpu:
+        api.gpu_widget_glass_allowed = lambda kind: True
+        capture = api.get_desktop_backdrop
+        def changed_only(kind, last_hash, w, h, *args):
+            result = capture(kind, last_hash, w, h, *args)
+            if result['hash'] == last_hash:
+                return dict(unchanged=True, paced=True, hash=last_hash)
+            return result
+        api.get_desktop_backdrop = changed_only
     win = widget.NativeWidget(api, "w1")
     surface = win.native
     surface.move(100, 100)
     surface.relayout()
     surface.push_states(list(STATES.items()))
     surface.show()
-    pump_until(lambda: surface.glass is not None and surface.glass.width() == surface.pw)
+    ready = (lambda: surface._gpu_receiver is not None and surface._gpu_receiver.visible) if gpu else \
+            (lambda: surface.glass is not None and surface.glass.width() == surface.pw)
+    pump_until(ready)
+    if not ready():
+        close(win)
+        raise RuntimeError('Glass did not become ready')
     return api, win, surface
 
 
@@ -115,7 +129,9 @@ def shot(surface, pattern):
     raw = desktop(surface.pw, surface.ph, pattern)
     image = QImage(raw.tobytes(), raw.width, raw.height, raw.width * 3, QImage.Format_RGB888).copy()
     p = QPainter(image)
-    p.drawImage(QRectF(0, 0, raw.width, raw.height), surface.grab().toImage())
+    receiver = getattr(surface, '_gpu_receiver', None)
+    foreground = receiver.snapshot() if receiver is not None and receiver.visible else surface.grab().toImage()
+    p.drawImage(QRectF(0, 0, raw.width, raw.height), foreground)
     p.end()
     return image
 

@@ -774,7 +774,7 @@ def draw_media(p, W, H, tile, state, art, card, tcol, dim, style, theme, seek_to
         on = action in can
         p.save()
         if not on:                                     # nothing playing, or the player cannot: faint, inert
-            p.setOpacity(p.opacity() * 0.35)
+            p.setOpacity(p.opacity() * (0.65 if dim else 0.35))
         if action == "play_pause":
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 235))

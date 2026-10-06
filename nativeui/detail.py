@@ -538,13 +538,23 @@ class DetailCard(OverlayScene):
         if self.page_targets is None:
             return None
         rect = self.transition_frame()
-        return render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), self.t["radius_tile"])
+        return render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), self.detail_radius())
+
+    def detail_radius(self):
+        # The frame and its controls shrink together on a small work area.
+        return self.t["radius_tile"] * self.page_frame.w / CARD_W
 
     def view_at(self, x, y):
+        floating = self.layer.hit(x, y)
+        if floating is not None:
+            return floating
         frame = self.transition_clip()
         if frame is not None and not frame.contains(QPointF(x, y)):
             return None
         return super().view_at(x, y)
+
+    def popup_bounds(self):
+        return self.transition_frame() if self.page_targets is not None else super().popup_bounds()
 
     def paint_card(self, p):
         if self.page_targets is None:
@@ -563,7 +573,7 @@ class DetailCard(OverlayScene):
         p.setOpacity(p.opacity() * t)
         p.translate(target.x(), target.y())
         render.draw_card_bg(p, target.width(), target.height(), self.t, self.style, self.theme,
-                            radius=self.t["radius_tile"], plain=True)
+                            radius=self.detail_radius(), plain=True)
         p.restore()
 
     def set_transition_source(self, anchor, image=None, tile_id=None, generation=None, source_dpi=None, source_work=None):
@@ -703,11 +713,20 @@ class DetailCard(OverlayScene):
         """How tall the card can be, in its own px: the work area of its screen, less a margin."""
         work = getattr(self, "metric_work_area", None)
         if work and self.scale:
-            return max(120.0, (work[3]-work[1]-24)/self.scale)
+            return max(1.0, (work[3]-work[1]-24)/self.scale)
         screen = self.screen()
         if screen is None or not self.scale:
             return BODY_MAX + 67
-        return max(120.0, screen.availableGeometry().height() * screen.devicePixelRatio() / self.scale - 24)
+        return max(1.0, (screen.availableGeometry().height() * screen.devicePixelRatio() - 24) / self.scale)
+
+    def room_width(self):
+        work = getattr(self, "metric_work_area", None)
+        if work and self.scale:
+            return max(1.0, (work[2] - work[0] - 24) / self.scale)
+        screen = self.screen()
+        if screen is None or not self.scale:
+            return CARD_W
+        return max(1.0, (screen.availableGeometry().width() * screen.devicePixelRatio() - 24) / self.scale)
 
     def rebuild(self):
         if self.tile is None:
@@ -741,7 +760,8 @@ class DetailCard(OverlayScene):
         if fitted is not None:
             room = fitted[1]
         view = self.content.build(max_h=room, fit=True)
-        k = fitted[2] if fitted else (settings_scale if self.content.edit else min(1.0, room / view.h))
+        k = fitted[2] if fitted else min(self.room_width() / CARD_W,
+                                       settings_scale if self.content.edit else min(1.0, room / view.h))
         height = fitted[3] if fitted else view.h * k
         self.detail_fit = (key, room, k, height)
         self.detail_fits[key] = self.detail_fit

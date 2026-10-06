@@ -578,14 +578,15 @@ def _place(anchor, pane):
     scene = anchor.scene
     ax, ay, k = anchor.in_scene()
     anchor_k = k
-    k = min(k, max(1, scene.css_w - 12) / pane.w, max(1, scene.css_h - 12) / pane.h)
+    bounds = scene.popup_bounds()
+    k = min(k, max(1, bounds.width() - 12) / pane.w, max(1, bounds.height() - 12) / pane.h)
     pane.scale = k
     mw, mh = pane.w * k, pane.h * k
-    x = min(max(6.0, ax + (anchor.w * anchor_k - mw) / 2), scene.css_w - mw - 6)
+    x = min(max(bounds.left() + 6, ax + (anchor.w * anchor_k - mw) / 2), bounds.right() - mw - 6)
     y = ay + anchor.h * anchor_k + 6 * k
-    if y + mh > scene.css_h - 6:
+    if y + mh > bounds.bottom() - 6:
         y = ay - 6 * k - mh
-    pane.x, pane.y = x, max(6.0, min(y, scene.css_h - mh - 6))
+    pane.x, pane.y = x, max(bounds.top() + 6, min(y, bounds.bottom() - mh - 6))
 
 
 def _unopen(pane):

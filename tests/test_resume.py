@@ -64,7 +64,8 @@ class ResumeTests(unittest.TestCase):
     def test_native_resume_signals_worker_without_consuming_message(self):
         pending = threading.Event()
         callback = extract("qtshell.py", "nativeEventFilter", {
-            "wintypes": wintypes, "_resume_pending": pending})
+            "wintypes": wintypes, "_resume_pending": pending,
+            "time": __import__("time"), "_last_display_event": [0.0]})
         for event in (0x0007, 0x0012):
             pending.clear()
             msg = wintypes.MSG()
@@ -83,7 +84,7 @@ class ResumeTests(unittest.TestCase):
         api._all_windows.return_value = [window]
         api._widgets = {"w": window}
         scope = {"window": window, "api": api, "qtshell": Mock()}
-        for name in ("_set_noactivate", "_apply_window_shape", "_send_to_bottom"):
+        for name in ("_set_noactivate", "_apply_window_shape", "_send_to_bottom", "_restore_widget_place"):
             scope[name] = Mock()
         restore = extract("main.py", "restore_window", scope)
         api._desktop_visible = True

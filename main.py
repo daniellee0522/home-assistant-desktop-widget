@@ -33,6 +33,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import zlib
 
 # Pillow imports numpy when it finds it, only to name a type: about 10 MB of memory for nothing.
@@ -40,6 +41,7 @@ sys.modules.setdefault("numpy", None)
 sys.modules.setdefault("numpy.typing", None)
 
 from capture_worker import CaptureWorker
+from capture_pixels import within_noise, within_noise_bgrx
 from dxgi_capture import DesktopDuplication
 
 if sys.platform == "win32":
@@ -153,6 +155,11 @@ class Api:
         self._flyout_resize_lock = threading.Lock()
         self._flyout_last_resize_seq = -1
         self._flyout_open = False
+        self._flyout_serial = 0
+        self._flyout_toggle_lock = threading.Lock()
+        self._flyout_toggle_thread = None
+        self._flyout_toggle_running = False
+        self._flyout_toggle_revision = 0
         # (work area, notification area is on the right), fixed at open:
         # the pointer is only over the tray icon at the moment of the click.
         self._flyout_anchor = None
@@ -162,6 +169,7 @@ class Api:
         # Activation churns while a window is being shown; a Deactivate in
         # that moment is not the user clicking away.
         self._flyout_shown_at = 0.0
+        self._flyout_dismissed_at = -1e9         # (when the panel last closed itself for lost focus)
         # The window, if any, that is positioned but not yet shown and is
         # taking the backdrop of where it will appear; see _arm_backdrop.
         self._arming_kind = None
@@ -1064,11 +1072,49 @@ class Api:
             time.sleep(0.04)
         self._arming_kind = None
 
+    # A click on the tray icon is two events: the press takes the focus from the panel (which closes it), the release
+    # is the icon's own toggle. The release, within this long of the panel having closed itself, is the same click.
+    _SAME_CLICK_S = 0.4
+
     def toggle_flyout(self, from_key=False):
-        if self._flyout_open:
-            self.hide_flyout()
-        else:
-            self.show_flyout(from_key)
+        # Only intent changes under this lock. No GUI waits or captures hold it.
+        if not hasattr(self, "_flyout_toggle_lock"):
+            self._flyout_toggle_lock = threading.Lock()
+            self._flyout_toggle_running = False
+            self._flyout_toggle_revision = 0
+        with self._flyout_toggle_lock:
+            current = self._flyout_toggle_target if self._flyout_toggle_running else self._flyout_open
+            if (not current and not from_key
+                    and time.monotonic() - self._flyout_dismissed_at <= self._SAME_CLICK_S):
+                self._flyout_dismissed_at = -1e9
+                return
+            self._flyout_toggle_target = not current
+            self._flyout_toggle_from_key = from_key
+            self._flyout_toggle_revision += 1
+            if self._flyout_toggle_running:
+                return
+            self._flyout_toggle_running = True
+            worker = threading.Thread(target=self._drive_flyout_toggles, daemon=True)
+            self._flyout_toggle_thread = worker
+        worker.start()
+
+    def _drive_flyout_toggles(self):
+        while True:
+            with self._flyout_toggle_lock:
+                revision = self._flyout_toggle_revision
+                target = self._flyout_toggle_target
+                from_key = self._flyout_toggle_from_key
+            try:
+                if target:
+                    self.show_flyout(from_key)
+                else:
+                    self.hide_flyout()
+            except Exception:
+                qtshell.log(traceback.format_exc())
+            with self._flyout_toggle_lock:
+                if revision == self._flyout_toggle_revision:
+                    self._flyout_toggle_running = False
+                    return
 
     def _place_flyout(self, window, hwnd, size):
         at = self._flyout_origin(size[0], size[1])
@@ -1083,13 +1129,19 @@ class Api:
         if not self._all_tiles() and not self._home_mode():
             self.open_settings_window()
             return
+        self._flyout_serial = getattr(self, "_flyout_serial", 0) + 1
+        serial = self._flyout_serial
+        self._flyout_open = True
         window = self._ensure_overlay("flyout")
-        if window:
-            window.prepare_for_show()
+        if serial != self._flyout_serial or not self._flyout_open:
+            return
+        resuming = window.prepare_for_show() is True if window else False
         hwnd = _get_hwnd(window) if window else None
         if not hwnd:
+            self._flyout_open = False
             return
-        self._flyout_open = True
+        if serial != self._flyout_serial or not self._flyout_open:
+            return
         self._sync_client_entities()
         self._flyout_anchor = self._tray_corner(_tray_point() if from_key else None)
         size = self._flyout_size
@@ -1118,6 +1170,8 @@ class Api:
             if self._flyout_size:
                 self._place_flyout(window, hwnd, self._flyout_size)
             self._arming_kind = "flyout"
+        if serial != self._flyout_serial or not self._flyout_open:
+            return
         # Reused windows can be shown immediately; cold windows were already
         # shown transparently and armed above.
         try:
@@ -1132,10 +1186,18 @@ class Api:
         self._apply_system_glass("flyout")
         self._flyout_shown_at = time.monotonic()
         self._watch_flyout_focus()
-        if not cold:
+        if not cold and not resuming:
             self._arm_backdrop("flyout", window, timeout=0.12, settle=False)
-        _bring_to_front(window)
-        window.send("flyout_enter")
+        if serial != self._flyout_serial or not self._flyout_open:
+            return
+        _bring_to_front(window, topmost=True)
+        def enter_current():
+            if serial == self._flyout_serial and self._flyout_open:
+                window.native.flyout_enter()
+        if getattr(window, "is_native_overlay", False) is True:
+            window.run_on_ui_thread(enter_current)
+        else:
+            window.send("flyout_enter")
 
     def dismiss_flyout(self):
         """Close the panel because focus moved elsewhere.
@@ -1146,42 +1208,78 @@ class Api:
         """
         if time.monotonic() - self._flyout_shown_at < 0.5:
             return
-        # The activation change is still in flight when Deactivate fires.
-        time.sleep(0.12)
-        try:
-            if _foreground_root() in self._own_hwnds():
+        serial = self._flyout_serial
+        # The activation change is still in flight when Deactivate fires: the foreground window is none for a
+        # moment. Closed as soon as it is another program's; given up on waiting after the same 0.12 s as before.
+        for _ in range(8):
+            if serial != self._flyout_serial or not self._flyout_open:
                 return
-        except Exception:
-            pass
+            try:
+                foreground = _foreground_root()
+                if foreground in self._own_hwnds():
+                    return
+                if foreground:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.015)
+        if serial != self._flyout_serial or not self._flyout_open:
+            return
+        self._flyout_dismissed_at = time.monotonic()
         self.hide_flyout()
 
     # Keep in step with the panel's own exit (nativeui/panel.py flyout_leave).
-    _FLYOUT_LEAVE_S = 0.20
+    _FLYOUT_LEAVE_S = 0.17
 
     def hide_flyout(self):
+        if (getattr(self, "_flyout_toggle_running", False)
+                and threading.current_thread() is not self._flyout_toggle_thread):
+            with self._flyout_toggle_lock:
+                self._flyout_toggle_target = False
+                self._flyout_toggle_revision += 1
         if not self._flyout_open:
             return
         self._flyout_open = False
+        self._flyout_serial = getattr(self, "_flyout_serial", 0) + 1
+        serial = self._flyout_serial
         self._sync_client_entities()
         self.close_popover()
         window = self._flyout_window
-        self._overlays_open.discard("flyout")
-        self._apply_capture_exclusion()
         if not window:
+            self._overlays_open.discard("flyout")
+            self._apply_capture_exclusion()
+            return
+
+        def valid_exit():
+            return serial == self._flyout_serial and not self._flyout_open
+
+        def closed_current():
+            if valid_exit():
+                # The desktop beneath the moving card remains capturable until
+                # the card is actually hidden, including an interrupted exit.
+                self._overlays_open.discard("flyout")
+                self._apply_capture_exclusion()
+                self._schedule_release("flyout")
+
+        if getattr(window, "is_native_overlay", False) is True:
+            # Time the hide from the actual GUI start, not from a worker's send.
+            window.leave_and_hide(valid_exit, 210, closed_current)
             return
 
         def fade_then_hide():
             # On a thread: this can be called from the GUI thread, where
             # waiting out the animation would block it.
+            if not valid_exit():
+                return
             window.send("flyout_leave")
             time.sleep(self._FLYOUT_LEAVE_S)
-            if self._flyout_open:
+            if not valid_exit():
                 return          # opened again mid-fade
             try:
                 window.hide()
             except Exception:
                 pass
-            self._schedule_release("flyout")
+            closed_current()
 
         threading.Thread(target=fade_then_hide, daemon=True).start()
 
@@ -1192,18 +1290,24 @@ class Api:
         and SetForegroundWindow can be refused. Polls while the panel is
         open and closes it once focus is elsewhere.
         """
+        serial = self._flyout_serial
         def watch():
-            time.sleep(0.8)          # activation is not instant
+            time.sleep(0.5)          # activation is not instant (the same grace dismiss_flyout gives it)
             misses = 0
-            while self._flyout_open:
-                if _foreground_root() in self._own_hwnds():
+            while self._flyout_open and serial == self._flyout_serial:
+                try:
+                    foreground = _foreground_root()
+                    if foreground and foreground not in self._own_hwnds():
+                        misses += 1
+                    else:
+                        misses = 0       # (none, in the middle of a change: neither here nor there)
+                except Exception:
                     misses = 0
-                else:
-                    misses += 1
-                    if misses >= 2:
-                        self.hide_flyout()
-                        return
-                time.sleep(0.25)
+                if misses >= 2 and serial == self._flyout_serial:
+                    self._flyout_dismissed_at = time.monotonic()
+                    self.hide_flyout()
+                    return
+                time.sleep(0.03)
 
         threading.Thread(target=watch, daemon=True).start()
 
@@ -1324,7 +1428,7 @@ class Api:
         except Exception:
             pass
         self._apply_capture_exclusion()
-        _bring_to_front(self._popover_window)
+        _bring_to_front(self._popover_window, topmost=self._flyout_open)
         self._apply_system_glass("popover")
 
     def _ensure_settings_window(self):
@@ -1410,11 +1514,11 @@ class Api:
         if self._popover_window:
             _set_noactivate(self._popover_window, not enabled)
             if enabled:
-                _bring_to_front(self._popover_window)
+                _bring_to_front(self._popover_window, topmost=self._flyout_open)
         return True
 
     def get_desktop_backdrop(self, window_kind="main", last_hash=None, want_w=0, want_h=0,
-                             at_x=None, at_y=None, wait_secs=None):
+                             at_x=None, at_y=None, wait_secs=None, defer_pixels=False, gpu=False):
         """The desktop behind a window, blurred, as a small raw-pixel picture
         (RGB bytes in "blur_raw", "blur_w" x "blur_h").
 
@@ -1482,15 +1586,21 @@ class Api:
                 # Compatibility mode cannot read a screen containing itself;
                 # render the windows beneath the panel over the wallpaper.
                 over = _windows_below(hwnd, (x, y, x + w, y + h))
-            from PIL import Image, ImageChops, ImageFilter
+                from nativeui import dcomp
+                helper = dcomp._state["slider"]
+                if helper is not None:
+                    over = tuple(h for h in over if h != helper.hwnd)
+            from PIL import Image, ImageFilter
             widget = None
             raw = None
             paced = False
             # Other programs' windows over a widget show in a picture of the screen; looked for on both sides
             # of the wait for a frame, as one moving could be anywhere between the two.
             look_over = _is_widget_kind(window_kind) and can_read_screen and not compose_widget
-            ours = self._own_hwnds() if look_over else ()
-            covers = _windows_over(hwnd, (x, y, x + w, y + h), ours) if look_over else []
+            shared = getattr(self, '_shared_windows', None) if look_over else None
+            ours = (shared[1] if shared else self._own_hwnds()) if look_over else ()
+            covers = (_windows_over(hwnd, (x, y, x + w, y + h), ours, shared[0] if shared else None)
+                      if look_over else [])
             if can_read_screen or compose_widget:
                 # Answered when the screen under the window changes, at the
                 # display's own rate; GDI only if duplication is unavailable.
@@ -1501,6 +1611,32 @@ class Api:
                     # The widget drawn into this frame changes on its own,
                     # so the screen under it cannot set the pace.
                     after = None
+                direct = (self._gpu_direct_frame(window, window_kind, rect, last_hash)
+                          if look_over and not covers and defer_pixels and not is_popover else None)
+                if direct is None and gpu and window_kind == "flyout" and can_read_screen and not compose_widget:
+                    direct = self._flyout_direct(rect)
+                if direct is not None:
+                    # The picture never leaves the GPU: only whether it changed is asked here. A widget's
+                    # batch has waited for the screen already; the panel waits here, and is answered the
+                    # moment the screen changes instead of polling it.
+                    got = _screen_duplication.grab(x, y, w, h, after, 0 if defer_pixels else 0.1,
+                                                   pixels=False)
+                    if got is not None:
+                        self._duplication_after[window_kind] = (rect, got[0])
+                        if got[1] is None:
+                            if capture_epoch != self._capture_epoch:
+                                return {"skip": True, "retry_ms": 80}
+                            return {"unchanged": True, "hash": last_hash, "paced": True,
+                                    "system_glass": False}
+                        if _is_widget_kind(window_kind):
+                            # A popover over this widget composes the picture only when it opens.
+                            self._widget_frames[window_kind] = (
+                                x, y, w, h,
+                                lambda: (_screen_duplication.grab(x, y, w, h, None, 0.2) or (None, None))[1])
+                        return dict(gpu=(x, y, w, h), copy=_screen_duplication.copy_region,
+                                    pre_blur=direct, w=w, h=h, system_glass=False, paced=True,
+                                    hash=hash(got[0]) & 0x7FFFFFFF,
+                                    ms=(time.perf_counter() - started) * 1000)
                 got = _screen_duplication.grab(
                     x, y, w, h, after,
                     _DUPLICATION_WAIT_SECS if wait_secs is None else wait_secs)
@@ -1514,6 +1650,16 @@ class Api:
                                 "system_glass": False}
                     raw = got[1]
                 else:
+                    if (window_kind == "flyout" and seen is not None
+                            and _screen_duplication.available()):
+                        # A live source may temporarily rebuild or have no frame.
+                        # GDI treats excluded layered windows differently, so
+                        # swapping to it for one update flashes the material.
+                        # Keep the last valid picture and retry the same source.
+                        # Its frame counter can restart after a rebuild.
+                        # Keep the source, but request a fresh frame next time.
+                        self._duplication_after[window_kind] = (rect, None)
+                        return {"skip": True, "retry_ms": 16, "paced": True}
                     self._duplication_after.pop(window_kind, None)
                     raw = _desktop_capture.grab_screen(x, y, w, h)
             owner_window = self._window_for(self._popover_owner) or self._window
@@ -1538,96 +1684,188 @@ class Api:
                         raw = _compat_capture.grab(x, y, w, h, over)
             if not raw:
                 return None
+            if window_kind == "flyout" and can_read_screen:
+                # Widgets stay excluded while the panel opens. Compose their
+                # native/GPU snapshots into the panel only, without restarting
+                # the widgets' capture or compositor.
+                for kind in self._widget_kinds() or ["main"]:
+                    if kind in self._excluded_kinds:
+                        widget = self._widget_under(kind, (x, y, x + w, y + h))
+                        if widget:
+                            image, rect = widget
+                            raw = _composite_rgba_window(raw, (w, h), image,
+                                                         (rect[0] - x, rect[1] - y))
             if capture_epoch != self._capture_epoch:
                 return {"skip": True, "retry_ms": 80}
             if look_over:
-                raw = self._without_windows_over(window_kind, hwnd, (x, y, w, h), raw, covers, ours)
+                raw = self._without_windows_over(window_kind, hwnd, (x, y, w, h), raw, covers, ours,
+                                                 shared[0] if shared else None)
+                if raw is None:
+                    # Never publish an occluding app as the widget's glass
+                    # when the clean wallpaper source is temporarily unavailable.
+                    return {"skip": True, "retry_ms": 80}
             if _is_widget_kind(window_kind) and can_read_screen:
                 self._widget_frames[window_kind] = (x, y, w, h, raw)
-            liquid = (self._cfg.get("glass_style") == "liquid"
-                      and not is_popover)
-            # Only a blur is drawn, so a reduce of the raw pixels is plenty,
-            # and skips converting the full frame. The liquid lens refracts
-            # this picture too, so it keeps more detail (1/4 scale, a light
-            # blur); the rest is 1/8. A fine pattern on the wallpaper (mesh,
-            # hatching) beats against the 1/4 sampling grid into slow diagonal
-            # stripes, so the lens's picture is blurred at half size, before
-            # it is sampled, to remove what the grid cannot represent.
-            level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
-            # The lens refracts this picture, so it stays detailed whatever the blur setting: that is applied to
-            # the glass under the lens by the window itself (nativeui/glass.py), not here.
-            scale, pre_blur, post_blur = _liquid_params(min(level, _LIQUID_PICTURE_MAX)) if liquid else (8, 0, 2)
-            small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
-            if liquid:
-                small = (small.reduce(2) if not (w % 2 or h % 2) else
-                         small.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX))
-                small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
-                if pre_blur:
-                    small = small.filter(ImageFilter.GaussianBlur(radius=pre_blur))
-                if scale > 2:
+            def prepare_pixels():
+                liquid = (self._cfg.get("glass_style") == "liquid"
+                          and not is_popover)
+                # Clear liquid keeps the original desktop resolution. Frosted
+                # liquid progressively reduces the source, with an anti-aliasing
+                # prefilter; the window's full-resolution lens applies the frost.
+                level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
+                scale, pre_blur, post_blur = _liquid_params(level) if liquid else (8, 0, 2)
+                direct_pixels = (liquid and scale == 1
+                                 and getattr(getattr(window, 'native', None), '_gpu_shared_capture', False))
+                if direct_pixels:
+                    history = getattr(self, '_backdrop_direct', None)
+                    if history is None:
+                        history = self._backdrop_direct = {}
+                    sent = history.get(window_kind)
+                    if (last_hash is not None and sent and sent[0] == int(last_hash)
+                            and sent[1] == (w, h) and within_noise_bgrx(sent[2], raw, (w, h), _BACKDROP_NOISE, pre_blur)):
+                        return {'unchanged': True, 'hash': int(last_hash), 'paced': paced}
+                    digest = zlib.crc32(raw) & 0xFFFFFFFF
+                    if capture_epoch != self._capture_epoch:
+                        return {'skip': True, 'retry_ms': 80}
+                    history[window_kind] = (digest, (w, h), raw)
+                    return dict(blur_raw=raw, pixel_format='BGRX', pre_blur=pre_blur, blur_w=w, blur_h=h,
+                                w=w, h=h, hash=digest, paced=paced, system_glass=False,
+                                ms=(time.perf_counter() - started) * 1000)
+                small = Image.frombuffer("RGBA", (w, h), raw, "raw", "RGBA", 0, 1)
+                if liquid:
+                    if scale == 1:
+                        # Decode the original capture directly; serialising the
+                        # full RGBA view first copies every pixel unnecessarily.
+                        small = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
+                    else:
+                        small = (small.reduce(2) if not (w % 2 or h % 2) else
+                                 small.resize((max(1, round(w / 2)), max(1, round(h / 2))), Image.BOX))
+                        small = Image.frombytes("RGB", small.size, small.tobytes(), "raw", "BGRX")
+                    if pre_blur:
+                        small = small.filter(ImageFilter.GaussianBlur(radius=pre_blur))
+                    if scale > 2:
+                        small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
+                                             Image.HAMMING)
+                elif w % scale or h % scale:
+                    # Not a whole number of cells: stretch the picture over
+                    # the window exactly rather than past its edge.
                     small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
-                                         Image.HAMMING)
-            elif w % scale or h % scale:
-                # Not a whole number of cells: stretch the picture over
-                # the window exactly rather than past its edge.
-                small = small.resize((max(1, round(w / scale)), max(1, round(h / scale))),
-                                     Image.BOX)
-            else:
-                small = small.reduce(scale)
-            if not liquid:
-                small = Image.frombytes("RGB", small.size, small.tobytes(),
-                                        "raw", "BGRX")
-            # A frame that differs from the one on screen by less than the
-            # eye can tell, once blurred, is not worth sending and painting.
-            sent = self._backdrop_sent.get(window_kind)
-            if (last_hash is not None and sent and sent[0] == int(last_hash)
-                    and sent[1].size == small.size
-                    and max(hi for _, hi in ImageChops.difference(
-                        sent[1], small).getextrema()) <= _BACKDROP_NOISE):
-                return {"unchanged": True, "hash": int(last_hash),
-                        "ms": (time.perf_counter() - started) * 1000.0,
-                        "paced": paced, "system_glass": False}
-            digest = zlib.crc32(small.tobytes()) & 0xFFFFFFFF
-            self._backdrop_sent[window_kind] = (digest, small)
-            # Blurring the source avoids the dark wedges a canvas blur leaves
-            # in rounded corners by sampling past its edges.
-            blur_radius = post_blur
-            if blur_radius:
-                small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-            # Raw pixels, not an image file: a JPEG this small, stretched back
-            # up to the window, shows its 8x8 blocks as mottling, and a file
-            # needs decoding (and leaves memory behind) for a few KB of data.
-            blur_raw = small.tobytes()
-            blur_size = small.size
+                                         Image.BOX)
+                else:
+                    small = small.reduce(scale)
+                if not liquid:
+                    small = Image.frombytes("RGB", small.size, small.tobytes(),
+                                            "raw", "BGRX")
+                # A frame that differs from the one on screen by less than the
+                # eye can tell, once blurred, is not worth sending and painting.
+                sent = self._backdrop_sent.get(window_kind)
+                if (last_hash is not None and sent and sent[0] == int(last_hash)
+                        and within_noise(sent[1], small, _BACKDROP_NOISE)):
+                    return {"unchanged": True, "hash": int(last_hash),
+                            "ms": (time.perf_counter() - started) * 1000.0,
+                            "paced": paced, "system_glass": False}
+                blur_raw = small.tobytes()
+                digest = zlib.crc32(blur_raw) & 0xFFFFFFFF
+                self._backdrop_sent[window_kind] = (digest, small)
+                # Blurring the source avoids the dark wedges a canvas blur leaves
+                # in rounded corners by sampling past its edges.
+                blur_radius = post_blur
+                if blur_radius:
+                    small = small.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                # Raw pixels, not an image file: a JPEG this small, stretched back
+                # up to the window, shows its 8x8 blocks as mottling, and a file
+                # needs decoding (and leaves memory behind) for a few KB of data.
+                if blur_radius:
+                    blur_raw = small.tobytes()
+                blur_size = small.size
 
-            if capture_epoch != self._capture_epoch:
-                return {"skip": True, "retry_ms": 80}
-            return {
-                "system_glass": False,
-                "blur_raw": blur_raw,
-                "blur_w": blur_size[0],
-                "blur_h": blur_size[1],
-                "w": w,
-                "h": h,
-                "hash": digest,
-                # The capture's own cost; the window paces itself from this.
-                "ms": (time.perf_counter() - started) * 1000.0,
-                # The screen set the pace; ask again straight away.
-                "paced": paced,
-            }
+                if capture_epoch != self._capture_epoch:
+                    return {"skip": True, "retry_ms": 80}
+                return {
+                    "system_glass": False,
+                    "blur_raw": blur_raw,
+                    "pixel_format": "RGB",
+                    "blur_w": blur_size[0],
+                    "blur_h": blur_size[1],
+                    "w": w,
+                    "h": h,
+                    "hash": digest,
+                    # The capture's own cost; the window paces itself from this.
+                    "ms": (time.perf_counter() - started) * 1000.0,
+                    # The screen set the pace; ask again straight away.
+                    "paced": paced,
+                }
+            return prepare_pixels if defer_pixels else prepare_pixels()
         except Exception:
             return None
 
-    def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours):
+    def _flyout_direct(self, rect):
+        """0.0 when the panel's material may take the desktop straight from the GPU: it runs on the compositor
+        (liquid glass), no widget lies under the panel (those are drawn into its picture on the processor),
+        and the screen's duplication can copy that rectangle to the compositor's device."""
+        from nativeui import dcomp
+        helper = dcomp._state["slider"]
+        if (helper is None or helper.material is None or not helper.shown
+                or time.monotonic() < helper.direct_after or self._cfg.get("glass_style") != "liquid"):
+            return None
+        x, y, w, h = rect
+        area = (x, y, x + w, y + h)
+        for kind in self._widget_kinds() or ["main"]:
+            if kind in self._excluded_kinds:
+                window = self._window_for(kind)
+                shown = _visible_rect(window) if window else None
+                if shown and _rects_overlap(shown, area):
+                    return None
+        return 0.0 if _screen_duplication.gpu_source(rect, helper.device) else None
+
+    def _widget_under(self, kind, area):
+        """A widget's picture (as _grab_widget_rgba) for the panel's backdrop, only if it is under `area`.
+        Taking it reads a GPU widget back on the GUI thread, so a picture of a widget that has not drawn
+        since, or less than 60 ms old, is used again, and widgets the panel does not cover cost nothing."""
+        window = self._window_for(kind)
+        rect = _visible_rect(window) if window else None
+        if not rect or not _rects_overlap(rect, area):
+            return None
+        snaps = self.__dict__.setdefault("_widget_snaps", {})
+        receiver = getattr(getattr(window, "native", None), "_gpu_receiver", None)
+        frames = getattr(receiver, "frames", None)
+        now = time.monotonic()
+        kept = snaps.get(kind)
+        if (kept and kept[3] == rect and kept[2] is not None
+                and ((frames is not None and kept[1] == frames) or now - kept[0] < 0.06)):
+            return kept[2]
+        widget = _grab_widget_rgba(window)
+        snaps[kind] = (now, frames, widget, rect)
+        return widget
+
+    def _gpu_direct_frame(self, window, kind, rect, last_hash):
+        """The picture's pre-blur when this widget may take the desktop straight from the GPU, else None.
+        Clear and lightly frosted liquid glass of a widget with its own compositor, on the screen
+        whose duplication shares that compositor's device."""
+        native = getattr(window, "native", None)
+        receiver = getattr(native, "_gpu_receiver", None)
+        if (receiver is None or receiver.compositor is None or not native._gpu_shared_capture
+                or self._cfg.get("glass_style") != "liquid"
+                or time.monotonic() < getattr(native, "_gpu_direct_after", 0)):
+            return None
+        level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
+        scale, pre_blur, _ = _liquid_params(level)
+        if scale != 1:
+            return None
+        if not _screen_duplication.gpu_source(rect, receiver.compositor.device):
+            return None
+        return pre_blur
+
+    def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours, snapshot=None):
         """A widget's picture of the screen with other programs' windows over it replaced by the desktop:
         from its last clean picture, or the wallpaper when it has none yet. The picture becomes the clean one."""
         x, y, w, h = rect
-        covers = covers + _windows_over(hwnd, (x, y, x + w, y + h), ours)
+        covers = covers + _windows_over(hwnd, (x, y, x + w, y + h), ours, snapshot)
         if covers:
             kept = self._clean_backdrops.get(kind)
             clean = kept[1] if kept and kept[0] == rect else _compat_capture.grab(x, y, w, h)
             if not clean or len(clean) != len(raw):
-                return raw                        # nothing clean to show: not kept as clean either
+                return None                       # keep the last glass; retry a clean capture
             raw = _patch_covered(raw, rect, covers, clean)
         self._clean_backdrops[kind] = (rect, raw)
         return raw
@@ -1665,13 +1903,101 @@ class Api:
         if not _user32.IsWindowVisible(hwnd):
             answer = {"skip": True, "retry_ms": 1000}
         elif _nothing_visible_of(hwnd, self._own_hwnds()):
-            answer = {"skip": True, "retry_ms": 400}
+            # Covered: looked at again soon, for the glass to be back within a moment of the cover going.
+            answer = {"skip": True, "retry_ms": 100}
         if widget:
-            self._hidden_cache[kind] = (now + 0.25, answer)
+            self._hidden_cache[kind] = (now + (0.08 if answer and answer["retry_ms"] < 400 else 0.25), answer)
         return answer
 
     def _own_hwnds(self):
-        return {h for h in (_get_hwnd(w) for w in self._all_windows()) if h}
+        windows = {h for h in (_get_hwnd(w) for w in self._all_windows()) if h}
+        from nativeui.widget_glass import hwnds
+        windows.update(hwnds())
+        # The compositor helper is our visible flyout while its native window
+        # is transparent. It must not be mistaken for another app covering it.
+        from nativeui import dcomp
+        helper = dcomp._state["slider"]
+        if helper is not None and helper.shown and helper.hwnd:
+            windows.add(helper.hwnd)
+        return windows
+
+    def gpu_widget_glass_allowed(self, kind):
+        # Compatibility capture must remain visible in recordings. Only the
+        # explicitly excluded liquid widgets use an excluded GPU visual.
+        return _is_widget_kind(kind) and kind in self._excluded_kinds
+
+    def widget_glass_frames(self, requests, after=None, defer=False):
+        """Wait once, then sample all GPU widgets from one immutable desktop frame.
+
+        Zero-wait per-window reads while holding the duplication's GPU lock
+        cannot block waiting for a future frame. Existing occlusion filtering,
+        hashes, capture exclusion and compatibility fallback still apply.
+        """
+        rects = []
+        for kind, last_hash, w, h in requests:
+            window = self._window_for(kind)
+            hwnd = _get_hwnd(window) if window else None
+            if hwnd:
+                x, y, w, h = self._capture_rect(hwnd, w, h)
+                rects.append((x, y, x + w, y + h))
+        if not rects:
+            return None, [None] * len(requests)
+        x, y = min(r[0] for r in rects), min(r[1] for r in rects)
+        right, bottom = max(r[2] for r in rects), max(r[3] for r in rects)
+        source_after = after[1] if after and after[0] == tuple(rects) else None
+        if any(digest is None for _, digest, _, _ in requests):
+            source_after = None
+        got = _screen_duplication.grab(x, y, right-x, bottom-y, source_after, .5,
+                                       pixels=False, interest_rects=rects)
+        if got is None:
+            return None, [self.get_desktop_backdrop(kind, digest, w, h, None, None, 0)
+                          for kind, digest, w, h in requests]
+        with _screen_duplication._gpu:
+            # A frame may arrive between wakeup and this lock. The cursor
+            # describes the exact kept copy all the following reads observe.
+            frame = tuple((out.name, out.seq) for out in _screen_duplication._outputs
+                          if any(out.texture_rect(rect)[1] for rect in rects))
+            shots = []
+            # The desktop's windows are looked at once for every widget of this frame.
+            try:
+                self._shared_windows = (_window_snapshot(), self._own_hwnds())
+            except Exception:
+                self._shared_windows = None
+            try:
+                for kind, digest, w, h in requests:
+                    shots.append(self.get_desktop_backdrop(kind, digest, w, h, None, None, 0, True))
+            finally:
+                self._shared_windows = None
+        if defer:
+            # The caller finishes these while this thread waits for the next
+            # desktop frame, so a slow filter pass never delays the capture.
+            return (tuple(rects), frame), shots
+        # Read all source rectangles under one GPU lock, then release it before
+        # CPU filters run. Native Pillow filters release the GIL, so independent
+        # widgets can prepare the same desktop frame concurrently.
+        from concurrent.futures import ThreadPoolExecutor
+        pool = getattr(self, '_backdrop_pool', None)
+        if pool is None:
+            pool = self._backdrop_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='glass-pixels')
+        def finish(shot):
+            try:
+                return shot() if callable(shot) else shot
+            except Exception:
+                return None
+        if int(self._cfg.get('liquid_blur', 0)) > 0 and len(shots) > 1:
+            shots = list(pool.map(finish, shots))
+        else:
+            finished = []
+            for shot in shots:
+                finished.append(finish(shot))
+                if len(shots) > 1:
+                    time.sleep(0)  # let the GUI submit the preceding frame
+            shots = finished
+        return (tuple(rects), frame), shots
+
+    widget_glass_clock_paced = True
+    widget_glass_deferred = True
+    flyout_gpu_backdrop = True        # get_desktop_backdrop("flyout", ..., gpu=True) may answer with a GPU copy
 
     def move_window(self, screen_x, screen_y, window_kind="main"):
         # Physical screen pixels, from a widget being dragged.
@@ -1728,7 +2054,8 @@ class Api:
             mine = rects.get(kind)
             covered = bool(mine) and any(
                 rects.get(other) and _rects_overlap(mine, rects[other])
-                and not (_is_widget_kind(kind) and other == "popover")
+                and not (_is_widget_kind(kind) and (other == "popover" or
+                         (other == "flyout" and self._cfg.get("glass_style") == "liquid")))
                 for other in above
             )
             # Settings reads nothing from the screen, so it need not hide.
@@ -1740,7 +2067,7 @@ class Api:
                 ok = _set_capture_exclusion(win, excluded[kind])
                 if ok and excluded[kind]:
                     accepted.add(kind)
-        if accepted != self._excluded_kinds:
+        if {k for k in accepted if _is_widget_kind(k)} != {k for k in self._excluded_kinds if _is_widget_kind(k)}:
             self._capture_epoch += 1
             self._capture_transition_until = time.monotonic() + 0.2
         self._excluded_kinds = accepted
@@ -1921,6 +2248,10 @@ class Api:
         widget = self._widget_cfg(widget_id)
         if not window or widget is None:
             return
+        if qtshell.display_unsettled():
+            # Windows moved it (a TDR, a monitor gone or back): not the user's doing, so the remembered
+            # place stays, and restore_window puts the widget back there.
+            return
         rect = _window_rect(_get_hwnd(window))
         if not rect:
             return
@@ -2040,6 +2371,8 @@ LWA_ALPHA = 0x2
 SW_HIDE = 0
 HWND_BOTTOM = 1
 HWND_TOP = 0
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 GW_HWNDLAST = 1
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
@@ -2634,15 +2967,12 @@ def snap_rect(rect, others, areas, threshold, gap):
     return int(x), int(y)
 
 
-_LIQUID_PICTURE_MAX = 0.3
-
-
 def _liquid_params(level):
     """How the liquid glass's picture is made for a blur level, 0 (the clearest:
-    half the window's detail, hardly blurred) to 1 (as frosted as the classic glass):
+    full window detail) to 1 (a one-third-resolution frosted source):
     (the picture's scale as 1/n, the blur before it is shrunk, the blur after)."""
     level = max(0.0, min(1.0, level))
-    return round(2 + 6 * level), 0.6 + 0.9 * level, 2.0 * level
+    return 1 if level <= 0.45 else 2 if level <= 0.85 else 3, 0.3 * level, 0
 
 
 def _is_widget_kind(kind):
@@ -2704,6 +3034,10 @@ def _compose_popover_backdrop(screen_bgra, popover_rect, main_frame, widget):
     from PIL import Image
     x, y, w, h = popover_rect
     mx, my, mw, mh, main_bgra = main_frame
+    if callable(main_bgra):              # a widget drawn on the GPU hands over its picture only now
+        main_bgra = main_bgra()
+        if not main_bgra or len(main_bgra) != mw * mh * 4:
+            return None
     image, rect = widget
     if (abs(mx - rect[0]) > 3 or abs(my - rect[1]) > 3 or
             abs(mw - (rect[2] - rect[0])) > 3 or
@@ -2765,10 +3099,48 @@ def _windows_below(target, rect):
 _SHADOW_PX = 12
 
 
-def _windows_over(target, rect, ours):
+def _window_snapshot():
+    """Every top-level window in z-order, top first, as (hwnd, rect): the rectangle (with room for its
+    shadow) of those that can be seen, None for the rest. One pass serves every widget of a frame."""
+    found = []
+
+    def visit(hwnd, _):
+        rect = None
+        if _user32.IsWindowVisible(hwnd) and not _user32.IsIconic(hwnd):
+            style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            invisible = False
+            if style & WS_EX_LAYERED:
+                alpha, flags = ctypes.c_ubyte(255), ctypes.c_uint(0)
+                invisible = bool(_user32.GetLayeredWindowAttributes(
+                    hwnd, None, ctypes.byref(alpha), ctypes.byref(flags))
+                    and flags.value & LWA_ALPHA and alpha.value == 0)
+            cloaked = ctypes.c_uint()
+            if not invisible and not (_dwmapi.DwmGetWindowAttribute(
+                    hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0
+                    and cloaked.value):
+                r = _window_rect(hwnd)
+                if r and r[2] > r[0] and r[3] > r[1]:
+                    rect = (r[0] - _SHADOW_PX, r[1] - _SHADOW_PX, r[2] + _SHADOW_PX, r[3] + _SHADOW_PX)
+        found.append((hwnd, rect))
+        return 1
+
+    _user32.EnumWindows(_ENUM_WINDOWS_PROC(visit), 0)
+    return found
+
+
+def _windows_over(target, rect, ours, snapshot=None):
     """Rectangles, as (l, t, r, b) on screen, of the windows not ours that sit above `target` and cross
     `rect`: what a capture of the screen there shows instead of the desktop. Windows that can't be seen
-    (hidden, minimised, cloaked, click-through or fully transparent) are left out."""
+    (hidden, minimised, cloaked or fully transparent) are left out. A click-through window may still
+    be visible in capture; WS_EX_TRANSPARENT controls input/paint order, not its opacity."""
+    if snapshot is not None:
+        found = []
+        for hwnd, r in snapshot:
+            if hwnd == target:
+                break                             # the rest are below it
+            if r is not None and hwnd not in ours and _rects_overlap(rect, r):
+                found.append(r)
+        return found
     found = []
 
     def visit(hwnd, _):
@@ -2777,8 +3149,6 @@ def _windows_over(target, rect, ours):
         if hwnd in ours or not _user32.IsWindowVisible(hwnd) or _user32.IsIconic(hwnd):
             return 1
         style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        if style & WS_EX_TRANSPARENT:
-            return 1
         if style & WS_EX_LAYERED:
             alpha, flags = ctypes.c_ubyte(255), ctypes.c_uint(0)
             if (_user32.GetLayeredWindowAttributes(hwnd, None, ctypes.byref(alpha), ctypes.byref(flags))
@@ -3112,7 +3482,9 @@ def _send_to_bottom(window):
     _run_on_ui_thread(window, _apply)
 
 
-def _bring_to_front(window):
+def _bring_to_front(window, topmost=False):
+    """To the front, and the window the user is working in. `topmost`: and above whatever is clicked next, as the
+    system's own flyouts are, so that closing it can still be seen (the panel and the card opened from it)."""
     hwnd = _get_hwnd(window)
     if not hwnd:
         return
@@ -3120,7 +3492,7 @@ def _bring_to_front(window):
     def _apply():
         with _hwnd_lock:
             try:
-                _user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                _user32.SetWindowPos(hwnd, HWND_TOPMOST if topmost else HWND_NOTOPMOST, 0, 0, 0, 0,
                                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
                 _user32.SetForegroundWindow(hwnd)
             except Exception:
@@ -3168,6 +3540,23 @@ def _widget_initial_size(size, zoom):
     except Exception:
         factor = 1.0
     return max(MIN_WINDOW_W, int(w * factor)), max(MIN_WINDOW_H, int(h * factor))
+
+
+def _restore_widget_place(api, window):
+    """Put a widget back where the user left it, once the displays have settled. Only when that place is on a
+    monitor that exists now: with its monitor gone, Windows' own choice stands and the remembered place waits."""
+    widget_id = next((i for i, w in api._widgets.items() if w is window), None)
+    mine = api._widget_cfg(widget_id) if widget_id else None
+    hwnd = _get_hwnd(window)
+    rect = _window_rect(hwnd) if hwnd else None
+    if not mine or not rect:
+        return
+    x, y = int(mine["x"]), int(mine["y"])
+    cx, cy = x + (rect[2] - rect[0]) // 2, y + (rect[3] - rect[1]) // 2
+    if not any(m["x"] <= cx < m["x"] + m["w"] and m["y"] <= cy < m["y"] + m["h"] for m in _monitors()):
+        return
+    if (rect[0], rect[1]) != (x, y):
+        _set_window_pos(hwnd, x, y)
 
 
 def _create_widget_window(api, widget, show=False):
@@ -3271,6 +3660,7 @@ def main():
                 widget_window.native._cache_hwnd()
                 _set_noactivate(widget_window, True)
                 widget_window.native.showNormal()
+                _restore_widget_place(api, widget_window)
                 _send_to_bottom(widget_window)
         for win in api._all_windows():
             win.refresh_display()

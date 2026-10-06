@@ -237,6 +237,36 @@ class ClockCalendarPlayer(unittest.TestCase):
         self.assertFalse(surf.second_timer.isActive())           # hidden: no more frames
         TW.done(win)
 
+    def test_a_dimmed_clock_draws_the_next_minutes_face_before_the_minute_changes(self):
+        import datetime
+        from unittest.mock import patch
+        api, win, surf = make([], "clock", "2x2")
+        TW.pump(300)
+        surf.set_dim(True)
+        TW.pump(900)
+        surf._drawn_minute = datetime.datetime(2030, 1, 1, 10, 5)
+        class Now(datetime.datetime):
+            moment = datetime.datetime(2030, 1, 1, 10, 5, 58, 100)
+            @classmethod
+            def now(cls, tz=None):
+                return cls.moment
+        drawn = []
+        real = surf._draw
+        surf._draw = lambda dim: drawn.append((dim, surf._face_time)) or real(dim)
+        with patch.object(TW.nw.datetime, "datetime", Now):
+            surf.second_timer.stop()
+            surf._second()
+            self.assertEqual(drawn, [(True, datetime.datetime(2030, 1, 1, 10, 6))])    # the coming face, now
+            self.assertEqual(surf._drawn_minute, datetime.datetime(2030, 1, 1, 10, 5))  # not taken for drawn
+            ahead = surf._ahead[1]
+            surf._second()                                                      # once, not each second
+            self.assertEqual(len(drawn), 1)
+            Now.moment = datetime.datetime(2030, 1, 1, 10, 6, 0, 50000)
+            surf._second()
+            self.assertIs(surf.overlay_dim, ahead)                              # used as it is
+            self.assertIsNone(surf._ahead)
+        TW.done(win)
+
     def test_the_player_plays_and_skips_from_the_desktop(self):
         st = {"media_player.s": {"state": "paused", "attributes": {"media_title": "T", "media_duration": 100,
                                                                    "media_position": 10}}}

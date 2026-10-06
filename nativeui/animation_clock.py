@@ -6,6 +6,7 @@ on Qt's GUI thread. Older Windows versions fall back to a precise QTimer.
 import ctypes
 import os
 import threading
+import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 
@@ -48,6 +49,49 @@ class _Ticker:
             _kernel.CloseHandle(self.handle)
 
 
+try:
+    _dwm_flush = ctypes.windll.dwmapi.DwmFlush if os.name == "nt" else None
+except (OSError, AttributeError):
+    _dwm_flush = None
+
+
+class _VsyncTicker:
+    """Wakes once per desktop composition (DwmFlush returns just after one), so a frame painted on each wake
+    reaches the screen at the next composition, one to a refresh. A clock that merely runs near the refresh
+    rate beats against it: some refreshes get two frames, one of which is never seen, and some none, which
+    shows as a stutter. Where DwmFlush fails or comes back at once (no composition to wait for) it waits
+    `interval` ms instead."""
+
+    def __init__(self, wake, interval, waiter=None):
+        self.wake, self.interval = wake, interval
+        self.stopped = threading.Event()
+        self.pending = threading.Event()
+        self.waiter = waiter
+
+    def run(self):
+        quick = 0
+        while not self.stopped.is_set():
+            started = time.perf_counter()
+            try:
+                failed = (self.waiter or _dwm_flush)() != 0
+            except OSError:
+                failed = True
+            if failed or time.perf_counter() - started < 0.001:
+                quick += 1
+            else:
+                quick = 0
+            if failed or quick >= 3:
+                self.stopped.wait(self.interval / 1000)
+            if self.stopped.is_set():
+                break
+            if not self.pending.is_set():
+                self.pending.set()
+                try:
+                    self.wake(self)
+                except RuntimeError:           # the Qt owner has already been destroyed
+                    break
+
+
 class FrameTimer(QObject):
     timeout = Signal()
     _wake = Signal(object)
@@ -59,11 +103,17 @@ class FrameTimer(QObject):
         self._fallback.setInterval(16)
         self._fallback.timeout.connect(self.timeout)
         self._ticker = None
+        self.vsync = False          # wake on each desktop composition (see _VsyncTicker)
+        self.vsync_waiter = None   # an output-specific vblank, for multi-monitor GPU widgets
+        self.shared_clock = None
+        self._shared_active = False
         self._wake.connect(self._dispatch, Qt.QueuedConnection)
         # Destruction must also stop the worker without touching a deleted QObject.
         self._owner = [None]
         owner = self._owner
         self.destroyed.connect(lambda *_: owner[0].stopped.set() if owner[0] is not None else None)
+        self.destroyed.connect(lambda *_: self.shared_clock.unsubscribe(self)
+                               if self._shared_active else None)
 
     def interval(self):
         return self._fallback.interval()
@@ -78,10 +128,19 @@ class FrameTimer(QObject):
             self.start()
 
     def isActive(self):
-        return self._ticker is not None or self._fallback.isActive()
+        return self._shared_active or self._ticker is not None or self._fallback.isActive()
 
     def start(self):
         if self.isActive():
+            return
+        if self.shared_clock is not None:
+            self._shared_active = True
+            self.shared_clock.subscribe(self)
+            return
+        if self.vsync and _dwm_flush is not None:
+            ticker = _VsyncTicker(self._wake.emit, self.interval(), self.vsync_waiter)
+            self._ticker = self._owner[0] = ticker
+            threading.Thread(target=ticker.run, daemon=True, name="animation-clock").start()
             return
         handle = _kernel.CreateWaitableTimerExW(None, None, 2, 0x100002) if _kernel is not None else None
         if handle:
@@ -95,6 +154,9 @@ class FrameTimer(QObject):
         self._fallback.start()
 
     def stop(self):
+        if self._shared_active:
+            self._shared_active = False
+            self.shared_clock.unsubscribe(self)
         ticker = self._ticker
         self._ticker = self._owner[0] = None
         if ticker is not None:

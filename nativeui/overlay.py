@@ -121,6 +121,20 @@ class NativeOverlay:
     def hide(self):
         qtshell._invoke(self._native, self._native.hide)
 
+    def leave_and_hide(self, valid, delay_ms, finished):
+        """Start and finish an exit on the GUI thread, only for its current opening."""
+        from PySide6.QtCore import QTimer
+        def run():
+            if not valid():
+                return
+            self._native.flyout_leave()
+            def complete():
+                if valid():
+                    self._native.hide()
+                    finished()
+            QTimer.singleShot(delay_ms, self._native, complete)
+        qtshell._invoke(self._native, run)
+
     def set_opacity(self, value):
         qtshell._invoke(self._native, lambda: self._native.setWindowOpacity(value), wait=True)
 
@@ -128,7 +142,9 @@ class NativeOverlay:
         qtshell._invoke(self._native, getattr(self._native, "display_changed", self._native.update_metrics))
 
     def prepare_for_show(self):
-        pass
+        prepare = getattr(self._native, "prepare_for_show", None)
+        if prepare is not None:
+            return qtshell._invoke(self._native, prepare, wait=True)
 
     def destroy(self):
         qtshell._invoke(self._native, self._native.close)

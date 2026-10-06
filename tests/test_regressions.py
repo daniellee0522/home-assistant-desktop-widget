@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 import config
@@ -15,9 +16,9 @@ def api_type():
     api = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Api')
     names = {'_push_batch', '_on_ha_status', '_refresh_now', 'show_flyout',
              '_broadcast', '_all_windows', '_all_tiles', '_watched_entities',
-             '_home_mode', '_on_ha_event', '_on_ha_events', '_clean_tiles'}
+             'hide_flyout', '_drive_flyout_toggles', '_home_mode', '_on_ha_event', '_on_ha_events', '_clean_tiles', 'toggle_flyout'}
     api.body = [n for n in api.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    scope = {'json': json, 'threading': threading, 'cfgmod': config}
+    scope = {'json': json, 'threading': threading, 'cfgmod': config, 'time': time, 'qtshell': Mock(), 'traceback': __import__('traceback')}
     exec(compile(ast.Module(body=[api], type_ignores=[]), 'main.py', 'exec'), scope)
     return scope['Api']
 
@@ -31,6 +32,107 @@ class Regressions(unittest.TestCase):
         self.api._connected = True
         self.api._known_states = {}
         self.api._widgets = {}
+
+    def test_tray_release_after_the_press_closed_the_panel_is_the_same_click(self):
+        api = self.api
+        api._SAME_CLICK_S = 0.4
+        api._flyout_open = False
+        api.show_flyout, api.hide_flyout = Mock(), Mock()
+        api._flyout_dismissed_at = time.monotonic()           # the press took the focus and the panel closed itself
+        api.toggle_flyout()
+        api.show_flyout.assert_not_called()
+        api.toggle_flyout(True)                               # (the shortcut is never the release of a click)
+        api._flyout_toggle_thread.join(2)
+        api.show_flyout.assert_called_once_with(True)
+        api.show_flyout.reset_mock()
+        api._flyout_dismissed_at = time.monotonic() - 1.0     # a click on the icon later: opens it
+        api.toggle_flyout()
+        api._flyout_toggle_thread.join(2)
+        api.show_flyout.assert_called_once_with(False)
+        api._flyout_open = True                               # open: the icon closes it
+        api.toggle_flyout()
+        api._flyout_toggle_thread.join(2)
+        api.hide_flyout.assert_called_once()
+
+    def test_rapid_clicks_coalesce_while_opening_is_busy(self):
+        api = self.api
+        api._flyout_open = False
+        api._flyout_dismissed_at = -1e9
+        api._SAME_CLICK_S = .4
+        started, release = threading.Event(), threading.Event()
+        calls = []
+        def show(from_key):
+            calls.append("show")
+            started.set()
+            release.wait(2)
+            api._flyout_open = True
+        def hide():
+            calls.append("hide")
+            api._flyout_open = False
+        api.show_flyout, api.hide_flyout = show, hide
+        api.toggle_flyout(True)
+        self.assertTrue(started.wait(1))
+        for _ in range(101):
+            api.toggle_flyout(True)
+        self.assertEqual(calls, ["show"])
+        release.set()
+        api._flyout_toggle_thread.join(2)
+        self.assertEqual(calls, ["show", "hide"])
+        self.assertFalse(api._flyout_open)
+        self.assertFalse(api._flyout_toggle_running)
+
+    def test_second_tray_click_after_dismiss_is_not_swallowed(self):
+        api = self.api
+        api._SAME_CLICK_S = .4
+        api._flyout_open = False
+        api._flyout_dismissed_at = time.monotonic()
+        api.show_flyout = Mock()
+        api.toggle_flyout()
+        api.show_flyout.assert_not_called()
+        api.toggle_flyout()
+        api._flyout_toggle_thread.join(2)
+        api.show_flyout.assert_called_once_with(False)
+
+    def test_desktop_capture_remains_open_until_the_panel_is_hidden(self):
+        api = self.api
+        window = Mock(is_native_overlay=True)
+        api._flyout_window = window
+        api._flyout_open = True
+        api._flyout_serial = 1
+        api._sync_client_entities = Mock()
+        api.close_popover = Mock()
+        api._overlays_open = {"flyout"}
+        api._apply_capture_exclusion = Mock()
+        api._schedule_release = Mock()
+        api.hide_flyout()
+        self.assertIn("flyout", api._overlays_open)
+        api._apply_capture_exclusion.assert_not_called()
+        finished = window.leave_and_hide.call_args.args[2]
+        finished()
+        self.assertNotIn("flyout", api._overlays_open)
+        api._apply_capture_exclusion.assert_called_once()
+        api._schedule_release.assert_called_once_with("flyout")
+
+    def test_old_exit_cannot_hide_a_new_opening_or_later_exit(self):
+        api = self.api
+        window = Mock(is_native_overlay=True)
+        api._flyout_window = window
+        api._flyout_open = True
+        api._flyout_serial = 1
+        api._sync_client_entities = Mock()
+        api.close_popover = Mock()
+        api._overlays_open = {"flyout"}
+        api._apply_capture_exclusion = Mock()
+        api._schedule_release = Mock()
+        api.hide_flyout()
+        valid = window.leave_and_hide.call_args.args[0]
+        self.assertTrue(valid())
+        api._flyout_serial += 1
+        api._flyout_open = True
+        self.assertFalse(valid())
+        api.hide_flyout()
+        self.assertFalse(valid())
+        self.assertTrue(window.leave_and_hide.call_args.args[0]())
 
     def test_push_reaches_all_windows_even_if_main_is_missing(self):
         self.api._window = None

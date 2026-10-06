@@ -80,6 +80,22 @@ carries it over. Add a test that pushes a new state while it is active.
 - Pickers take several at once where it makes sense, and offer "全選" for a group.
 - Controls that show a position (a song's progress, sliders) can be dragged, and their knobs stay inside
   their bounds (not clipped by a scroll box).
+- The tray panel's coming and going is a picture slid by the desktop compositor (`nativeui/dcomp.py`, DirectComposition),
+  as the system's own flyouts are: drawing it again at each step put a new bitmap through the layered window at every
+  frame, which the desktop takes up out of step with its refresh and which shows as steps. Where it cannot be had
+  (`HA_WIDGET_DCOMP=0`, a glass the desktop draws, no hardware device) `PanelScene` draws the slide itself. The panel
+  (and the card opened from it) is topmost while open, so that closing it can be seen over the program just clicked.
+  The desktop blends the translucent card over the glass by its own rule, so the panel differs slightly in brightness
+  over the slide; see the notes in `dcomp.py` before trying to remove that.
+- Liquid glass of a widget takes the desktop on the GPU: the duplication keeps its copy of the screen as a
+  keyed-mutex shared texture (`dxgi_capture.copy_region`), the renderer copies its window's rectangle out of it
+  on its own device (`Renderer.issue_desktop` / `update_desktop`) and a compute shader tells whether the picture
+  moved by more than noise, so a still desktop redraws nothing. Never put the duplication and the renderer on one
+  device: their commands then share a queue and a lock, and every copy waits for the screen. The CPU path
+  (`blur_raw` pictures) stays for frosted levels above 45, covered windows, rotated or split screens.
+  The tray panel's compositor material does the same (`dcomp_liquid.DesktopBackdrop`: copy, quarter-size reduction
+  and two blurs on the GPU, the same noise rule), except while a widget lies under the panel: those are composed into
+  its picture on the processor.
 - Repaints are not free. A self-ticking view stops when its window is hidden. Something that moves every
   second redraws only what moves over a picture kept for the rest (the clock's ring over its face), and moves
   in a short eased step rather than continuously (`kinds.HAND_MOVE_S`: ~3% of a core against ~7%). Blurs are made at reduced

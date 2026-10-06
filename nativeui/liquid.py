@@ -17,7 +17,7 @@ import math
 from PIL import Image, ImageFilter
 
 WHITE_LINE = 0.16
-LENS_OPACITY = 0.78
+LENS_OPACITY = 1.0
 EXPONENT = 4.0                         # the corners are fourth-power superellipses
 
 
@@ -36,6 +36,45 @@ def picture(rgb):
     return half.filter(ImageFilter.GaussianBlur(0.6))
 
 
+def _strip_mesh(mesh):
+    """Join straight-edge quads with identical sampling into long strips.
+
+    Pillow dispatches each quad through Python on every frame. Along a straight
+    edge the field varies only across the edge, so dividing its length into
+    two-pixel pieces buys no detail. Keep the curved corners unchanged.
+    """
+    rest, groups = [], {}
+    for box, quad in mesh:
+        x0, y0, x1, y1 = box
+        a, b, c, d, e, f, g, h = quad
+        if a == c == x0 and e == g == x1 and b == h and d == f:
+            key = ('h', y0, y1, b, d)
+            groups.setdefault(key, []).append((box, quad))
+        elif b == h == y0 and d == f == y1 and a == c and e == g:
+            key = ('v', x0, x1, a, e)
+            groups.setdefault(key, []).append((box, quad))
+        else:
+            rest.append((box, quad))
+    for key, pieces in groups.items():
+        horizontal = key[0] == 'h'
+        axis = 0 if horizontal else 1
+        pieces.sort(key=lambda item: item[0][axis])
+        box, quad = pieces[0]
+        for next_box, next_quad in pieces[1:]:
+            if box[axis + 2] == next_box[axis]:
+                box = (box[0], box[1], next_box[2], next_box[3])
+                quad = ((quad[0], quad[1], quad[2], quad[3],
+                         next_quad[4], next_quad[5], next_quad[6], next_quad[7])
+                        if horizontal else
+                        (quad[0], quad[1], next_quad[2], next_quad[3],
+                         next_quad[4], next_quad[5], quad[6], quad[7]))
+            else:
+                rest.append((box, quad))
+                box, quad = next_box, next_quad
+        rest.append((box, quad))
+    return rest
+
+
 class Lens:
     def __init__(self, w, h, radius):
         self.w, self.h = w, h
@@ -44,6 +83,18 @@ class Lens:
         self.radius = min(radius, w / 2, h / 2)
         self._field_cache = {}
         self.mesh = self._build_mesh()
+        # QUAD coefficients depend only on shape. Pillow's MESH entry point
+        # recomputes them, validates the filter and loads both images for every
+        # quad on every frame, under the Python lock shared by all widgets.
+        self._compiled_mesh = []
+        for box, quad in self.mesh:
+            x0, y0, sx, sy, ex, ey, nx, ny = quad
+            a, b = 1.0 / (box[2] - box[0]), 1.0 / (box[3] - box[1])
+            self._compiled_mesh.append((box, (
+                x0, (nx - x0) * a, (sx - x0) * b,
+                (ex - sx - nx + x0) * a * b,
+                y0, (ny - y0) * a, (sy - y0) * b,
+                (ey - sy - ny + y0) * a * b)))
         self.alpha, self.line = self._build_masks()
         self.white = Image.new("RGB", (w, h), (255, 255, 255))
         self._soft = None
@@ -112,7 +163,7 @@ class Lens:
                             *self._sample_point(x0, y0), *self._sample_point(x0, y1),
                             *self._sample_point(x1, y1), *self._sample_point(x1, y0))))
         self._field_cache.clear()
-        return mesh
+        return _strip_mesh(mesh)
 
     def _build_masks(self):
         """The lens's opacity and the white line along the rim, per pixel."""
@@ -136,6 +187,19 @@ class Lens:
         return (Image.frombytes("L", (w, h), bytes(alpha)), Image.frombytes("L", (w, h), bytes(line)))
 
     # -- the picture --------------------------------------------------------
+    def _warp(self, sharp):
+        """The same Pillow QUAD rasterizer with shape coefficients kept once."""
+        sharp.load()
+        out = Image.new('RGB', (self.w, self.h))
+        out.load()
+        transform = getattr(out.im, 'transform', None)
+        if transform is None:  # keep working if a future Pillow changes its core API
+            return sharp.transform((self.w, self.h), Image.MESH, self.mesh, Image.BILINEAR)
+        source = sharp.im
+        for box, coefficients in self._compiled_mesh:
+            transform(box, source, Image.QUAD, coefficients, Image.BILINEAR, True)
+        return out
+
     def card_mask(self):
         """The card's shape (fourth-power superellipse), anti-aliased."""
         from PySide6.QtCore import Qt
@@ -179,26 +243,23 @@ class Lens:
         tiles: [(x, y, w, h, radius)] in device pixels. frost: the blur of the card's glass, in device pixels."""
         sharp = picture.resize((self.w, self.h), Image.BICUBIC)
         base = sharp
-        if frost > 0.05:
-            # the card's own glass is frosted; the lens at its edge keeps bending the clear picture
-            base = picture.filter(ImageFilter.GaussianBlur(frost * picture.width / self.w)).resize(
-                (self.w, self.h), Image.BICUBIC)
-        lens = sharp.transform((self.w, self.h), Image.MESH, self.mesh, Image.BILINEAR)
+        lens = self._warp(sharp)
         lens = Image.composite(self.white, lens, self.line)
+        opacity = self.alpha
+        # The backdrop is opaque until the card mask is applied. Blend in RGB
+        # once rather than allocating two RGBA pictures and alpha-compositing
+        # the entire window for every desktop frame.
+        out = Image.composite(lens, base, opacity)
         if frost > 0.05:
-            # frosted glass inside: the clear lens fades out into it rather than ending on a line
-            if self._soft is None or self._soft[0] != round(frost):
-                self._soft = (round(frost), self.alpha.filter(ImageFilter.GaussianBlur(max(2.0, frost * 0.35))))
-            lens.putalpha(self._soft[1])
-        else:
-            lens.putalpha(self.alpha)
-        out = base.convert("RGBA")
-        out.alpha_composite(lens)
+            out = out.resize(picture.size, Image.BICUBIC).filter(
+                ImageFilter.GaussianBlur(frost * picture.width / self.w)).resize(
+                    (self.w, self.h), Image.BICUBIC)
         for x, y, w, h, radius in tiles:
-            region = out.crop((x, y, x + w, y + h)).convert("RGB")
+            region = out.crop((x, y, x + w, y + h))
             # Blurred at half the size, which costs a quarter as much.
             small = region.reduce(2).filter(ImageFilter.GaussianBlur(blur / 2))
             region = small.resize((w, h), Image.BILINEAR)
             out.paste(region, (x, y), self.tile_mask(w, h, radius))
+        out = out.convert("RGBA")
         out.putalpha(card_mask)
         return out
