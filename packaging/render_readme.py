@@ -3,8 +3,7 @@
 python packaging/render_readme.py [outdir]   (default: docs/)
 
 No Home Assistant and no desktop capture: the widgets' glass is made from a generated wallpaper the
-same way the windows make it from the screen. The detail-card pictures (docs/detail-*.png) are not
-made here.
+same way the windows make it from the screen. 
 """
 import datetime
 import os
@@ -153,6 +152,22 @@ class DemoApi:
     def get_desktop_backdrop(self, *a, **k):
         return {"skip": True, "retry_ms": 60000}
 
+    def get_home(self):
+        rooms = {"light.desk": "Study", "fan.office": "Study", "climate.living": "Living room",
+                 "cover.bedroom": "Bedroom", "lock.front": "Living room", "vacuum.home": "Living room",
+                 "sensor.temperature": "Living room", "sensor.humidity": "Living room"}
+        names = {t["entity"]: t["room"] for t in TILES}
+        entities = [{"entity_id": e, "domain": e.split(".")[0], "name": names[e], "area": rooms[e],
+                     "state": dict(STATES[e], entity_id=e)} for e in STATES if not e.startswith("sensor.")]
+        sensors = [{"entity_id": e, "kind": STATES[e]["attributes"]["device_class"], "name": names[e],
+                    "area": rooms[e], "state": dict(STATES[e], entity_id=e)} for e in STATES if e.startswith("sensor.")]
+        return {"rooms": ["Bedroom", "Living room", "Study"], "entities": entities, "sensors": sensors}
+
+    def get_history(self, entity_id, hours=24):
+        import math
+        return {"ok": True, "hours": hours, "points": [[i * 600.0, 22.5 + 4 * math.sin(i / 14.0) + (i % 5) * 0.2]
+                                                       for i in range(144)]}
+
     def _panel_bg_path(self):
         return None
 
@@ -160,24 +175,81 @@ class DemoApi:
         return lambda *a, **k: None
 
 
-def panel_picture():
-    api = DemoApi("dark", "liquid")
-    win = panel.create_panel(api)
-    sc = win.native
-    pump(150)
-    sc.anim_alpha = sc.anim_zoom = 1
-    sc.rebuild()
-    sc.push_states(list(STATES.items()))
-    sc.show()
-    pump(300)
-    card = sc.grab().toImage()
-    bg = wallpaper((card.width() + 2 * MARGIN, card.height() + 2 * MARGIN), "dark")
+def trim(image, threshold=40):
+    """The picture cut to what is drawn in it (a window is larger than its card)."""
+    converted = image.convertToFormat(QImage.Format_RGBA8888)
+    rgba = Image.frombytes("RGBA", (converted.width(), converted.height()), bytes(converted.constBits()))
+    left, top, right, bottom = rgba.getchannel("A").point(lambda a: 255 if a > threshold else 0).getbbox()
+    return image.copy(left, top, right - left, bottom - top)
+
+
+def on_wallpaper(card, theme):
+    """A card over the wallpaper with a soft shadow, as it sits on a desktop."""
+    bg = wallpaper((card.width() + 2 * MARGIN, card.height() + 2 * MARGIN), theme)
     out = to_qimage(bg)
     p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    for spread, a in ((28, 10), (16, 14), (6, 18)):
+        p.setBrush(QColor(0, 0, 0, a))
+        p.drawRoundedRect(QRectF(MARGIN - spread / 2, MARGIN - spread / 2 + 8, card.width() + spread,
+                                 card.height() + spread), 26 + spread / 2, 26 + spread / 2)
     p.drawImage(MARGIN, MARGIN, card)
     p.end()
-    win.dispose()
     return out
+
+
+def panel_picture(theme="dark", style="liquid"):
+    """The tray panel in its Home style: the rooms, with the kinds of device as capsules."""
+    api = DemoApi(theme, style)
+    prefs = api._prefs
+    api._prefs = lambda: dict(prefs(), panel={"mode": "home", "tiles": None, "home_tiles": []})
+    # On a 4K monitor the panel draws at its largest, so that its picture has pixels to spare.
+    from unittest.mock import patch
+    from nativeui import screens
+    big = screens.Monitor((0, 0, 3840, 2400), (0, 0, 3840, 2360), 1.0)
+    with patch.object(screens, "monitor_at", lambda x, y: big):
+        win = panel.create_panel(api)
+        sc = win.native
+        pump(150)
+        sc.anim_alpha = sc.anim_zoom = 1
+        sc.rebuild()
+        sc.push_states(list(STATES.items()))
+        sc.show()
+        pump(500)
+        if sc.home is not None:
+            sc.home.loaded(api.get_home())
+        pump(500)
+        sc.update_metrics()
+        pump(300)
+        window = sc.grab().toImage()
+        window.setDevicePixelRatio(1)
+        card = window
+
+    win.dispose()
+    return on_wallpaper(card, theme)
+
+
+def detail_picture(entity, theme="light", style="classic"):
+    """A device's detail card (what a hold or a right-click opens), over the wallpaper."""
+    from nativeui import detail
+    tile = next(t for t in TILES if t["entity"] == entity)
+    api = DemoApi(theme, style)
+    api._prefs = lambda t=api._prefs: dict(t(), widgets=[{"id": "w1", "size": "2x4", "tiles": [tile]}])
+    win = detail.create_popover(api)
+    card = win.native
+    pump(150)
+    card.push_states([(entity, STATES[entity])])
+    card.open_tile(tile["id"])
+    card.root.alpha, card.root.dy = 1, 0
+    card.show()
+    pump(500)
+    frame, k = card.transition_frame(), card.scale
+    image = card.content_image().copy(round(frame.x() * k), round(frame.y() * k), round(frame.width() * k),
+                                      round(frame.height() * k))
+    image.setDevicePixelRatio(1)
+    win.dispose()
+    return on_wallpaper(image, theme)
 
 
 def settings_pictures():
@@ -326,6 +398,9 @@ def main():
         for theme in ("light", "dark"):
             save(widget_picture("2x4", TILES, theme, style), "theme-%s-%s.png" % (style, theme))
     save(panel_picture(), "tray-panel.png")
+    save(detail_picture("light.desk"), "detail-light.png")
+    save(detail_picture("climate.living"), "detail-climate.png")
+    save(detail_picture("sensor.temperature"), "detail-history.png")
     for name, image in settings_pictures():
         save(image, name)
 

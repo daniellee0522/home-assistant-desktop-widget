@@ -34,9 +34,17 @@ appearance. The glass effect varies with your wallpaper.
 | Liquid glass | ![Liquid light theme](docs/theme-liquid-light.png) | ![Liquid dark theme](docs/theme-liquid-dark.png) |
 | Windows glass | ![Windows light theme](docs/theme-windows-light.png) | ![Windows dark theme](docs/theme-windows-dark.png) |
 
-| Tray panel | Device controls | Sensor history |
-| --- | --- | --- |
-| ![Tray panel](docs/tray-panel.png) | ![Device controls](docs/detail-switch.png) | ![Sensor history](docs/detail-history.png) |
+<table>
+<tr align="center">
+<td><b>Home-style tray panel</b></td><td><b>Lights</b></td><td><b>Thermostat</b></td><td><b>Sensor history</b></td>
+</tr>
+<tr align="center" valign="bottom">
+<td><img src="docs/tray-panel.png" height="440" alt="Tray panel"></td>
+<td><img src="docs/detail-light.png" height="440" alt="Light controls"></td>
+<td><img src="docs/detail-climate.png" height="440" alt="Thermostat controls"></td>
+<td><img src="docs/detail-history.png" height="440" alt="Sensor history"></td>
+</tr>
+</table>
 
 ![Widget editor](docs/widget-editor.png)
 

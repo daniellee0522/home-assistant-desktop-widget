@@ -32,9 +32,17 @@
 | 液態玻璃 | ![液態淺色](docs/theme-liquid-light.png) | ![液態深色](docs/theme-liquid-dark.png) |
 | Windows 玻璃 | ![Windows 淺色](docs/theme-windows-light.png) | ![Windows 深色](docs/theme-windows-dark.png) |
 
-| 系統匣面板 | 裝置控制 | 感測器歷史 |
-| --- | --- | --- |
-| ![系統匣面板](docs/tray-panel.png) | ![裝置控制](docs/detail-switch.png) | ![感測器歷史](docs/detail-history.png) |
+<table>
+<tr align="center">
+<td><b>Home 風格系統匣面板</b></td><td><b>燈光</b></td><td><b>空調</b></td><td><b>感測器歷史</b></td>
+</tr>
+<tr align="center" valign="bottom">
+<td><img src="docs/tray-panel.png" height="440" alt="系統匣面板"></td>
+<td><img src="docs/detail-light.png" height="440" alt="燈光控制"></td>
+<td><img src="docs/detail-climate.png" height="440" alt="空調控制"></td>
+<td><img src="docs/detail-history.png" height="440" alt="感測器歷史"></td>
+</tr>
+</table>
 
 ![Widget 編輯器](docs/widget-editor.png)
 
