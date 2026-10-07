@@ -16,7 +16,7 @@ from PySide6.QtGui import QImage
 from . import liquid
 from .dcomp import _call, _new, _release, _guid, _GUID, _Point, _IID_TEXTURE2D
 from .dcomp_liquid import TextureDesc, BufferDesc, SamplerDesc, _blob_value
-from dxgi_capture import _MAPPED
+from winsys.dxgi_capture import _MAPPED
 
 P, U, F = C.c_void_p, C.c_uint, C.c_float
 
@@ -556,7 +556,7 @@ class Renderer:
     def readback(self):
         """Diagnostic/snapshot only; production presents without this transfer."""
         self._pipeline_bound = False
-        from dxgi_capture import _MAPPED
+        from winsys.dxgi_capture import _MAPPED
         target = self._temporary('snapshot', self.size)
         self._pass(target, 6, [self.result, self.foreground, self.foreground_dim, self.card], mix=self.dim_mix)
         self._command(33, (U, P, P), 0, None, None)

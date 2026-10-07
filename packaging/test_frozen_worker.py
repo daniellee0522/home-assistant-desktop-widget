@@ -7,7 +7,7 @@ import subprocess
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from capture_worker import CaptureWorker
+from winsys.capture_worker import CaptureWorker
 
 
 def main():

@@ -44,7 +44,7 @@ appearance. The glass effect varies with your wallpaper.
 - **Alerts (off by default):** Settings → Notifications sends a Windows notification when a lock on your widgets or panel is unlocked, opened or jammed, or a safety sensor goes off (door or window opened, leak, smoke, gas, carbon monoxide...). Only changes are reported, never the state at startup, and the same news at most once a minute.
 - **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; there is no refresh rate to set.
 - **Light on resources:** every window is drawn natively, with no browser engine in the program at all: the desktop widgets, the detail card, the tray panel and Settings. It rests at about 50 MB and close to 0 % CPU on a still desktop, and about 70-90 MB with the panel or Settings open (they are made when opened and released after a while). Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.
-- **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it.
+- **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it. A dimmed clock stands still: its ring of ticks is faint and even, with no moving second, so a covered desktop costs nothing each second.
 - **Languages:** Traditional Chinese and English.
 
 In a device's detail view, open the edit panel to choose an icon or enter a
@@ -93,10 +93,14 @@ for an installed build.
 
 ## Development
 
-- Tests: see [tests/README.md](tests/README.md).
+The code is `app/` (the running program and its Api), `core/` (settings and Home Assistant), `winsys/` (Windows, capture,
+the tray) and `nativeui/` (every window's drawing); `main.py` only starts it. [docs/architecture.md](docs/architecture.md)
+says what is where.
+
 - Installers: see [packaging/README.md](packaging/README.md).
 - README screenshots: `python packaging/render_readme.py` regenerates them
   from demo data.
+- Rules for changes: [CLAUDE.md](CLAUDE.md).
 
 ## License
 

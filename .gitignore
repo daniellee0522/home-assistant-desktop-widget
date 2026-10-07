@@ -19,3 +19,7 @@ native/out/
 
 # Pictures made by tools/visual_check.py for looking at the screens.
 visual/
+
+# Tests and developer scripts stay on the developer's machine; the repository is the program.
+tests/
+tools/

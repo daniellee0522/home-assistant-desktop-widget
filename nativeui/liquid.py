@@ -27,7 +27,7 @@ def _smoothstep(a, b, x):
 
 
 def picture(rgb):
-    """The lens's picture from the sharp capture (RGB, window size), as main.py makes it for
+    """The lens's picture from the sharp capture (RGB, window size), as app/api/backdrop.py makes it for
     the liquid glass: much more detail than the 1/8 one of the classic glass, or the
     refraction is blurred away. A light blur at half size removes what the quarter-size grid
     cannot represent (fine patterns beat against it into stripes)."""

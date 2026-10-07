@@ -371,11 +371,6 @@ class Label(View):
     def font(self):
         return font(self.size, self.weight, self.spacing)
 
-    def set_width(self, w):
-        self.w = w
-        self.fit_width = False
-        self.measure()
-
     def measure(self):
         f = self.font()
         text = render.tr(self._text) if self._text else ""
@@ -388,9 +383,6 @@ class Label(View):
         self.h = self.cell_h if self.cell_h is not None else len(self._lines) * self.lh * self.size
         self._paths = None
         self.changed()
-
-    def line_width(self, i=0):
-        return text_width(self._lines[i], self.font())
 
     def paint(self, p):
         if not self._lines or not any(self._lines):
@@ -1116,7 +1108,7 @@ class Scene(GlassMixin, QWidget):
 
     def __init__(self, api, kind):
         super().__init__()
-        import qtshell
+        from winsys import qtshell
         qtshell.ensure_marshal()                # (calls from other threads come to this, the GUI thread)
         self.api, self.kind = api, kind
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.NoDropShadowWindowHint)

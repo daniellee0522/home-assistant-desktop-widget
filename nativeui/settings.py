@@ -1,6 +1,6 @@
 """Settings, the widget editor and the entity picker.
 
-A nearly solid card (it is read, not glanced at) with three screens in one window. main.py makes it when
+A nearly solid card (it is read, not glanced at) with three screens in one window. the Api makes it when
 asked for and releases it when closed.
 """
 import threading
@@ -10,9 +10,9 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
 
-import hotkey as hotkeymod
+from winsys import hotkey as hotkeymod
 
-from . import render, style, ui
+from . import render, screens, style, ui
 from .detail import Stack
 from . import controls, kinds
 from .editor import EditorMixin
@@ -21,6 +21,9 @@ from .ui import Button, CheckRow, Label, Rect, ScrollView, Select, Slider, TextF
 
 CARD_W, BODY_X, BODY_W = 340, 16, 308
 BODY_MAX = 520
+BODY_MIN = 160               # the least of a list that is worth showing, on the smallest screen
+SCREEN_MARGIN = 12           # what is left free of the work area around the window
+PICKER_FOOT = 10 + 40 + 14   # the picker's "add" button and the space round it
 SOLID = {"light": (240, 245, 250), "dark": (26, 29, 34)}
 DOMAIN_LABELS = {"local_media": "本機播放", "light": "燈光", "switch": "開關/插座", "input_boolean": "虛擬開關", "climate": "空調", "fan": "風扇",
                  "cover": "窗簾/百葉", "media_player": "媒體播放器", "lock": "門鎖", "vacuum": "掃地機", "scene": "場景",
@@ -163,7 +166,7 @@ class SettingsScene(EditorMixin, OverlayScene):
     def t_(self, text):
         return render.tr(text)
 
-    # -- main.py's calls ----------------------------------------------------------------------------------------
+    # -- the Api's calls ----------------------------------------------------------------------------------------
     def enter_settings(self):
         self.go("settings")
 
@@ -185,7 +188,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             self.close_settings()
 
     def close_settings(self):
-        """Saves the connection fields and has main.py close (and release) the window."""
+        """Saves the connection fields and has the Api close (and release) the window."""
         if self.page == "settings" and hasattr(self, "url_field"):
             self.fields_text["url"], self.fields_text["token"] = self.url_field.value(), self.token_field.value()
         url = self.fields_text.get("url")
@@ -261,7 +264,8 @@ class SettingsScene(EditorMixin, OverlayScene):
         else:
             top = self.header("設定", self.t_("已連線 (即時同步)") if self.connected else self.t_("未連線"), dot=True)
             body, max_h, width = self.build_settings_body(), BODY_MAX, CARD_W
-        shown_h = min(body.h, max_h)
+        foot = PICKER_FOOT if self.page == "picker" and not self.picker_single() else 0
+        shown_h = min(body.h, max_h, max(BODY_MIN, self.room_below(top) - foot))
         sv = ScrollView(0, top, width, shown_h)
         sv.add(body)
         sv.content.w, sv.content.h = width, body.h
@@ -269,15 +273,13 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.body_scroll = sv
         sv.scroll_to(self.scroll_keep.get(self.page, 0.0))
         self.card_w = width
-        foot = 0
-        if self.page == "picker" and not self.picker_single():
+        if foot:
             # what is ticked is added at once, from under the list
             self.picker_add = Button("", x=BODY_X, y=top + shown_h + 10, w=BODY_W, h=40, size=14,
                                      weight=QFont.DemiBold, fill="accent_blue", hover_fill="accent_blue", color="white",
                                      on_click=lambda e: self.add_entities(list(self.picker_sel)))
             self.root.add(self.picker_add)
             self.picker_counted()
-            foot = 10 + 40 + 14
         self.set_css_size(width, top + shown_h + foot)
         self.request_size()
         for f in self.fields:
@@ -285,6 +287,17 @@ class SettingsScene(EditorMixin, OverlayScene):
         if menu:
             controls.reattach_menu(self, self.root)
         self.request_paint()
+
+    def room_below(self, top):
+        """The height, in card pixels, left for what stands under a header `top` tall: the work area of the
+        monitor the window is on, less a margin each side. Large when the monitor is not known."""
+        ratio = self.devicePixelRatioF() or 1.0
+        centre = self.geometry().center()
+        monitor = screens.monitor_at(centre.x() * ratio, centre.y() * ratio)
+        if monitor is None:
+            return 10 ** 6
+        _, work_top, _, work_bottom = monitor.work
+        return (work_bottom - work_top) / (getattr(self, "dpi", 1.0) * self.zoom_css) - 2 * SCREEN_MARGIN - top
 
     def mousePressEvent(self, e):
         gx, gy = self._css(e)
@@ -341,8 +354,16 @@ class SettingsScene(EditorMixin, OverlayScene):
         stack = Stack(body, BODY_X, 4, BODY_W)
         prefs = self.prefs
         panel = prefs.get("panel") or {}
+        self.connection_section(stack)
+        self.looks_section(stack, prefs, panel)
+        self.behaviour_section(stack, prefs)
+        self.notifications_section(stack, prefs)
+        self.widgets_section(stack)
+        body.h = stack.end() + 16
+        return body
 
-        # the connection
+    def connection_section(self, stack):
+        """The Home Assistant address and token, and a button to try them."""
         self.section_title(stack, "Home Assistant 連線")
         self.url_field = TextField(0, 0, BODY_W, 36, self.fields_text.get("url", self.cfg.get("ha_url", "")),
                                    "http://homeassistant.local:8123", 13, None, 200)
@@ -360,7 +381,8 @@ class SettingsScene(EditorMixin, OverlayScene):
         row.add(self.test_label)
         stack.place(row, 0, 14)
 
-        # looks
+    def looks_section(self, stack, prefs, panel):
+        """Language, theme, glass and where it comes from, the panel's picture, zoom."""
         self.section_title(stack, "外觀")
         stack.place(self.select_block("語言", [("zh-TW", "繁體中文"), ("en", "English")], prefs.get("language", "zh-TW"),
                                       lambda v: self.save_pref({"language": v})), 0, 10)
@@ -393,7 +415,14 @@ class SettingsScene(EditorMixin, OverlayScene):
             mode = "fast"
         self.select_hint(stack, "毛玻璃來源", modes, mode, lambda v: self.save_pref({"glass_mode": v}),
                          "毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。")
-        # the panel's own picture
+        self.panel_picture_block(stack, panel)
+        self.select_hint(stack, "毛玻璃更新", [("live", "動態 (桌布變動時即時更新)"), ("still", "靜態 (只在移動 widget 時更新，最省資源)")],
+                         prefs.get("glass_sampling", "live"), lambda v: self.save_pref({"glass_sampling": v}),
+                         "使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。")
+        self.slider_row(stack, "縮放比例", prefs.get("zoom", 100), 50, 200, 5, "%", lambda v: self.save_pref({"zoom": int(v)}))
+
+    def panel_picture_block(self, stack, panel):
+        """The picture behind the tray panel: choose, replace, remove, and how blurred."""
         block = View(0, 0, BODY_W, 0)
         block.add(style.label("field", "面板背景圖片", w=BODY_W))
         y = 20
@@ -418,12 +447,9 @@ class SettingsScene(EditorMixin, OverlayScene):
         block.add(hint)
         block.h = y + hint.h
         stack.place(block, 14, 14)
-        self.select_hint(stack, "毛玻璃更新", [("live", "動態 (桌布變動時即時更新)"), ("still", "靜態 (只在移動 widget 時更新，最省資源)")],
-                         prefs.get("glass_sampling", "live"), lambda v: self.save_pref({"glass_sampling": v}),
-                         "使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。")
-        self.slider_row(stack, "縮放比例", prefs.get("zoom", 100), 50, 200, 5, "%", lambda v: self.save_pref({"zoom": int(v)}))
 
-        # behaviour
+    def behaviour_section(self, stack, prefs):
+        """Lock, dimming, start with Windows, the shortcut."""
         self.section_title(stack, "行為", 14)
         lock = CheckRow("鎖定位置 (無法拖曳移動)", bool(prefs.get("lock_position")), BODY_W,
                         lambda on: self.save_pref({"lock_position": on}))
@@ -440,7 +466,8 @@ class SettingsScene(EditorMixin, OverlayScene):
         stack.place(boot, 0, 8)
         self.shortcut_row(stack)
 
-        # notifications
+    def notifications_section(self, stack, prefs):
+        """What to be notified about."""
         self.section_title(stack, "通知", 14)
         stack.place(CheckRow("感測器警示 (門窗打開、漏水、煙霧、瓦斯等)", bool(prefs.get("alert_sensors")), BODY_W,
                              lambda on: self.save_pref({"alert_sensors": on})), 0, 8)
@@ -449,7 +476,8 @@ class SettingsScene(EditorMixin, OverlayScene):
         stack.place(Hint("顯示在 widget 或系統匣面板上的配件狀態改變時，以 Windows 通知提醒；同一件事一分鐘內只提醒一次。", BODY_W),
                     0, 14)
 
-        # the widgets
+    def widgets_section(self, stack):
+        """The widget editor, and the footer: quit and done."""
         self.section_title(stack, "桌面 Widget", 6)
         stack.place(Button("開啟 Widget 編輯器", size=12.5, weight=QFont.DemiBold, h=33, pad=16, fill="accent_blue",
                            hover_fill="accent_blue", color="white", on_click=lambda e: self.open_editor("")), 0, 5)
@@ -463,8 +491,6 @@ class SettingsScene(EditorMixin, OverlayScene):
         quit_.x = done.x - 10 - quit_.w
         foot.add(quit_, done)
         stack.place(foot, 8, 0)
-        body.h = stack.end() + 16
-        return body
 
     # -- the shortcut -------------------------------------------------------------------------------------------------
     def shortcut_row(self, stack):

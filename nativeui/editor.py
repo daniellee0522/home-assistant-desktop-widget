@@ -250,9 +250,6 @@ class Minimap(View):
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(QRectF(x + 0.75, y + 0.75, w - 1.5, h - 1.5), 6, 6)
 
-    def clip_tree(self):
-        return True
-
 
 class MapBox(View):
     cursor = Qt.OpenHandCursor
@@ -936,8 +933,20 @@ class EditorMixin:
         widget = self.settings_widget()
         on_panel = bool(widget and widget.get("panel"))
         panel = self.prefs.get("panel") or {}
+        left_h = self.editor_left_column(body)
+        y = self.editor_widget_chips(body, widget, on_panel)
+        kind = self.current_kind()
+        y = self.editor_preview(body, y, widget, on_panel, kind)
+        y = self.editor_tools(body, y, widget, on_panel, kind, panel)
+        if kind in kinds.NO_DEVICES:             # a clock, a calendar: no devices to choose
+            body.h = max(left_h, y) + 18
+            return body
+        y = self.editor_devices(body, y, widget, kind)
+        body.h = max(left_h, y) + 18
+        return body
 
-        # the left column
+    def editor_left_column(self, body):
+        """The palette, the map of the desktop and the lock; returns where the column ends."""
         y = 2
         body.add(style.label("group", "拖曳到桌面新增", x=LEFT_X, y=y))
         y += 14.4 + 8
@@ -963,9 +972,10 @@ class EditorMixin:
                          x=LEFT_X, y=y + 6, w=LEFT_W, wrap=True, lh=1.4)
             body.add(hint)
             y += 6 + hint.h
-        left_h = y
+        return y
 
-        # the right column
+    def editor_widget_chips(self, body, widget, on_panel):
+        """The row of chips that choose which widget (or the tray panel) is being edited; returns the y below it."""
         y = 2
         body.add(style.label("group", "我的 Widget", x=RIGHT_X, y=y))
         y += 14.4 + 8
@@ -985,7 +995,10 @@ class EditorMixin:
             body.add(c)
             x += c.w + 6
         y = row_y + 28
-        kind = self.current_kind()
+        return y
+
+    def editor_preview(self, body, y, widget, on_panel, kind):
+        """The widget as it will look, on a backdrop; returns the y below it."""
         body.add(style.label("group", "預覽（拖曳配件調整順序）" if kind == "tiles" else "預覽", x=RIGHT_X, y=y + 12))
         y += 12 + 14.4 + 8
         if widget:
@@ -1000,7 +1013,10 @@ class EditorMixin:
             if not widget["tiles"] and kind not in kinds.NO_DEVICES:
                 body.add(style.label("empty", "尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
             y += box_h
-        # the tools
+        return y
+
+    def editor_tools(self, body, y, widget, on_panel, kind, panel):
+        """Sizes, delete, and what the tray panel can do; a clock's font. Returns the y below them."""
         ty = y + 12
         tx = RIGHT_X
         if not on_panel and kind == "tiles":
@@ -1038,10 +1054,10 @@ class EditorMixin:
             card.x, card.y = RIGHT_X, y
             body.add(card)
             y += card.h + 10
-        if kind in kinds.NO_DEVICES:             # a clock, a calendar: no devices to choose
-            body.h = max(left_h, y) + 18
-            return body
-        # the devices
+        return y
+
+    def editor_devices(self, body, y, widget, kind):
+        """The list of the widget's devices with its add button; returns the y below it."""
         tiles = widget["tiles"] if widget else []
         cap = kinds.KIND_MAX.get(kind)
         count = ("%d/%d" % (len(tiles), cap)) if cap and cap > 1 else "%d" % len(tiles)
@@ -1063,8 +1079,7 @@ class EditorMixin:
             lst.add(TileRow(self, t, i, RIGHT_W))
         body.add(lst)
         y += lst.h
-        body.h = max(left_h, y) + 18
-        return body
+        return y
 
     def fill_minimap(self):
         host = self.minimap_host

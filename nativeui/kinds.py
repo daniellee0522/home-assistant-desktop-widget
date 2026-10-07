@@ -523,11 +523,16 @@ def tick_alpha(ago):
     return 0.12 + 0.88 * (ago - 59)
 
 
+# The ring of a dimmed clock: every tick this faint, none the hand's, so that nothing on it moves.
+STANDBY_TICK_ALPHA = 0.3
+
+
 def draw_clock_ticks(p, W, H, ink, hand, radius=84):
-    """The 60 ticks round the card with the hand at `hand` (see clock_hand)."""
+    """The 60 ticks round the card with the hand at `hand` (see clock_hand); with no hand (standby) all of
+    them equally faint."""
     for i, ((x1, y1), (x2, y2)) in enumerate(_ticks(W, H, radius)):
         c = QColor(ink)
-        c.setAlphaF(ink.alphaF() * tick_alpha((hand - i) % 60))
+        c.setAlphaF(ink.alphaF() * (STANDBY_TICK_ALPHA if hand is None else tick_alpha((hand - i) % 60)))
         p.setPen(QPen(c, 3.2, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
@@ -545,12 +550,12 @@ def clock_hand(now, smooth=True):
     return now.second - 1 + t * t * (3 - 2 * t)
 
 
-def draw_clock(p, W, H, ink, ink2, now, radius=84, ticks=True, font=None):
+def draw_clock(p, W, H, ink, ink2, now, radius=84, ticks=True, font=None, still=False):
     """The time, large, narrow and tall, inside a ring of 60 ticks that follow the seconds; the day above it.
     Without `ticks` the ring is left out: a widget on the desktop draws it itself, many times a second, over
-    the rest drawn once a minute."""
+    the rest drawn once a minute. `still` (standby): the ring has no hand."""
     if ticks:
-        draw_clock_ticks(p, W, H, ink, clock_hand(now), radius)
+        draw_clock_ticks(p, W, H, ink, None if still else clock_hand(now), radius)
     day = (now.strftime("%a %m/%d") if render._language == "en" else
            "週%s %d/%d" % ("一二三四五六日"[now.weekday()], now.month, now.day))
     _text(p, day, _font(19, QFont.DemiBold), ink2, 0, 58, "c", W)
@@ -854,7 +859,7 @@ def draw_widget(p, kind, size, tiles, states, theme, scale=1.0, dim=False, style
         now = extras.get("now") or datetime.datetime.now()      # (a picture of it may give its own time)
         if kind == "clock":
             draw_clock(p, W, H, ink, ink2, now, tcol["radius_panel"], not extras.get("live_ticks"),
-                       extras.get("font"))
+                       extras.get("font"), dim)
         else:
             draw_calendar(p, W, H, ink, ink2, now.date(), QColor(255, 255, 255) if dim else QColor("#ff3b30"))
         p.restore()

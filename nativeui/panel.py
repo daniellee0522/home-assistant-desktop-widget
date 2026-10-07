@@ -1,6 +1,6 @@
 """The tray panel: the widget's tiles beside the taskbar, or the Home view.
 
-main.py drives it (overlay.py): `arm()` while it is placed but hidden (size, data, the
+the Api drives it (overlay.py): `arm()` while it is placed but hidden (size, data, the
 backdrop), `flyout_enter()` to bring it in, `flyout_leave()` to send it away. It slides up from its tray
 corner and back down, the glass and the card as one, keeping its resting size.
 """

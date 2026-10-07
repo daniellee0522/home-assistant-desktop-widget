@@ -12,8 +12,10 @@ $versionFile = Join-Path $root 'VERSION'
 
 Push-Location $root
 try {
-    python -m unittest discover -s tests -p 'test_*.py'
-    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    if (Test-Path tests/run.py) {
+        python tests/run.py
+        if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    }
     $buildArgs = @('packaging/build.py', '--version', $Version, '--installer')
     if ($Iscc) { $buildArgs += @('--iscc', $Iscc) }
     python @buildArgs

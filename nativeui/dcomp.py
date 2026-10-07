@@ -185,7 +185,7 @@ class _WndClass(ctypes.Structure):
 
 
 def plain_window(hwnd):
-    """Turn off DWM's own show animation, rounding and border for a window, as main._apply_window_shape does for
+    """Turn off DWM's own show animation, rounding and border for a window, as winsys.windows.apply_window_shape does for
     the panel: every outline and motion here is ours. Showing a window restores the defaults, so before each show."""
     _libraries()
     for attribute, value in ((3, 1), (33, 1), (34, 0xFFFFFFFE)):    # transitions off, do not round, no border colour
@@ -721,7 +721,7 @@ def disable(reason=""):
 
 def _log(line):
     try:
-        import qtshell
+        from winsys import qtshell
         qtshell.log(line)
     except Exception:
         pass

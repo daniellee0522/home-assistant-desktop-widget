@@ -29,7 +29,7 @@ def hwnds():
 
 def output_for(surface, compositor):
     """IDXGIOutput on the owner's monitor, held independently of the renderer."""
-    from dxgi_capture import _OUTPUT_DESC
+    from winsys.dxgi_capture import _OUTPUT_DESC
     dcomp._user32.MonitorFromWindow.argtypes = [C.c_void_p, C.c_uint]
     dcomp._user32.MonitorFromWindow.restype = C.c_void_p
     monitor = dcomp._user32.MonitorFromWindow(surface.cache_hwnd(), 2)
@@ -380,7 +380,7 @@ def prewarm(surface):
     if key not in _warmed:
         _warmed.add(key)
         from .gpu_glass import shape_data
-        import qtshell
+        from winsys import qtshell
 
         def work():
             shape_data(*key)

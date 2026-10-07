@@ -1,13 +1,13 @@
-"""The windows main.py makes when they are wanted: the detail card, the tray panel and Settings.
+"""The windows the Api makes when they are wanted: the detail card, the tray panel and Settings.
 
-`NativeOverlay` is what main.py holds: the window's interface (hwnd, show, hide, dispose, events,
-run_on_ui_thread) over an `OverlayScene`, a Scene that also tells main.py when it is shown, moved,
-closed or deactivated. main.py talks to the scene with `send(name, *args)`: the OverlayScene methods
+`NativeOverlay` is what the Api holds: the window's interface (hwnd, show, hide, dispose, events,
+run_on_ui_thread) over an `OverlayScene`, a Scene that also tells the Api when it is shown, moved,
+closed or deactivated. the Api talks to the scene with `send(name, *args)`: the OverlayScene methods
 below are what it may send.
 """
 from PySide6.QtCore import QEvent, QTimer
 
-import qtshell
+from winsys import qtshell
 
 from .ui import Scene
 
@@ -51,7 +51,7 @@ class OverlayScene(Scene):
             self.cache_hwnd()
         return super().event(e)
 
-    # What main.py may send; a scene overrides the ones it has.
+    # What the Api may send; a scene overrides the ones it has.
     def apply_prefs(self, prefs):
         pass
 
@@ -94,7 +94,7 @@ class OverlayScene(Scene):
 
 
 class NativeOverlay:
-    """What main.py holds for a native detail card, tray panel or settings window."""
+    """What the Api holds for a native detail card, tray panel or settings window."""
 
     is_native_overlay = True
 
@@ -165,7 +165,7 @@ class NativeOverlay:
         return qtshell._invoke(self._native, fn, wait=True)
 
     def send(self, name, *args):
-        """Call the window's `name` with `args` on the GUI thread, without waiting for it. What main.py
+        """Call the window's `name` with `args` on the GUI thread, without waiting for it. What the Api
         tells every window (the preferences, new states, ...), so one a window has no use for is ignored."""
         method = getattr(self._native, name, None)
         if method is not None:

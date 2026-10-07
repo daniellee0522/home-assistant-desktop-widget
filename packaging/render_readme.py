@@ -120,7 +120,7 @@ def pump(ms):
 
 
 class DemoApi:
-    """What the panel and Settings ask of main.py's Api, answered with the demo devices."""
+    """What the panel and Settings ask of the program's Api (app/api), answered with the demo devices."""
 
     _flyout_anchor = None                          # the panel opens at no tray: its own monitor
 
@@ -187,7 +187,7 @@ def settings_pictures():
 
     def shot():
         pump(500)
-        # main.py sizes the window to what it asks for (Api.resize_settings_window); here it is done directly.
+        # The Api sizes the window to what it asks for (Api.resize_settings_window); here it is done directly.
         ratio = sc.devicePixelRatioF() or 1.0
         sc.resize(round(sc.pw / ratio), round(sc.ph / ratio))
         pump(300)

@@ -19,10 +19,6 @@ class TextureDesc(C.Structure):
                                'quality', 'usage', 'bind', 'cpu', 'misc')]
 
 
-class Data(C.Structure):
-    _fields_ = [('data', P), ('pitch', U), ('slice', U)]
-
-
 class BufferDesc(C.Structure):
     _fields_ = [(n, U) for n in ('size', 'usage', 'bind', 'cpu', 'misc', 'stride')]
 
@@ -236,7 +232,7 @@ class DesktopBackdrop:
         _, index, measured = self.issued
         self.issued = None
         if measured:
-            from dxgi_capture import _MAPPED
+            from winsys.dxgi_capture import _MAPPED
             mapped = _MAPPED()
             _call(self.context, 14, (P, U, U, U, P), self.peak_stage, 0, 1, 0, C.byref(mapped))
             try:

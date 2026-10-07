@@ -3,6 +3,18 @@
 Every screen is drawn natively (PySide6, `nativeui/`). These rules hold for every change; check them before
 calling UI work done.
 
+## Where code goes (`docs/architecture.md`)
+
+- `main.py` only prepares the process. The program is `app/` (the `Api` is `app/api/`, one mixin per concern: a
+  method goes in the mixin that owns the state it touches), `core/` (settings, Home Assistant; imports nothing of
+  ours), `winsys/` (Win32, capture, tray, Qt's shell), `nativeui/` (the windows).
+- Win32 calls: argument types in `winsys/win32.py`, what is done to a window in `winsys/windows.py`. A rule about
+  placement or glass that needs no window goes in `app/geometry.py`, where it is tested without one.
+- Keep functions short enough to read at once (aim under 80 lines). A screen's body is built by one method per
+  section (see `settings.py`, `editor.py`), a request is worked through in steps (see `app/api/backdrop.py`), not by one
+  long function with a dozen locals.
+- No scratch files at the top level. Pictures and measurements are scripts in `tools/` (`tools/README.md`).
+
 ## House style (`nativeui/style.py`)
 
 - **Text comes from roles.** Use `style.label(role, text, ...)` (or `style.TEXT[role]` / `style.font(role)` when
@@ -98,13 +110,21 @@ carries it over. Add a test that pushes a new state while it is active.
   its picture on the processor.
 - Repaints are not free. A self-ticking view stops when its window is hidden. Something that moves every
   second redraws only what moves over a picture kept for the rest (the clock's ring over its face), and moves
-  in a short eased step rather than continuously (`kinds.HAND_MOVE_S`: ~3% of a core against ~7%). Blurs are made at reduced
-  resolution (`Scene.paint_blurred`). Measure animations with a script before calling them smooth.
+  in a short eased step rather than continuously (`kinds.HAND_MOVE_S`: ~3% of a core against ~7%). A dimmed
+  (standby) clock's ring is still, every tick equally faint (`kinds.STANDBY_TICK_ALPHA`): it is drawn again only for
+  its minute. Blurs are made at reduced resolution (`Scene.paint_blurred`). Measure animations with a script before
+  calling them smooth.
 
 ## Checking work
 
-- `python -m unittest discover -s tests` must pass. The tests build real windows. Calls from worker threads
-  reach the GUI thread through `qtshell.ensure_marshal()`, which every `Scene` sets up.
+- `python tests/run.py` must pass (`python tests/run.py fast` for the layers that need no windows; layers and
+  options in `tests/README.md`). The tests build real windows. Calls from worker threads reach the GUI thread
+  through `qtshell.ensure_marshal()`, which every `Scene` sets up.
+- Tests make a screen through `tests/support` (the real `Api` over a stand-in Home Assistant, a house as large as a
+  real one) and never read source text to `exec` it. A stand-in must take what the real thing takes
+  (`tests/app/test_contract.py`). Sizes are the real ones: `tests/ui/test_scenes.py` opens Settings, the panel and
+  every menu of a card on each work area in `fixtures.WORK_AREAS`; a new page, menu or device is covered by it, and a
+  new work area (a screen people really have) is one line in the fixtures.
 - Look at the result: render the screens (scripts in the session scratchpad or `packaging/render_readme.py`)
   and exercise the interaction (press, drag, a state arriving mid-interaction), not only static pictures.
 - Strings shown to people are Traditional Chinese in the code, with English in `nativeui/i18n_en.json`.

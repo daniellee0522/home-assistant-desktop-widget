@@ -2,7 +2,7 @@
 
 The controls of each kind of device, the readout and history of a sensor, and the small edit panel
 (icon, name, room, label), as DetailContent. A desktop widget's tile opens it in a window of its own
-(DetailCard: main.py tells it which tile to show, Api.open_popover takes it to its place, and it closes
+(DetailCard: the Api tells it which tile to show, Api.open_popover takes it to its place, and it closes
 when focus leaves it); the tray panel shows it over its own tiles (panel.py).
 """
 import threading

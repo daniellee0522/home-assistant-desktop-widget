@@ -8,7 +8,7 @@ pip install -r requirements.txt pyinstaller
 ./packaging/release.ps1 -Version 1.3.1
 ```
 
-`release.ps1` writes `VERSION`, runs the Python tests, builds the bundle and
+`release.ps1` writes `VERSION`, runs the Python tests (`python tests/run.py`), builds the bundle and
 installer, and writes a SHA-256 checksum. Output is
 `dist/<version>/HA-Widgets-Setup-<version>.exe`. Pass
 `-Iscc "C:\path\to\ISCC.exe"` if Inno Setup is not found automatically.
@@ -26,6 +26,9 @@ Keep the `AppId` in `installer.iss` unchanged. A newer installer updates the
 existing installation, preserves `%APPDATA%\HA Widgets` settings, closes the
 running app when necessary, and relaunches it afterward. Startup preferences
 are left unchanged. There is no automatic update check.
+
+`build-info.json` in the bundle records the version and a checksum of `main.py` and every source file of `app/`,
+`core/`, `nativeui/` and `winsys/`, so a build can be matched to its source.
 
 The build uses a restricted DLL search path and checks the frozen capture
 worker (`test_frozen_worker.py`) before creating the installer. The installer

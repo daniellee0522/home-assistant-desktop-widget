@@ -12,6 +12,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 HERE = ROOT / 'packaging'
 NAME = 'HA Widgets'
+# The program's source folders (main.py is the entry beside them).
+SOURCE_FOLDERS = ('app', 'core', 'nativeui', 'winsys')
 
 
 def compiler_path(override):
@@ -85,7 +87,7 @@ def main():
         '--exclude-module', f'{qt_package}.QtWebEngineCore', '--exclude-module', f'{qt_package}.QtWebEngineWidgets',
         '--exclude-module', f'{qt_package}.QtWebChannel', '--exclude-module', f'{qt_package}.QtWebEngineQuick',
         '--hidden-import', 'PIL._imagingft',
-        # this computer's player (local_media.py): WinRT's media sessions
+        # this computer's player (core/local_media.py): WinRT's media sessions
         '--collect-submodules', 'winrt',
         '--collect-binaries', 'winrt',
         '--hidden-import', f'{qt_package}.QtCore',
@@ -105,9 +107,8 @@ def main():
     (bundle / 'build-info.json').write_text(json.dumps({
         'version': args.version, 'python': sys.version.split()[0],
         'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in [ROOT / 'main.py', ROOT / 'qtshell.py', ROOT / 'tray.py', ROOT / 'app_version.py', ROOT / 'capture_worker.py', ROOT / 'dxgi_capture.py',
-                                    ROOT / 'nativeui/i18n_en.json', ROOT / 'nativeui/mdi_paths.json',
-                                    *sorted((ROOT / 'nativeui').rglob('*.py'))]},
+                          for p in [ROOT / 'main.py', ROOT / 'nativeui/i18n_en.json', ROOT / 'nativeui/mdi_paths.json',
+                                    *sorted(path for folder in SOURCE_FOLDERS for path in (ROOT / folder).rglob('*.py'))]},
     }, indent=2), encoding='utf-8')
 
     if compiler:

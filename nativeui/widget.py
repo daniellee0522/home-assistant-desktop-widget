@@ -1,6 +1,6 @@
 """A desktop widget, drawn natively: a QWidget painted with QPainter.
 
-main.py holds a `NativeWidget` for each: the window's interface (hwnd, show, hide, dispose, events,
+the Api holds a `NativeWidget` for each: the window's interface (hwnd, show, hide, dispose, events,
 run_on_ui_thread, send) over a `_Surface`, with the Api behind it (states, preferences, service calls,
 the detail card, the desktop capture and its exclusion, dimming, snapping). What the widget does
 itself: draw the tiles, take the touches, ask for the glass.
@@ -20,7 +20,7 @@ from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRectF, Qt, QTimer, S
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QMenu, QWidget
 
-import qtshell
+from winsys import qtshell
 
 from . import kinds, render
 from .actions import TileActions
@@ -107,8 +107,8 @@ class _Surface(GlassMixin, QWidget):
         self.tick_timer = QTimer(self)
         self.tick_timer.setSingleShot(True)
         self.tick_timer.timeout.connect(self._tick)
-        # a clock's ring of ticks follows the seconds: turned smoothly while it can be seen, a step a second
-        # while dimmed, not at all while hidden. Only the ring is drawn each time (over the face, kept).
+        # a clock's ring of ticks follows the seconds: turned smoothly while it can be seen; while dimmed it
+        # is still (every tick equally faint), while hidden it is not drawn. Only the ring is drawn each time (over the face, kept).
         self.second_timer = QTimer(self)
         self.second_timer.setSingleShot(True)
         self.second_timer.timeout.connect(self._second)
@@ -151,7 +151,7 @@ class _Surface(GlassMixin, QWidget):
             self._hwnd = 0
         return self._hwnd
 
-    _cache_hwnd = cache_hwnd          # the name main.py uses
+    _cache_hwnd = cache_hwnd          # the name the Api uses
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -516,7 +516,7 @@ class _Surface(GlassMixin, QWidget):
         for dim, weight in ((False, 1 - self.dim_t), (True, self.dim_t)):
             if weight > 0.001:
                 p.setOpacity(weight)
-                kinds.draw_clock_ticks(p, W, H, kinds.clock_ink(self.theme, dim), hand,
+                kinds.draw_clock_ticks(p, W, H, kinds.clock_ink(self.theme, dim), None if dim else hand,
                                        self.tcol["radius_panel"])
         p.restore()
 
@@ -543,11 +543,16 @@ class _Surface(GlassMixin, QWidget):
         self._next_second(now)
 
     def _next_second(self, now=None):
-        """The next frame of the ring: soon while the hand moves (not while dimmed: it steps then), else at the
-        next second."""
+        """The next frame of the ring: soon while the hand moves, else at the next second. Dimmed, the ring is
+        still: the next frame is only the coming minute's face, drawn ahead at :58 and shown at :00."""
         now = now or datetime.datetime.now()
         ms = now.microsecond / 1000
-        moving = not self.dim_target and ms < kinds.HAND_MOVE_S * 1000
+        if self.dim_target:
+            into_minute = now.second * 1000 + ms
+            ahead_at = 58000 if self._ahead is None and into_minute < 58000 else 60000
+            self.second_timer.start(int(ahead_at - into_minute) + 2)
+            return
+        moving = ms < kinds.HAND_MOVE_S * 1000
         self.second_timer.start(int(min(SECOND_FRAME_MS, kinds.HAND_MOVE_S * 1000 - ms) + 1) if moving
                                 else int(1000 - ms) + 2)
 
@@ -638,7 +643,7 @@ class _Surface(GlassMixin, QWidget):
         if on and self.wkind == "media":
             self.tick_timer.stop()                # dimmed, a song's place is not drawn again each second
         elif on and self.wkind == "clock":
-            self._schedule_tick()                 # dimmed, the clock's ring steps once a second
+            self._schedule_tick()                 # dimmed, the clock's ring is still: only its minute is looked after
         elif not on:
             self._schedule_tick()
             QTimer.singleShot(0, self.refresh_extras)
@@ -1026,7 +1031,7 @@ def has_hold(domain):
 
 
 class NativeWidget:
-    """What main.py holds for a widget: the window's interface (as NativeOverlay's) over a _Surface."""
+    """What the Api holds for a widget: the window's interface (as NativeOverlay's) over a _Surface."""
 
     is_native_widget = True
 
@@ -1083,7 +1088,7 @@ class NativeWidget:
         return qtshell._invoke(self._native, fn, wait=True)
 
     def send(self, name, *args):
-        """Call the window's `name` with `args` on the GUI thread, without waiting for it. What main.py
+        """Call the window's `name` with `args` on the GUI thread, without waiting for it. What the Api
         tells every window (the preferences, new states, ...), so one a window has no use for is ignored."""
         method = getattr(self._native, name, None)
         if method is not None:
@@ -1154,7 +1159,7 @@ class NativeWidget:
 
 
 def create_widget(api, widget):
-    """A desktop widget, placed where the config says (physical pixels; main.py puts it there again once shown)."""
+    """A desktop widget, placed where the config says (physical pixels; the Api puts it there again once shown)."""
     def make():
         win = NativeWidget(api, widget["id"])
         win._native.resize(*render.widget_size(widget["size"]))

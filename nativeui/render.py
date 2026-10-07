@@ -755,7 +755,7 @@ def draw_tile(p, tile, st, x, y, w, h, theme, tcol, form="small", dim=False,
     p.restore()
 
 
-# The space the desktop leaves between two widgets that snap together (main.py's _snap_widget).
+# The space the desktop leaves between two widgets that snap together (the Api's _snap_widget, app/api/widgets.py).
 WIDGET_GAP = 12
 
 

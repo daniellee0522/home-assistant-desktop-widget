@@ -66,10 +66,6 @@ LIFT_SHADOW = ((12, 16), (6, 26))
 READABLE = {"dark": (22, 24, 28, 0.62), "light": (246, 247, 249, 0.66)}
 
 
-def text_style(role):
-    return TEXT[role]
-
-
 def label(role, text="", **kw):
     """A Label of a role; kw are Label's own (x, y, w, align, wrap, overflow...); color= overrides."""
     from .ui import Label
