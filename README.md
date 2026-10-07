@@ -4,12 +4,24 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Home Assistant controls on your Windows 10/11 desktop. A lightweight desktop
-widget with a frosted-glass or liquid-glass background and transparent rounded
-corners, plus a system tray panel for quick access. Built with Qt.
+**Your smart home, on your Windows desktop, as if Apple had made it.**
+
+Glass tiles that float over your wallpaper and show your lights, climate, locks and
+players live. Tap to toggle, hold for the full controls, click the tray icon for a
+Home-style panel of every room. Light as a feather: about 50 MB and nearly 0 % CPU
+when nothing moves. Built with Qt, with no browser engine inside.
 
 **[Download the latest installer](https://github.com/daniellee0522/home-assistant-desktop-widget/releases/latest)**
-(`HA-Widgets-Setup-<version>.exe`; settings are kept when you upgrade).
+(`HA-Widgets-Setup-<version>.exe`; your settings are kept when you upgrade).
+
+## Why you will like it
+
+- **It looks like it belongs.** Classic frost, liquid glass that bends your wallpaper, or Windows' own glass, in light and dark.
+- **More than tiles.** A clock, a calendar, the weather, a camera, a chart and a music player, each its own widget you drag onto the desktop.
+- **Instant.** States arrive over Home Assistant's WebSocket and show at once; a tap is felt before the answer comes back.
+- **A panel for everything.** One click on the tray (or Ctrl + Alt + H) opens your devices by room; hold any tile for a dial, a slider or a player.
+- **Quiet.** The widgets dim when you are busy elsewhere (a dimmed clock stands perfectly still), and cost nothing on a still desktop.
+- **Yours.** Drag to arrange, snap to edges, pick icons, rename rooms, English or Traditional Chinese.
 
 ## Themes
 
@@ -30,7 +42,7 @@ appearance. The glass effect varies with your wallpaper.
 
 ![English settings with language and appearance controls](docs/settings-english.png)
 
-## Features
+## Everything it does
 
 - **Multiple widgets:** place as many widgets as you like in four sizes (1x1, 2x2, 2x4, 4x4), each with its own devices. Tiles fill the widget as small squares, wide bars or large squares, always the same size and spacing, and snap to each other and to the screen edges.
 - **Widget kinds:** besides device tiles (scenes and scripts are tiles too: press to run), there are widgets for a **clock** and a **calendar** (iOS-style faces, no device needed), the **weather** (the condition's own sky, today's high and low, the coming days), a **camera** (its picture, refreshed every few seconds, not while the desktop is out of sight), a **chart** of two sensors (their last day), and a **player** (the cover, the song and its progress, previous / play / next). Each is a widget of its own: drag it from the widget editor's palette onto the desktop, in its own fixed size (a new weather, camera or player widget starts with your first one). While dimmed, every kind turns to clear glass, as the tiles do.
