@@ -8,7 +8,7 @@ import sys
 from PySide6.QtCore import QTimer
 
 from app.api import Api
-from app.capture import compat_capture, desktop_capture
+from app.capture import compat_capture, desktop_capture, screen_duplication
 from app.widget_windows import create_widget_window, restore_widget_place
 from winsys import qtshell
 from winsys.tray import build_tray_icon, restore_tray_icon
@@ -120,6 +120,7 @@ class Shell:
 
         run_on_ui_thread(window, schedule_restore)
         desktop_capture.reset()
+        screen_duplication.reset()
         compat_capture.close()
         for win in api._all_windows():
             try:

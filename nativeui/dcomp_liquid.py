@@ -334,6 +334,7 @@ class Material:
             self.backdrop.shown = None                      # the next GPU copy is compared with nothing
         self.gpu_views = None
         self._update_image(image)
+        return 'image'                                      # (not None: that says the GPU copy failed)
 
     def _update_image(self, image):
         from PIL import Image, ImageFilter

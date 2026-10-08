@@ -585,7 +585,15 @@ class Slider:
                 self.material.gpu_views = None
                 outcome = 'failed'
             if outcome is None:
-                self.direct_after = time.monotonic() + 1.0
+                # One copy that fails (a busy GPU keeps the screen's mutex past its wait) keeps the picture shown
+                # and asks again with the next; the processor takes over only when copies keep failing, since it
+                # is several times slower.
+                self.direct_misses = getattr(self, 'direct_misses', 0) + 1
+                if self.direct_misses >= 4:
+                    self.direct_misses = 0
+                    self.direct_after = time.monotonic() + 1.0
+            else:
+                self.direct_misses = 0
         present = next_frame_time() if hasattr(self, 'material_qpc_start') else None
         elapsed = (present - self.material_qpc_start if present is not None else
                    time.perf_counter() - self.material_start)

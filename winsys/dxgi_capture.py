@@ -42,6 +42,9 @@ _IDLE_RELEASE_SECS = 2.0
 # How long the capture thread blocks waiting for a frame before it checks
 # for expired reads and idleness. New reads do not wait for it.
 _ACQUIRE_MS = 100
+# While frames are coming: how long the output that last delivered one is waited on, and for how long after a frame.
+_BUSY_WAIT_MS = 8
+_BUSY_SECS = 0.5
 # Frames of change history kept to answer "changed since frame N".
 _HISTORY = 240
 
@@ -550,6 +553,8 @@ class DesktopDuplication:
         self._thread = None
         self._broken_until = 0.0
         self._failures = 0
+        self._reset = False
+        self._frame_at, self._last_out = 0.0, None
         self._log = None
         self._luids = {}           # reader device -> its adapter's identity
         # Counts the desktop frames received, so that anyone watching
@@ -642,6 +647,16 @@ class DesktopDuplication:
     def available(self):
         return time.monotonic() >= self._broken_until
 
+    def reset(self):
+        """Drop every duplication and forgive earlier failures, as after a suspend: the outputs and the
+        adapter were made for a display set that may no longer exist, and a duplication of one of those can
+        stay valid-looking yet never deliver a frame again. The capture thread rebuilds on the next read."""
+        self._reset = True
+        self._broken_until = 0.0
+        self._failures = 0
+        self._luids.clear()
+        self._wake.set()
+
     def grab(self, x, y, w, h, after=None, timeout=1.0, pixels=True, interest_rects=None):
         if w <= 0 or h <= 0 or not self.available():
             return None
@@ -680,6 +695,9 @@ class DesktopDuplication:
     def _run(self):
         try:
             while True:
+                if self._reset:
+                    self._reset = False
+                    self._teardown()
                 with self._lock:
                     now = time.monotonic()
                     for rect, at in list(self._interest.items()):
@@ -814,10 +832,18 @@ class DesktopDuplication:
             self._wake.wait(_ACQUIRE_MS / 1000.0)
             self._wake.clear()
             return
-        # Shared between the outputs, so none waits on another for long.
-        wait_ms = max(8, _ACQUIRE_MS // len(active))
+        # The outputs are waited on one after another, so a still one must not hold up a moving one: while any
+        # delivers frames, each is only looked at (the one that moved last waits a little); only when all have
+        # been still for a while does each wait long.
+        now = time.monotonic()
+        busy = now - self._frame_at < _BUSY_SECS
         for out in active:
-            out.acquire(wait_ms, self._gpu)
+            if not busy:
+                wait_ms = max(8, _ACQUIRE_MS // len(active))
+            else:
+                wait_ms = _BUSY_WAIT_MS if out is self._last_out or len(active) == 1 else 0
+            if out.acquire(wait_ms, self._gpu):
+                self._frame_at, self._last_out = time.monotonic(), out
 
     def _serve(self):
         with self._lock:
