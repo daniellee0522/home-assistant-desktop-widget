@@ -105,3 +105,55 @@ def _pictures(api, folder, started):
                 pass
         time.sleep(0.25)
     os._exit(0)
+
+
+def start_sampler(path):
+    """HA_WIDGET_SAMPLE=<file>: after 30 s, 20 s of stack samples of every busy thread, with each thread's
+    processor time, written to the file. For finding what a running build spends its processor on."""
+    threading.Thread(target=_sample, args=(path,), daemon=True, name="sampler").start()
+
+
+def _thread_seconds(native_id):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.OpenThread.restype = wintypes.HANDLE
+    handle = kernel.OpenThread(0x40, False, native_id)
+    if not handle:
+        return 0.0
+    times = [wintypes.FILETIME() for _ in range(4)]
+    kernel.GetThreadTimes(handle, *[ctypes.byref(t) for t in times])
+    kernel.CloseHandle(handle)
+    return sum(((t.dwHighDateTime << 32) | t.dwLowDateTime) / 1e7 for t in times[2:])
+
+
+def _sample(path):
+    import collections
+    import sys
+    import traceback
+    time.sleep(30)
+    me = threading.get_ident()
+    cpu = lambda: {t.ident: (t.name, _thread_seconds(t.native_id)) for t in threading.enumerate() if t.native_id}
+    before, started = cpu(), time.time()
+    stacks = collections.Counter()
+    while time.time() - started < 20:
+        names = {t.ident: t.name for t in threading.enumerate()}
+        for ident, frame in sys._current_frames().items():
+            if ident == me:
+                continue
+            stack = traceback.extract_stack(frame)
+            if stack[-1].name in ("wait", "acquire", "sleep", "select", "_poll", "_worker", "get"):
+                continue
+            stacks[(names.get(ident, "?"), " < ".join("%s:%d %s" % (os.path.basename(s.filename), s.lineno, s.name)
+                                                       for s in reversed(stack[-5:])))] += 1
+        time.sleep(0.01)
+    after, span = cpu(), time.time() - started
+    with open(path, "w", encoding="utf-8") as f:
+        for ident, (name, secs) in sorted(after.items(), key=lambda kv: -kv[1][1]):
+            used = (secs - before.get(ident, (name, 0.0))[1]) / span
+            if used > 0.02:
+                f.write("%.2f cores  %s
+" % (used, name))
+        for (name, stack), n in stacks.most_common(25):
+            f.write("%d  %s  %s
+" % (n, name, stack))

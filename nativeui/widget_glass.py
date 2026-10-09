@@ -193,9 +193,13 @@ class Controller:
             raise
 
     def configuration(self):
+        """What the renderer is made for. The classic glass has no lens, blur level or tiles, so a scroll or a
+        change of level does not make it again."""
         s = self.surface
+        if s.style != 'liquid':
+            return (s.pw, s.ph, s.glass_card()[2] * s.scale, s.scale, 0, (), True)
         return (s.pw, s.ph, s.glass_card()[2] * s.scale, s.scale,
-                s.liquid_level, tuple(s.glass_tiles()))
+                s.liquid_level, tuple(s.glass_tiles()), False)
 
     def warm(self):
         """Make the renderer of a card that has no glass yet, so that dimming it does not wait for one."""
@@ -203,9 +207,9 @@ class Controller:
         if self.renderer is not None or c is None or s.wants_glass() or not allowed(s):
             return
         key = self.configuration()
-        w, h, radius, scale, level, tiles = key
+        w, h, radius, scale, level, tiles, classic = key
         c._make_surfaces(w, h)
-        self.renderer = Renderer(c, (w, h), radius, scale, level, tiles)
+        self.renderer = Renderer(c, (w, h), radius, scale, level, tiles, classic)
         dcomp._call(c.glass_visual, 13, (C.c_void_p,), None)
         dcomp._call(c.card_visual, 15, (C.c_void_p,), None)
         self.key = key
@@ -239,9 +243,9 @@ class Controller:
         if key != self.key:
             if self.renderer is not None:
                 self.renderer.close()
-            w, h, radius, scale, level, tiles = key
+            w, h, radius, scale, level, tiles, classic = key
             c._make_surfaces(w, h)
-            self.renderer = Renderer(c, (w, h), radius, scale, level, tiles)
+            self.renderer = Renderer(c, (w, h), radius, scale, level, tiles, classic)
             dcomp._call(c.glass_visual, 13, (C.c_void_p,), None)
             dcomp._call(c.card_visual, 15, (C.c_void_p,), None)
             self.key = key
@@ -363,7 +367,7 @@ class Controller:
 
 def allowed(surface):
     return (os.name == 'nt' and os.environ.get('HA_WIDGET_GPU') != '0'
-            and surface.style == 'liquid' and not surface.system_glass
+            and not surface.system_glass
             and not getattr(surface, '_gpu_failed', False)
             and getattr(surface.api, 'gpu_widget_glass_allowed', lambda kind: False)(surface.kind))
 
@@ -377,13 +381,16 @@ def prewarm(surface):
     scale = surface.scale
     key = ((surface.pw, surface.ph), surface.glass_card()[2] * scale,
            22 * max(0, min(100, surface.liquid_level)) / 100 * scale)
+    if surface.style != 'liquid':
+        key = key[:1]                       # the classic glass has no lens to make
     if key not in _warmed:
         _warmed.add(key)
         from .gpu_glass import shape_data
         from winsys import qtshell
 
         def work():
-            shape_data(*key)
+            if len(key) > 1:
+                shape_data(*key)
             if qtshell._marshal is not None:        # then the renderer, on the GUI thread
                 qtshell._marshal.post(lambda: surface._gpu_receiver and surface._gpu_receiver.warm())
         threading.Thread(target=work, daemon=True, name='glass-lens').start()

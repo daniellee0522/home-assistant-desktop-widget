@@ -156,6 +156,9 @@ def main():
     if os.environ.get("HA_WIDGET_OPEN_PANEL"):
         from app.probe import start_probe
         start_probe(api)
+    if os.environ.get("HA_WIDGET_SAMPLE"):
+        from app.probe import start_sampler
+        start_sampler(os.environ["HA_WIDGET_SAMPLE"])
 
     tray_icon = build_tray_icon(shell.activate, shell.toggle_visibility, shell.open_settings,
                                 shell.toggle_theme, shell.refresh_now, shell.quit_action)

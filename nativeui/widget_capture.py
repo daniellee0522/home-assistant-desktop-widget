@@ -22,10 +22,11 @@ _pool = None
 
 class DesktopFrame:
     """A window's part of the desktop that stays on the GPU: the renderer copies it itself."""
-    def __init__(self, rect, pre_blur, copy):
+    def __init__(self, rect, pre_blur, copy, divide=1):
         self.rect = tuple(rect)
         self.w, self.h = rect[2], rect[3]
         self._pre_blur = pre_blur
+        self.divide = divide              # how much smaller the frost is blurred than the desktop is
         self.copy = copy
 
     def copy_into(self, texture, device, context):
@@ -125,7 +126,7 @@ def publish(reader, shot, generation):
             reader.digest = None
             return
         reader.digest, reader.taken, reader.quiet = shot.get('hash'), True, 0
-        return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy']), generation
+        return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy'], shot.get('divide', 1)), generation
     raw = shot.get('blur_raw')
     if not raw or abs(shot['w'] - s.pw) > 3 or abs(shot['h'] - s.ph) > 3:
         reader.digest = None
@@ -208,10 +209,32 @@ def prepare():
             traceback.print_exc()
 
 
+# A desktop that changes at every frame for longer than STEADY_AFTER_S (a video, an animated wallpaper, a window
+# being scrolled for a long time) is followed at STEADY_PACE instead of the display's rate: the frost is blurred
+# well past what 100+ pictures a second can show, and each one costs a capture, a window scan and a blur.
+STEADY_AFTER_S = 1.5
+STEADY_PACE = 1 / 30
+
+
+def _steady_pause(shots, moving_since, cycle_at):
+    """Keeps a desktop that has changed at every cycle for STEADY_AFTER_S to STEADY_PACE. Returns the state to
+    pass in next time: when the changing began (None if it stopped) and when this cycle began."""
+    now = time.monotonic()
+    if not any(callable(shot) or (shot and not shot.get('unchanged')) for shot in shots):
+        return None, now
+    moving_since = moving_since or now
+    if now - moving_since > STEADY_AFTER_S:
+        wait = cycle_at + STEADY_PACE - now
+        if wait > 0:
+            time.sleep(wait)
+    return moving_since, time.monotonic()
+
+
 def run():
     global _thread
     cursors = {}
     due = 0
+    moving_since, cycle_at = None, 0.0
     while True:
         with _lock:
             readers = list(_members.values())
@@ -255,6 +278,7 @@ def run():
                 if now - due >= pace:
                     due = now
             all_shots = []
+            answers = []
             packets = []
             for api, group in groups.items():
                 requests = [(r.surface.kind, r.digest, r.surface.pw, r.surface.ph) for r in group]
@@ -266,6 +290,7 @@ def run():
                 if batch is not None and getattr(api, 'widget_glass_deferred', False):
                     frame, shots = batch(requests, after, True)
                     cursors[api] = (signature, frame)
+                    answers.extend(shots)
                     hand_over(api, group, generations, shots)
                     continue
                 if batch is not None:
@@ -279,7 +304,9 @@ def run():
                     if packet is not None:
                         packets.append(packet)
                 all_shots.extend(shots)
+                answers.extend(shots)
             submit(packets)
+            moving_since, cycle_at = _steady_pause(answers, moving_since, cycle_at)
             # DXGI's wait is the static detector. Sources without one retain
             # the original quiet backoff instead of polling at monitor speed.
             if all_shots and all(not shot or not shot.get('paced') for shot in all_shots):

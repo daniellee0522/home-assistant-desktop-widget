@@ -173,6 +173,7 @@ class BackdropMixin:
                   if job.look_over and not job.covers and job.defer_pixels and kind != "popover" else None)
         if direct is None and job.gpu and kind == "flyout" and job.can_read_screen and not job.compose_widget:
             direct = self._flyout_direct(job.rect)
+            direct = None if direct is None else (direct, 1)
         if direct is not None:
             # The picture never leaves the GPU: only whether it changed is asked here. A widget's batch has
             # waited for the screen already; the panel waits here, and is answered the moment the screen
@@ -186,8 +187,8 @@ class BackdropMixin:
                     # A popover over this widget composes the picture only when it opens.
                     self._widget_frames[kind] = (
                         x, y, w, h, lambda: (screen_duplication.grab(x, y, w, h, None, 0.2) or (None, None))[1])
-                raise _Answer(dict(gpu=(x, y, w, h), copy=screen_duplication.copy_region, pre_blur=direct,
-                                   w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
+                raise _Answer(dict(gpu=(x, y, w, h), copy=screen_duplication.copy_region, pre_blur=direct[0],
+                                   divide=direct[1], w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
                                    ms=(time.perf_counter() - job.started) * 1000))
         got = screen_duplication.grab(x, y, w, h, after,
                                       DUPLICATION_WAIT_SECS if job.wait_secs is None else job.wait_secs)
@@ -355,22 +356,23 @@ class BackdropMixin:
         return widget
 
     def _gpu_direct_frame(self, window, kind, rect, last_hash):
-        """The picture's pre-blur when this widget may take the desktop straight from the GPU, else None.
-        Clear and lightly frosted liquid glass of a widget with its own compositor, on the screen
-        whose duplication shares that compositor's device."""
+        """(the picture's pre-blur, how much smaller its frost is blurred) when this widget may take the desktop
+        straight from the GPU, else None. Any glass of a widget with its own compositor, on the screen whose
+        duplication shares that compositor's device: the classic glass is made from the whole desktop picture
+        there, and the liquid glass shrinks its frost itself (the processor used to, before sending it)."""
         native = getattr(window, "native", None)
         receiver = getattr(native, "_gpu_receiver", None)
         if (receiver is None or receiver.compositor is None or not native._gpu_shared_capture
-                or self._cfg.get("glass_style") != "liquid"
                 or time.monotonic() < getattr(native, "_gpu_direct_after", 0)):
             return None
-        level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
-        scale, pre_blur, _ = liquid_params(level)
-        if scale != 1:
-            return None
+        if self._cfg.get("glass_style") == "liquid":
+            level = max(0, min(100, int(self._cfg.get("liquid_blur", 0)))) / 100.0
+            divide, pre_blur, _ = liquid_params(level)
+        else:
+            divide, pre_blur = 1, 0
         if not screen_duplication.gpu_source(rect, receiver.compositor.device):
             return None
-        return pre_blur
+        return pre_blur, divide
 
     def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours, snapshot=None):
         """A widget's picture of the screen with other programs' windows over it replaced by the desktop:

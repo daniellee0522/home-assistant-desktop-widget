@@ -103,8 +103,10 @@ carries it over. Add a test that pushes a new state while it is active.
   keyed-mutex shared texture (`dxgi_capture.copy_region`), the renderer copies its window's rectangle out of it
   on its own device (`Renderer.issue_desktop` / `update_desktop`) and a compute shader tells whether the picture
   moved by more than noise, so a still desktop redraws nothing. Never put the duplication and the renderer on one
-  device: their commands then share a queue and a lock, and every copy waits for the screen. The CPU path
-  (`blur_raw` pictures) stays for frosted levels above 45, covered windows, rotated or split screens.
+  device: their commands then share a queue and a lock, and every copy waits for the screen. Every style and blur level takes this path: the classic glass is the
+  desktop averaged over 8 x 8 cells and blurred on the GPU (`Renderer(classic=True)`), and a frost above 45 is blurred on a
+  shrunk picture (`DesktopFrame.divide`). The CPU path (`blur_raw` pictures) stays for covered windows, rotated or split
+  screens, and a GPU that cannot do it.
   The tray panel's compositor material does the same (`dcomp_liquid.DesktopBackdrop`: copy, quarter-size reduction
   and two blurs on the GPU, the same noise rule), except while a widget lies under the panel: those are composed into
   its picture on the processor.

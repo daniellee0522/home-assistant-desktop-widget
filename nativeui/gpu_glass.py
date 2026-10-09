@@ -269,9 +269,16 @@ class Texture:
             setattr(self, name, None)
 
 
+# The classic (non-liquid) glass: the desktop averaged over 8 x 8 cells, blurred by this much (in those cells),
+# then stretched over the card. The same picture the processor used to make, now made on the GPU.
+CLASSIC_CELL_HALVINGS = 3
+CLASSIC_BLUR = 2.0
+
+
 class Renderer:
-    def __init__(self, compositor, size, radius, scale, level, tiles):
+    def __init__(self, compositor, size, radius, scale, level, tiles, classic=False):
         self.compositor = compositor
+        self.classic = classic
         self.device, self.context = compositor.device, compositor.context
         self.size, self.scale, self.level = size, scale, max(0, min(100, level)) / 100
         self.tiles = list(tiles)
@@ -292,13 +299,18 @@ class Renderer:
             self.sampler = _new(self.device, 23, (P,), C.byref(desc))
             self.resources.append(self.sampler)
             w, h = size
-            shape, card, field = shape_data(tuple(size), radius, 22 * self.level * scale)
-            self.card = self._image_texture(card.convert('RGBA'))
-            self.tile_masks = [self._image_texture(shape.tile_mask(tw, th, r).convert('RGBA'))
-                               for x, y, tw, th, r in self.tiles]
-            # Float mesh maps are computed once with the exact original Pillow
-            # rasterizer. The GPU reads them without simplifying any corner.
-            self.field = self._texture(size, field, format=2)
+            if classic:
+                # No lens: the card's shape is uploaded with the foreground (see Controller.present).
+                self.card = self._texture(size)
+                self.tile_masks, self.field = [], None
+            else:
+                shape, card, field = shape_data(tuple(size), radius, 22 * self.level * scale)
+                self.card = self._image_texture(card.convert('RGBA'))
+                self.tile_masks = [self._image_texture(shape.tile_mask(tw, th, r).convert('RGBA'))
+                                   for x, y, tw, th, r in self.tiles]
+                # Float mesh maps are computed once with the exact original Pillow
+                # rasterizer. The GPU reads them without simplifying any corner.
+                self.field = self._texture(size, field, format=2)
             self.foreground = self._texture(size)
             self.foreground_dim = self._texture(size)
             self.dim_mix = None
@@ -495,16 +507,35 @@ class Renderer:
             return None            # no compute shaders: the CPU path keeps its own noise rule
         self._pipeline_bound = False
         self.source = self._temporary('capture%d' % index, size)
-        self._refract(size, frame._pre_blur)
+        self._refract(size, frame._pre_blur, frame.divide)
         self.shown, self.shown_size = index, size
         return 'changed'
 
-    def _refract(self, size, pre_blur):
+    def _classic(self, size):
+        """The classic glass from a picture of the desktop: a full-size one is averaged over 8 x 8 cells and
+        blurred here; one the processor already made small (and blurred) is only stretched over the card."""
+        source = self.source
+        if size[0] * 2 > self.size[0] or size[1] * 2 > self.size[1]:
+            for i in range(CLASSIC_CELL_HALVINGS):
+                w, h = source.size
+                half = self._temporary('cell%d' % i, ((w + 1) // 2, (h + 1) // 2))
+                self._pass(half, 4, [source], region=(0, 0, w, h))
+                source = half
+            source = self._blur(source, CLASSIC_BLUR, 'classic-blur')
+        self.result = self._resize(source, self.size, 'classic-card', cubic=False)
+
+    def _refract(self, size, pre_blur, divide=1):
+        if self.classic:
+            return self._classic(size)
         source = self._blur(self.source, pre_blur, 'capture-prefilter')
         sharp = self._resize(source, self.size, 'sharp')
         self.result = self._temporary('glass', self.size)
         self._pass(self.result, 3, [sharp, sharp, self.field])
         if self.level > .001:
+            # The frost is blurred on a smaller picture the more of it there is (the processor's path made the
+            # capture that small before anything else); a desktop frame arrives whole, so it shrinks here.
+            if divide > 1:
+                size = (max(1, round(size[0] / divide)), max(1, round(size[1] / divide)))
             reduced = self._resize(self.result, size, 'refracted-small')
             frost = self._blur(reduced, 22 * self.level * self.scale * size[0] / self.size[0], 'frost')
             self.result = self._resize(frost, self.size, 'frosted')

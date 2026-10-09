@@ -146,7 +146,8 @@ class GlassMixin:
             return
         self._glass_fit = key
         self.mask = None
-        if self.latest is not None and not self._liquid_glass() and self._make_glass():
+        if (self.latest is not None and self._gpu_receiver is None and not self._liquid_glass()
+                and self._make_glass()):
             self.update()
         else:
             self.glass = None             # the lens is made for one size only
@@ -187,7 +188,7 @@ class GlassMixin:
     def _make_glass(self):
         """self.glass from the last picture. False when there is none."""
         img = self.latest
-        if img is None:
+        if img is None or not isinstance(img, QImage):    # (a desktop frame is the GPU's to draw)
             return False
         if self._liquid_glass():
             self.glass = img

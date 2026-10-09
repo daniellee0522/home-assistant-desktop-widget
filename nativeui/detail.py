@@ -908,11 +908,26 @@ def build_onoff(card, stack, tile, state):
                                                  card.call(tile["domain"], "toggle", tile["entity"]))), 4, 16)
 
 
+def light_effects(card, stack, entity, attrs):
+    """A light's effects, as one card that opens a menu of them. Shown on or off: the card is fitted to what it
+    holds when opened, and one that came with the light switching on would fall outside it."""
+    effects = attrs.get("effect_list") or []
+    if effects:
+        cards(card, stack, [("mdi:auto-fix", "特效", attrs.get("effect") or "無",
+                             [(e, e) for e in effects],
+                             lambda v: card.call("light", "turn_on", entity, {"effect": v}))])
+
+
 def build_light(card, stack, tile, state):
     attrs = _attrs(state)
     on = bool(state) and state.get("state") == "on"
     entity = tile["entity"]
-    pct = round(attrs["brightness"] / 255 * 100) if attrs.get("brightness") is not None else (100 if on else 0)
+    modes = attrs.get("supported_color_modes") or []
+    if modes and all(m == "onoff" for m in modes):      # a light that only goes on and off: its switch, not a slider
+        build_onoff(card, stack, tile, state)
+        light_effects(card, stack, entity, attrs)
+        return
+    pct =round(attrs["brightness"] / 255 * 100) if attrs.get("brightness") is not None else (100 if on else 0)
     modes = attrs.get("supported_color_modes") or []
     rgb = attrs.get("rgb_color") if isinstance(attrs.get("rgb_color"), list) else None
     color = "rgb(%d,%d,%d)" % tuple(rgb[:3]) if rgb else "accent_yellow"
@@ -968,11 +983,7 @@ def build_light(card, stack, tile, state):
         sw = controls.Swatches(BODY_W, swatches, pick, size=32 if getattr(card, "panel_layout", False) else 46)
         sw.key, sw.open = "colors", False
         stack.place(sw, 4, 8 if getattr(card, "panel_layout", False) else 14)
-    effects = attrs.get("effect_list") or []
-    if effects and on:
-        cards(card, stack, [("mdi:auto-fix", "特效", attrs.get("effect") or "無",
-                             [(e, e) for e in effects],
-                             lambda v: card.call("light", "turn_on", entity, {"effect": v}))])
+    light_effects(card, stack, entity, attrs)
 
 
 def kelvin_css(k):
