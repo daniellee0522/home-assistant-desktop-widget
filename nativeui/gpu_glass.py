@@ -79,6 +79,11 @@ float4 ps(float4 position: SV_POSITION): SV_TARGET {
   ring=bytes(lerp(ring,1,field.w));
   return bytes(lerp(b.Load(int3(pixel,0)),ring,field.z));
  }
+ if(operation==7) { // a rotated screen's copy, turned upright (filter.y: DXGI's rotation 2, 3 or 4)
+  int2 size=int2(target.xy); int turn=(int)filter.y;
+  int2 s=turn==2 ? int2(pixel.y,size.x-1-pixel.x) : turn==3 ? size-1-pixel : int2(size.y-1-pixel.y,pixel.x);
+  return a.Load(int3(s,0));
+ }
  if(operation==4) { // reduce a tile by 2, with Pillow's partial last cell
   int2 start=int2(region.xy)+pixel*2;
   float4 sum=0; int count=0;
@@ -464,7 +469,15 @@ class Renderer:
         size = (frame.w, frame.h)
         index = 0 if self.shown is None else 1 - self.shown
         current = self._temporary('capture%d' % index, size)
-        if not frame.copy_into(current.texture, self.device, self.context):
+        turn = frame.rotation if frame.rotation in (2, 3, 4) else 0
+        if turn:
+            # The screen is rotated: its copy has the turned shape, and a pass turns it upright.
+            held = self._temporary('turned', (size[1], size[0]) if turn != 3 else size)
+            if not frame.copy_into(held.texture, self.device, self.context):
+                self.issued = None
+                return False
+            self._pass(current, 7, [held], axis=turn)
+        elif not frame.copy_into(current.texture, self.device, self.context):
             self.issued = None
             return False
         measured = False

@@ -173,7 +173,7 @@ class BackdropMixin:
                   if job.look_over and not job.covers and job.defer_pixels and kind != "popover" else None)
         if direct is None and job.gpu and kind == "flyout" and job.can_read_screen and not job.compose_widget:
             direct = self._flyout_direct(job.rect)
-            direct = None if direct is None else (direct, 1)
+            direct = None if direct is None else (direct, 1, None)
         if direct is not None:
             # The picture never leaves the GPU: only whether it changed is asked here. A widget's batch has
             # waited for the screen already; the panel waits here, and is answered the moment the screen
@@ -188,7 +188,7 @@ class BackdropMixin:
                     self._widget_frames[kind] = (
                         x, y, w, h, lambda: (screen_duplication.grab(x, y, w, h, None, 0.2) or (None, None))[1])
                 raise _Answer(dict(gpu=(x, y, w, h), copy=screen_duplication.copy_region, pre_blur=direct[0],
-                                   divide=direct[1], w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
+                                   divide=direct[1], rotation=direct[2], w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
                                    ms=(time.perf_counter() - job.started) * 1000))
         got = screen_duplication.grab(x, y, w, h, after,
                                       DUPLICATION_WAIT_SECS if job.wait_secs is None else job.wait_secs)
@@ -356,8 +356,8 @@ class BackdropMixin:
         return widget
 
     def _gpu_direct_frame(self, window, kind, rect, last_hash):
-        """(the picture's pre-blur, how much smaller its frost is blurred) when this widget may take the desktop
-        straight from the GPU, else None. Any glass of a widget with its own compositor, on the screen whose
+        """(the picture's pre-blur, how much smaller its frost is blurred, the rotation of the screen it lies on)
+        when this widget may take the desktop straight from the GPU, else None. Any glass of a widget with its own compositor, on the screen whose
         duplication shares that compositor's device: the classic glass is made from the whole desktop picture
         there, and the liquid glass shrinks its frost itself (the processor used to, before sending it)."""
         native = getattr(window, "native", None)
@@ -370,9 +370,10 @@ class BackdropMixin:
             divide, pre_blur, _ = liquid_params(level)
         else:
             divide, pre_blur = 1, 0
-        if not screen_duplication.gpu_source(rect, receiver.compositor.device):
+        source = screen_duplication.gpu_source(rect, receiver.compositor.device, True)
+        if not source:
             return None
-        return pre_blur, divide
+        return pre_blur, divide, source[0].rotation
 
     def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours, snapshot=None):
         """A widget's picture of the screen with other programs' windows over it replaced by the desktop:

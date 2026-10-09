@@ -22,15 +22,18 @@ _pool = None
 
 class DesktopFrame:
     """A window's part of the desktop that stays on the GPU: the renderer copies it itself."""
-    def __init__(self, rect, pre_blur, copy, divide=1):
+    def __init__(self, rect, pre_blur, copy, divide=1, rotation=None):
         self.rect = tuple(rect)
         self.w, self.h = rect[2], rect[3]
         self._pre_blur = pre_blur
         self.divide = divide              # how much smaller the frost is blurred than the desktop is
+        self.rotation = rotation          # of the screen it was taken from (DXGI's value); None if not asked
         self.copy = copy
 
     def copy_into(self, texture, device, context):
-        return self.copy(self.rect, texture, device, context) is not None
+        if self.rotation is None:
+            return self.copy(self.rect, texture, device, context) is not None
+        return self.copy(self.rect, texture, device, context, self.rotation) is not None
 
 
 class Signals(QObject):
@@ -126,7 +129,8 @@ def publish(reader, shot, generation):
             reader.digest = None
             return
         reader.digest, reader.taken, reader.quiet = shot.get('hash'), True, 0
-        return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy'], shot.get('divide', 1)), generation
+        return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy'], shot.get('divide', 1),
+                                         shot.get('rotation')), generation
     raw = shot.get('blur_raw')
     if not raw or abs(shot['w'] - s.pw) > 3 or abs(shot['h'] - s.ph) > 3:
         reader.digest = None

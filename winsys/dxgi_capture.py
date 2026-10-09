@@ -570,10 +570,11 @@ class DesktopDuplication:
                 _release(dxgi_device)
         return self._luids[key]
 
-    def gpu_source(self, rect, device):
+    def gpu_source(self, rect, device, rotated=False):
         """(output, texture rectangle) when the desktop rectangle `rect` (x, y, w, h) can be copied on the
-        GPU into a texture of `device`: one unrotated output that holds it, on the same adapter, whose
-        copy of the desktop is shared."""
+        GPU into a texture of `device`: one output that holds it, on the same adapter, whose copy of the
+        desktop is shared. A rotated output only when `rotated` says the reader turns its copy upright
+        (the texture rectangle is then the rectangle's turned shape: see Renderer.issue_desktop)."""
         l, t, w, h = rect
         want = (l, t, l + w, t + h)
         if not _address(device):
@@ -585,7 +586,7 @@ class DesktopDuplication:
                 if not part:
                     continue
                 if (found is not None or part != want or not out.mutex or not out.handle
-                        or _untransposer(out.rotation) is not None
+                        or (_untransposer(out.rotation) is not None and not rotated)
                         or not out.copy or not out.valid or _intersect(tex, out.valid) != tex):
                     return None
                 found = (out, tex)
@@ -598,13 +599,14 @@ class DesktopDuplication:
                 return None
             return found
 
-    def copy_region(self, rect, destination, device, context):
+    def copy_region(self, rect, destination, device, context, rotation=None):
         """Copy desktop `rect` into `destination`, a texture of `device`, entirely on the GPU: the
         renderer's own commands, ordered after the capture's by the copy's keyed mutex. The frame
-        cursor, or None."""
+        cursor, or None. The picture is as the output holds it: for a rotated output, `destination` has the
+        turned shape and the reader (which names the `rotation` it expects) turns it upright."""
         with self._gpu:
-            got = self.gpu_source(rect, device)
-            if got is None:
+            got = self.gpu_source(rect, device, rotation is not None)
+            if got is None or (rotation is not None and got[0].rotation != rotation):
                 return None
             out, (l, t, r, b) = got
             key = _address(device)

@@ -152,8 +152,6 @@ def _sample(path):
         for ident, (name, secs) in sorted(after.items(), key=lambda kv: -kv[1][1]):
             used = (secs - before.get(ident, (name, 0.0))[1]) / span
             if used > 0.02:
-                f.write("%.2f cores  %s
-" % (used, name))
+                f.write("%.2f cores  %s\n" % (used, name))
         for (name, stack), n in stacks.most_common(25):
-            f.write("%d  %s  %s
-" % (n, name, stack))
+            f.write("%d  %s  %s\n" % (n, name, stack))
