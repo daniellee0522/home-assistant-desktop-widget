@@ -24,6 +24,7 @@ from winsys import qtshell
 
 from . import kinds, render
 from .actions import TileActions
+from .customview import CustomHost
 from .glass import GlassMixin
 from .animation_clock import FrameTimer
 
@@ -77,6 +78,9 @@ class _Surface(GlassMixin, QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)                   # (a widget of the kit may take files; the others refuse them)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self._hwnd = 0
         self._shown_once = False
         self.prefs = {}
@@ -98,6 +102,8 @@ class _Surface(GlassMixin, QWidget):
         self.form, self.rects = "small", []
         self.wkind = "tiles"                      # what it shows: tiles, weather, camera, chart
         self.clock_font = None                    # a clock's digits' font ({"file", "name"}; None: the default)
+        self.custom = None                        # a widget of the kit: {"widget": package id, "config", "granted"}
+        self.kit = CustomHost(self)               # ... and what runs it (nativeui/customview.py)
         self.extras, self._extras_at, self._fetching = {}, {}, set()
         self.extras_timer = QTimer(self)
         self.extras_timer.setInterval(5000)
@@ -206,10 +212,11 @@ class _Surface(GlassMixin, QWidget):
         if mine is None and prefs.get("widgets"):
             mine = prefs["widgets"][0]
         mine = mine or {"size": "2x4", "tiles": []}
-        wkind = mine.get("kind") if mine.get("kind") in kinds.KINDS else "tiles"
+        wkind = mine.get("kind") if mine.get("kind") in kinds.KINDS + ("custom",) else "tiles"
         new = {
             # a widget of another kind holds only the devices it shows (the first weather, two sensors...)
-            "tiles": mine["tiles"] if wkind == "tiles" else kinds.shown(wkind, mine["tiles"]),
+            "tiles": mine["tiles"] if wkind == "tiles" else [] if wkind == "custom" else kinds.shown(wkind, mine["tiles"]),
+            "custom": mine.get("custom") if wkind == "custom" else None,
             "wkind": wkind, "size_key": mine["size"], "zoom": prefs.get("zoom", 100),
             "theme_raw": prefs.get("theme", "auto"), "style": prefs.get("glass_style", "classic"),
             "language": prefs.get("language", "zh-TW"), "liquid_level": prefs.get("liquid_blur", 0),
@@ -244,12 +251,14 @@ class _Surface(GlassMixin, QWidget):
         if not changed:
             return
         render.set_language(self.language)
-        if changed & {"tiles", "wkind"}:
+        if changed & {"tiles", "wkind", "custom"}:
             self.extras, self._extras_at = {}, {}
+            if "custom" in changed:
+                self.kit.changed()
             QTimer.singleShot(0, self.refresh_extras)
         if changed & {"size_key", "zoom", "tiles", "wkind"}:
             self.relayout()
-        elif changed & {"theme_raw", "style", "language", "system_glass", "clock_font"}:
+        elif changed & {"theme_raw", "style", "language", "system_glass", "clock_font", "custom"}:
             self.rebuild()
         if changed & {"style", "liquid_level", "size_key", "zoom", "system_glass"}:
             self.reset_glass()
@@ -350,7 +359,9 @@ class _Surface(GlassMixin, QWidget):
         img = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
-        if self.wkind == "tiles":
+        if self.wkind == "custom":
+            self.kit.draw(p, dim)
+        elif self.wkind == "tiles":
             self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
                                                    self.scale, dim, self.style, self._ui(), self.theme_raw)
         else:
@@ -520,11 +531,17 @@ class _Surface(GlassMixin, QWidget):
                                        self.tcol["radius_panel"])
         p.restore()
 
+    def _warm_next_minute(self, now):
+        """The coming minute's digits are made in the background while this one is on show, so that changing to it is not a stall."""
+        cw, ch = render.widget_size(self.size_key)
+        kinds.warm_clock_digits(cw, ch, now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=1), self.clock_font)
+
     def _second(self):
         if not self.isVisible() or self.wkind != "clock":
             self.second_timer.stop()
             return
         now = datetime.datetime.now()
+        self._warm_next_minute(now)
         minute = now.replace(second=0, microsecond=0)
         if self._drawn_minute is not None and minute != self._drawn_minute:
             self.overlay = None                             # a new minute: the digits again
@@ -583,14 +600,24 @@ class _Surface(GlassMixin, QWidget):
         """The tiles and a chart stand on glass; a clock, a calendar, the weather, a camera and a player have a
         solid face of their own, and want the desktop's picture only while dimmed (clear glass then) or when
         they are empty (the bare card)."""
+        if self.wkind == "custom":                 # as it says: glass, or a face of its own (and glass again when dimmed)
+            return self.dim_target or self.dim_t > 0 or self.kit.wants_glass()
         if self.wkind in ("tiles", "chart") or self.dim_target or self.dim_t > 0:
             return True
         return self.wkind not in kinds.NO_DEVICES and not kinds.shown(self.wkind, self.tiles)
 
     def _schedule_tick(self):
+        if self.wkind == "custom":
+            ms = self.kit.tick_ms() if self.isVisible() else None
+            if ms is None:
+                self.tick_timer.stop()
+            else:
+                self.tick_timer.start(ms)
+            return
         if self.wkind == "clock":
             self.tick_timer.stop()
             if self.isVisible():
+                self._warm_next_minute(datetime.datetime.now())      # (dimmed, the clock is only woken at :58 and :00)
                 self._next_second()
             return
         if self.wkind == "calendar":
@@ -620,6 +647,7 @@ class _Surface(GlassMixin, QWidget):
         if on == self.dim_target:
             return
         self.dim_target = on
+        self.kit.set_standby(on)
         if self._gpu_receiver is not None:
             receiver = self._gpu_receiver
             receiver.queue(foreground=(not receiver.visible or self.wkind == 'clock'
@@ -647,6 +675,8 @@ class _Surface(GlassMixin, QWidget):
         elif not on:
             self._schedule_tick()
             QTimer.singleShot(0, self.refresh_extras)
+        if self.wkind == "custom":
+            self._schedule_tick()                 # dimmed or lit, at the pace the widget asked for
 
     def _step_dim(self):
         dur = EASE_DIM_MS if self.dim_target else EASE_WAKE_MS
@@ -708,6 +738,10 @@ class _Surface(GlassMixin, QWidget):
         return 0
 
     def mousePressEvent(self, e):
+        if self.wkind == "custom":
+            if e.button() == Qt.LeftButton:
+                self.kit.mouse_press(e)
+            return
         if e.button() != Qt.LeftButton:
             return
         if self._wake():
@@ -765,6 +799,9 @@ class _Surface(GlassMixin, QWidget):
             self.facade.popover(self.tiles[self._press["tile"]])
 
     def mouseMoveEvent(self, e):
+        if self.wkind == "custom":
+            self.kit.mouse_move(e)
+            return
         x, y, px, py = self._point(e)
         if not e.buttons():
             self._wake()
@@ -796,6 +833,9 @@ class _Surface(GlassMixin, QWidget):
         self.api.move_window(ox + dx, oy + dy, self.kind)
 
     def mouseReleaseEvent(self, e):
+        if self.wkind == "custom":
+            self.kit.mouse_release(e)
+            return
         x, y, px, py = self._point(e)
         press, self._press = self._press, None
         self._hold.stop()
@@ -848,6 +888,9 @@ class _Surface(GlassMixin, QWidget):
         self.facade.quick_action(tile, i)
 
     def leaveEvent(self, e):
+        if self.wkind == "custom":
+            self.kit.leave()
+            return
         self._hold.stop()
         if self.hover >= 0:
             self.hover = -1
@@ -857,6 +900,10 @@ class _Surface(GlassMixin, QWidget):
             self._invalidate_overlay()
 
     def wheelEvent(self, e):
+        if self.wkind == "custom":
+            if self.kit.wheel(e):
+                e.accept()
+            return
         if self.scroll_max <= 0:
             return
         step = -e.angleDelta().y() / 120.0 * WHEEL_STEP
@@ -867,6 +914,45 @@ class _Surface(GlassMixin, QWidget):
             if self._liquid_glass():
                 # The liquid glass blurs behind each tile (glass_tiles), which have just moved.
                 self.invalidate_glass()
+
+    # ---- the keyboard, the input method and files, for a widget of the kit ------------------------------
+    def keyPressEvent(self, e):
+        if not (self.wkind == "custom" and self.kit.key_press(e)):
+            super().keyPressEvent(e)
+
+    def inputMethodEvent(self, e):
+        if self.wkind == "custom":
+            self.kit.input_method(e)
+
+    def inputMethodQuery(self, query):
+        got = self.kit.input_query(query) if self.wkind == "custom" else None
+        return super().inputMethodQuery(query) if got is None else got
+
+    def focusOutEvent(self, e):
+        if self.wkind == "custom" and not self.hasFocus():
+            self.kit.focus_out()
+        super().focusOutEvent(e)
+
+    def dragEnterEvent(self, e):
+        if self.wkind == "custom" and e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if self.wkind == "custom" and self.kit.drag_move(e):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self.kit.drag_leave()
+
+    def dropEvent(self, e):
+        if self.wkind == "custom" and self.kit.drop(e):
+            e.acceptProposedAction()
+
+    def stop(self):
+        self.kit.close()
+        super().stop()
 
     def _invalidate_overlay(self):
         # The pointer, a scroll, a flash: what is dimmed does not show them, so the dimmed picture stays
@@ -879,6 +965,10 @@ class _Surface(GlassMixin, QWidget):
         """Fetch, off the GUI thread, what is due: the weather's coming days, the camera's picture (not while
         dimmed: the desktop is out of sight), the sensors' last day."""
         kind = self.wkind
+        if kind == "custom":
+            if self.isVisible():
+                self.kit.refresh()
+            return
         if kind not in EXTRAS_EVERY or not self.tiles or not self.isVisible() or kind in self._fetching:
             return
         if kind == "camera" and self.dim_target:     # the desktop is out of sight (a song's cover, fetched only

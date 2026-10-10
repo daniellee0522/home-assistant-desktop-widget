@@ -644,11 +644,11 @@ class TextField(View):
     """A line of text to edit: a real QLineEdit laid over the scene where this view is."""
 
     def __init__(self, x, y, w, h, text="", placeholder="", size=15, on_done=None, max_length=40, fill="input_bg",
-                 ring="input_border", radius=18, password=False, on_change=None):
+                 ring="input_border", radius=18, password=False, on_change=None, align=Qt.AlignLeft):
         super().__init__(x, y, w, h)
         self.text, self.placeholder, self.size, self.on_done, self.max_length = text, placeholder, size, on_done, max_length
         self.fill, self.ring, self.radius_ = fill, ring, radius
-        self.password, self.on_change = password, on_change
+        self.password, self.on_change, self.align = password, on_change, align
         self.edit = None
 
     def _adopt(self, scene):
@@ -658,6 +658,7 @@ class TextField(View):
             self.edit.setMaxLength(self.max_length)
             self.edit.setText(self.text)
             self.edit.setFrame(False)
+            self.edit.setAlignment(self.align)
             self.edit.editingFinished.connect(self._finished)
             if self.password:
                 self.edit.setEchoMode(QLineEdit.Password)

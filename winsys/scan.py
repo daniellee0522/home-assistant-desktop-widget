@@ -47,13 +47,35 @@ def windows_below(target, rect):
     return tuple(reversed(found))
 
 
-def window_snapshot():
-    """Every top-level window in z-order, top first, as (hwnd, rect): the rectangle (with room for its
-    shadow) of those that can be seen, None for the rest. One pass serves every widget of a frame."""
-    found = []
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+
+def frame_bounds(hwnd):
+    """(l, t, r, b) of what a window shows: its frame as the desktop draws it, without the invisible resize border that
+    GetWindowRect includes (some 8 px on each side of most windows) and without its shadow. None if it cannot be read."""
+    box = (ctypes.c_long * 4)()
+    try:
+        if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(box), ctypes.sizeof(box)) == 0                 and box[2] > box[0] and box[3] > box[1]:
+            return box[0], box[1], box[2], box[3]
+    except Exception:
+        pass
+    return None
+
+
+def window_snapshot(exact=False):
+    """Every top-level window in z-order, top first, as (hwnd, rect): the rectangle of those that can be seen, None for the
+    rest. One pass serves every widget of a frame. The rectangle has room for the window's shadow, or with `exact` is the
+    window itself (`frame_bounds`): for taking a window out of a picture without taking more than it."""
+    return window_snapshots()[1 if exact else 0]
+
+
+def window_snapshots():
+    """`window_snapshot()` and `window_snapshot(exact=True)` from one pass over the windows (the pass is most of the cost):
+    (with room for the shadow, the windows' own)."""
+    found, own = [], []
 
     def visit(hwnd, _):
-        rect = None
+        rect = exact = None
         if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             invisible = False
@@ -69,11 +91,13 @@ def window_snapshot():
                 r = window_rect(hwnd)
                 if r and r[2] > r[0] and r[3] > r[1]:
                     rect = (r[0] - SHADOW_PX, r[1] - SHADOW_PX, r[2] + SHADOW_PX, r[3] + SHADOW_PX)
+                    exact = frame_bounds(hwnd) or r
         found.append((hwnd, rect))
+        own.append((hwnd, exact))
         return 1
 
     user32.EnumWindows(ENUM_WINDOWS_PROC(visit), 0)
-    return found
+    return found, own
 
 
 def windows_over(target, rect, ours, snapshot=None):

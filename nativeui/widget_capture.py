@@ -22,8 +22,11 @@ _pool = None
 
 class DesktopFrame:
     """A window's part of the desktop that stays on the GPU: the renderer copies it itself."""
-    def __init__(self, rect, pre_blur, copy, divide=1, rotation=None):
+    def __init__(self, rect, pre_blur, copy, divide=1, rotation=None, covers=None, wallpaper=None):
         self.rect = tuple(rect)
+        self.wallpaper = wallpaper        # () -> the desktop here without any window, as BGRA bytes (or None): used once, when a window is
+                                          # over the widget before any picture without one has been drawn
+        self.covers = covers              # () -> screen rectangles (l, t, r, b) of other programs' windows over it now; None: not asked
         self.w, self.h = rect[2], rect[3]
         self._pre_blur = pre_blur
         self.divide = divide              # how much smaller the frost is blurred than the desktop is
@@ -34,6 +37,21 @@ class DesktopFrame:
         if self.rotation is None:
             return self.copy(self.rect, texture, device, context) is not None
         return self.copy(self.rect, texture, device, context, self.rotation) is not None
+
+
+    def cover_boxes(self):
+        """The parts of this frame that other programs' windows are over *now*, as (l, t, r, b) in the frame's own pixels. The copy
+        is of the desktop as it is when the renderer takes it, not as it was when the frame was planned, so what lies over the widget
+        is asked when it is copied; the renderer fills those parts from the last picture that had no window in it, on the GPU."""
+        if self.covers is None:
+            return []
+        x, y, w, h = self.rect
+        boxes = []
+        for l, t, r, b in self.covers():
+            l, t, r, b = max(0, int(l) - x), max(0, int(t) - y), min(w, int(r) - x), min(h, int(b) - y)
+            if r > l and b > t:
+                boxes.append((l, t, r, b))
+        return boxes
 
 
 class Signals(QObject):
@@ -130,7 +148,7 @@ def publish(reader, shot, generation):
             return
         reader.digest, reader.taken, reader.quiet = shot.get('hash'), True, 0
         return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy'], shot.get('divide', 1),
-                                         shot.get('rotation')), generation
+                                         shot.get('rotation'), shot.get('covers'), shot.get('wallpaper')), generation
     raw = shot.get('blur_raw')
     if not raw or abs(shot['w'] - s.pw) > 3 or abs(shot['h'] - s.ph) > 3:
         reader.digest = None
@@ -220,15 +238,25 @@ STEADY_AFTER_S = 1.5
 STEADY_PACE = 1 / 30
 
 
-def _steady_pause(shots, moving_since, cycle_at):
-    """Keeps a desktop that has changed at every cycle for STEADY_AFTER_S to STEADY_PACE. Returns the state to
+def steady_pace(api):
+    """Seconds between pictures of a desktop that keeps changing: the user's `glass_rate` (30, 20 or 15 a second)."""
+    cfg = getattr(api, '_cfg', None) or {}
+    try:
+        rate = int(cfg.get('glass_rate', 30))
+    except (TypeError, ValueError):
+        rate = 30
+    return 1 / rate if rate in (30, 20, 15) else STEADY_PACE
+
+
+def _steady_pause(shots, moving_since, cycle_at, pace=STEADY_PACE):
+    """Keeps a desktop that has changed at every cycle for STEADY_AFTER_S to `pace`. Returns the state to
     pass in next time: when the changing began (None if it stopped) and when this cycle began."""
     now = time.monotonic()
     if not any(callable(shot) or (shot and not shot.get('unchanged')) for shot in shots):
         return None, now
     moving_since = moving_since or now
     if now - moving_since > STEADY_AFTER_S:
-        wait = cycle_at + STEADY_PACE - now
+        wait = cycle_at + pace - now
         if wait > 0:
             time.sleep(wait)
     return moving_since, time.monotonic()
@@ -310,7 +338,7 @@ def run():
                 all_shots.extend(shots)
                 answers.extend(shots)
             submit(packets)
-            moving_since, cycle_at = _steady_pause(answers, moving_since, cycle_at)
+            moving_since, cycle_at = _steady_pause(answers, moving_since, cycle_at, min(steady_pace(a) for a in groups))
             # DXGI's wait is the static detector. Sources without one retain
             # the original quiet backoff instead of polling at monitor speed.
             if all_shots and all(not shot or not shot.get('paced') for shot in all_shots):

@@ -10,7 +10,8 @@ import uuid
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPen
 
-from . import kinds, render, style, ui
+from . import customview, kinds, render, style, ui
+from .editor_custom import CustomEditorMixin
 from .ui import Button, CheckRow, Rect, TextField, View
 
 PANEL_ID = "__panel"
@@ -109,8 +110,8 @@ class Palette(View):
                 x += bw + 16
             y += lh + 14
         if on_press_kind is not None:
-            self.add(style.label("hint", "時鐘、日曆、天氣、攝影機、圖表與播放器", x=0, y=y - 4))
-            y += 14 + 8
+            self.add(style.label("group", "時鐘、日曆、天氣、攝影機、圖表與播放器", x=0, y=y - 4))
+            y += 14.4 + 8
             # drawn at the sizes' own scale, so a 2x2 clock is as large as the 2x2 of tiles; in rows, bottoms aligned
             line, lines, line_w = [], [], 0
             for kind in kinds.KINDS[1:]:
@@ -349,6 +350,7 @@ class Preview(View):
         self.press = None
         self.hover = -1
         self.cache = None                    # the card (or the whole of a weather, a camera, a chart)
+        self.tick_wait = False               # a widget of the kit that draws on its own has its next drawing waiting
         self.pics = {}                       # each tile's picture
         # where each tile is drawn, sliding to its place: a drop leaves them where they were seen
         self.pos = dict(getattr(editor, "preview_landing", None) or {})
@@ -436,7 +438,36 @@ class Preview(View):
         self.changed()
         return True
 
+    def _custom_card(self, p):
+        """A widget of the kit: drawn from its runtime, again whenever what it shows has changed."""
+        sc, ed = self.scene, self.editor
+        rt = ed.custom_preview(self.widget)
+        key = (sc.theme, sc.style, self.zoom_k, p.transform().m11(), render._language, ed.custom_rev,
+               repr((ed.custom_now or {}).get("config")), self.size_key)
+        if self.cache is None or self.cache[0] != key:
+            z = self.zoom_k
+
+            def draw(q):
+                q.scale(z, z)
+                customview.paint(q, rt, self.size_key, sc.theme, sc.style)
+            self.cache = (key, device_image(p, self.w, self.h, draw))
+        if rt is not None:                      # what moves on its own is drawn again when it should be
+            wait = 16 if rt.animating else (max(0.25, min(rt.widget.tick, 60)) * 1000 if rt.widget.tick else 0)
+            if rt.redraw_in is not None and not rt.animating:
+                wait = min(wait or 1e9, max(16, rt.redraw_in * 1000))
+            if wait and not self.tick_wait:
+                self.tick_wait = True
+                QTimer.singleShot(int(wait), self._retick)
+        return self.cache[1]
+
+    def _retick(self):
+        self.tick_wait = False
+        if self.scene is not None:
+            self.invalidate()
+
     def _card(self, p):
+        if self.kind == "custom":
+            return self._custom_card(p)
         sc = self.scene
         tiles = self.widget["tiles"]
         whole = self.kind != "tiles"
@@ -662,8 +693,9 @@ class TileRow(View):
                                         21 + (13 - m2.height() / 10) / 2 + m2.ascent() / 10))
 
 
-class EditorMixin:
+class EditorMixin(CustomEditorMixin):
     def editor_init(self):
+        self.custom_init()
         self.editor_dragging = False
         self.layout = None
         self.preview_landing = None
@@ -737,12 +769,14 @@ class EditorMixin:
         w = self.settings_widget()
         if w:
             self.widget_id = w["id"]
+        self.reload_customs()
         self.go("editor")
         self.layout_timer.start()
         self.refresh_layout()
 
     def close_editor(self, e=None):
         self.layout_timer.stop()
+        self.close_custom_runtimes()
         self.go("settings")
 
     def _poll_layout(self):
@@ -906,12 +940,13 @@ class EditorMixin:
     def drag_new_kind(self, kind):
         self.drag_new_widget(kinds.KIND_SIZE[kind], kind)
 
-    def drag_new_widget(self, size, kind="tiles"):
+    def drag_new_widget(self, size, kind="tiles", package=None):
         self.editor_dragging = True
 
         def go():
             try:
-                r = self.facade.api.begin_widget_drag(size, kind)
+                r = self.facade.api.begin_widget_drag(size, kind, package) if package else \
+                    self.facade.api.begin_widget_drag(size, kind)
                 if r and r.get("id"):
                     self.facade.run_on_ui_thread(lambda: setattr(self, "widget_id", r["id"]))
             except Exception:
@@ -934,10 +969,15 @@ class EditorMixin:
         on_panel = bool(widget and widget.get("panel"))
         panel = self.prefs.get("panel") or {}
         left_h = self.editor_left_column(body)
+        self.load_custom_now(widget)
         y = self.editor_widget_chips(body, widget, on_panel)
         kind = self.current_kind()
         y = self.editor_preview(body, y, widget, on_panel, kind)
         y = self.editor_tools(body, y, widget, on_panel, kind, panel)
+        if kind == "custom":                     # a widget of the kit: its own settings and permissions
+            y = self.editor_custom(body, y, widget)
+            body.h = max(left_h, y) + 18
+            return body
         if kind in kinds.NO_DEVICES:             # a clock, a calendar: no devices to choose
             body.h = max(left_h, y) + 18
             return body
@@ -954,6 +994,12 @@ class EditorMixin:
         pal.x, pal.y = LEFT_X, y
         body.add(pal)
         y += pal.h
+        body.add(style.label("group", "匯入的 Widget", x=LEFT_X, y=y + 12))
+        y += 12 + 14.4 + 8
+        shelf = self.custom_shelf(LEFT_W)
+        shelf.x, shelf.y = LEFT_X, y
+        body.add(shelf)
+        y += shelf.h
         body.add(style.label("group", "桌面配置（拖曳移動）", x=LEFT_X, y=y + 12))
         y += 12 + 14.4 + 8
         self.minimap_host = View(LEFT_X, y, LEFT_W, 120)
@@ -984,7 +1030,7 @@ class EditorMixin:
         chips = []
         for i, w in enumerate(self.widgets()):
             kind = w.get("kind") or "tiles"
-            what = w["size"] if kind == "tiles" else render.tr(kinds.KIND_LABELS[kind])
+            what = w["size"] if kind == "tiles" else self.custom_name(w) if kind == "custom" else render.tr(kinds.KIND_LABELS[kind])
             chips.append(Chip("#%d · %s" % (i + 1, what), (widget and w["id"] == widget["id"]),
                               lambda e, wid=w["id"]: self.select_widget(wid)))
         chips.append(Chip("系統匣面板", on_panel, lambda e: self.select_widget(PANEL_ID)))
@@ -1010,7 +1056,7 @@ class EditorMixin:
             prev.x, prev.y = RIGHT_X + (RIGHT_W - prev.w) / 2, y + 18
             body.add(prev)
             self.preview = prev
-            if not widget["tiles"] and kind not in kinds.NO_DEVICES:
+            if not widget["tiles"] and kind not in kinds.NO_DEVICES and kind != "custom":
                 body.add(style.label("empty", "尚無配件，按下方「%s」" % render.tr(ADD_TEXT[kind].lstrip("+ ")), x=RIGHT_X + 20, y=y + box_h / 2 - 10, w=RIGHT_W - 40, align="c"))
             y += box_h
         return y
@@ -1026,6 +1072,8 @@ class EditorMixin:
                 body.add(c)
                 tx += c.w + 6
             tx += 6
+        elif not on_panel and kind == "custom":
+            tx = self.custom_sizes(body, tx, ty, widget)
         elif not on_panel:
             note = style.label("field", "%s Widget · %s" % (render.tr(kinds.KIND_LABELS[kind]), widget["size"]), x=tx, y=ty + 6)
             body.add(note)

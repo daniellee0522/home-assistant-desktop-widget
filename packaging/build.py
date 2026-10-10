@@ -87,6 +87,8 @@ def main():
         '--exclude-module', f'{qt_package}.QtWebEngineCore', '--exclude-module', f'{qt_package}.QtWebEngineWidgets',
         '--exclude-module', f'{qt_package}.QtWebChannel', '--exclude-module', f'{qt_package}.QtWebEngineQuick',
         '--hidden-import', 'PIL._imagingft',
+        # widgets of the widget kit import its parts by name (widgetkit/), which nothing in the program imports itself
+        '--collect-submodules', 'widgetkit',
         # this computer's player (core/local_media.py): WinRT's media sessions
         '--collect-submodules', 'winrt',
         '--collect-binaries', 'winrt',

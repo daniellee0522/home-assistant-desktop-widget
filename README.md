@@ -22,6 +22,7 @@ when nothing moves. Built with Qt, with no browser engine inside.
 - **A panel for everything.** One click on the tray (or Ctrl + Alt + H) opens your devices by room; hold any tile for a dial, a slider or a player.
 - **Quiet.** The widgets dim when you are busy elsewhere (a dimmed clock stands perfectly still), and cost nothing on a still desktop.
 - **Yours.** Drag to arrange, snap to edges, pick icons, rename rooms, English or Traditional Chinese.
+- **Make your own.** Import widgets other people wrote (a countdown, stock prices, a photo frame...), or write one in a single Python file, or describe it to an AI and import the result. Each copy has its own settings.
 
 ## Themes
 
@@ -62,9 +63,10 @@ appearance. The glass effect varies with your wallpaper.
 - **Device details:** right-click or hold a tile for the device's own screen, after Home Assistant's: a tall slider for lights, fans and covers, a dial for thermostats, the cover, progress and controls of media, a tall switch for locks, and sensor history.
 - **Shortcut:** press **Ctrl + Alt + H** anywhere to open or close the tray panel. Settings → Behavior lets you press another combination or clear it.
 - **Alerts (off by default):** Settings → Notifications sends a Windows notification when a lock on your widgets or panel is unlocked, opened or jammed, or a safety sensor goes off (door or window opened, leak, smoke, gas, carbon monoxide...). Only changes are reported, never the state at startup, and the same news at most once a minute.
-- **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; there is no refresh rate to set.
+- **Personalization:** light and dark themes; classic, liquid, and Windows glass; zoom, and fixed widget sizes. The glass follows changes on screen; over a moving wallpaper Settings → **Glass update rate** sets 30, 20 or 15 pictures a second (fewer use less of the processor).
 - **Light on resources:** every window is drawn natively, with no browser engine in the program at all: the desktop widgets, the detail card, the tray panel and Settings. It rests at about 50 MB and close to 0 % CPU on a still desktop, and about 70-90 MB with the panel or Settings open (they are made when opened and released after a while). Over a video wallpaper, choose **Still** glass updates to sample only when a widget moves.
 - **Dimming:** the widget dims while the desktop is covered and returns when you go back to it or click it. A dimmed clock stands still: its ring of ticks is faint and even, with no moving second, so a covered desktop costs nothing each second.
+- **Your own widgets:** see [Your own widgets](#your-own-widgets).
 - **Languages:** Traditional Chinese and English.
 
 In a device's detail view, open the edit panel to choose an icon or enter a
@@ -82,6 +84,26 @@ at all. Settings → **Glass updates**: *Live* follows every change (an animated
 wallpaper such as Wallpaper Engine changes it constantly; while it is paused
 nothing is captured), *Still* takes the picture once and again only when the
 widget moves or resizes.
+
+## Your own widgets
+
+![The widget editor with imported widgets: a shelf of them under the clock and calendar, and one open at its own settings](docs/custom-widgets.png)
+
+Widgets are not limited to Home Assistant: a countdown, stock prices, the weather, a photo frame with ten pictures (stills, GIF and
+WebP), a counter, the battery, a world clock. A widget is one Python file that says what it shows, where its data comes from, what a
+person can change and what a press does; the program draws the glass and the dimmed look, makes the settings window from the
+settings, and asks the user what the widget may do.
+
+- **Add one:** Settings → Open widget editor → the **+** under *Imported widgets* → choose a `.hawidget` file (or a `.py`). Drag it
+  onto the desktop like a clock. Every copy has its own settings; what it asks to be allowed (a website, the microphone...) is a switch
+  you answer once, and risky ones start off. A widget is a program: import only ones from people you trust.
+- **Write one:** [docs/widgetkit.zh-TW.md](docs/widgetkit.zh-TW.md) (Traditional Chinese guide) and
+  [docs/widgetkit.md](docs/widgetkit.md) (reference). `python -m widgetkit.studio my_widget.py` shows it live at every size, in light and
+  dark and in longer made-up languages; `python -m widgetkit.check my_widget.py --pack my.hawidget` lists what is wrong and packs it.
+- **Have an AI write one:** the repository includes the Claude skill `ha-widget-author`
+  ([.claude/skills/ha-widget-author](.claude/skills/ha-widget-author); a standalone [docs/ha-widget-author.skill](docs/ha-widget-author.skill)
+  installs it elsewhere). Describe the widget in words, or show a screenshot of one you like: it writes the files, checks them, looks at
+  the preview it draws and hands you a `.hawidget` to import.
 
 ## Glass source
 

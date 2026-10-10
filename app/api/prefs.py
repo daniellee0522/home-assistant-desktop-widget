@@ -32,6 +32,7 @@ class PrefsMixin:
             "zoom": self._cfg.get("zoom", 100),
             "glass_mode": self._cfg.get("glass_mode", "fast"),
             "glass_sampling": self._cfg.get("glass_sampling", "live"),
+            "glass_rate": str(self._cfg.get("glass_rate", "30")),
             "liquid_blur": int(self._cfg.get("liquid_blur", 0)),
             "system_glass_ok": bool(SYSTEM_GLASS_SUPPORTED),
             "system_glass_active": self._system_glass_status(),
@@ -44,7 +45,8 @@ class PrefsMixin:
             "alert_locks": bool(self._cfg.get("alert_locks", False)),
             # Positions stay on this side; the windows only need what to draw.
             "widgets": [{"id": w["id"], "size": w["size"], "tiles": w["tiles"], "kind": w.get("kind", "tiles"),
-                         "font": w.get("font")}
+                         "font": w.get("font"),
+                         "custom": self.custom_prefs(w) if w.get("kind") == "custom" else None}
                         for w in self._cfg.get("widgets", [])],
             "panel": self._cfg.get("panel") or {"mode": "grid", "tiles": None,
                                                  "home_tiles": [], "room_overrides": {}},
@@ -76,6 +78,7 @@ class PrefsMixin:
         "zoom": lambda v: max(50, min(200, int(v))),
         "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",
         "glass_sampling": lambda v: v if v in ("live", "still") else "live",
+        "glass_rate": lambda v: str(v) if str(v) in ("30", "20", "15") else "30",
         "liquid_blur": lambda v: max(0, min(100, int(v))),
         "dim_when_idle": bool,
         "dim_after_sec": lambda v: max(10, min(3600, int(v))),

@@ -87,13 +87,21 @@ class WidgetsMixin:
     # The editor suggests no more widgets than this (each has its own glass to keep).
     WIDGET_SOFT_LIMIT = 6
 
-    def add_widget(self, size="2x4", kind="tiles"):
+    def add_widget(self, size="2x4", kind="tiles", package=None):
+        """A new widget of `kind`. A "custom" one is a copy of an installed widget-kit package (`package`: its id)."""
         kind = kind if kind in cfgmod.WIDGET_KINDS else "tiles"
+        if kind == "custom":
+            wd = self.custom_definition(package)
+            if wd is None:
+                return {"id": "", "error": "no such widget"}
+            size = wd.size
         size = cfgmod.KIND_SIZE.get(kind) or (size if size in cfgmod.WIDGET_SIZES else cfgmod.DEFAULT_WIDGET_SIZE)
         widgets = self._cfg.setdefault("widgets", [])
         x, y = self._next_widget_position()
         widget = {"id": cfgmod.new_widget_id(), "size": size,
                   "x": x, "y": y, "tiles": self._first_of_kind(kind), "kind": kind}
+        if kind == "custom":
+            widget["custom"] = {"widget": package, "config": {}}
         widgets.append(widget)
         cfgmod.save_config(self._cfg)
         create_widget_window(self, widget, show=True)
@@ -191,11 +199,13 @@ class WidgetsMixin:
         return {"monitors": [{k: m[k] for k in ("x", "y", "w", "h")} for m in monitors()],
                 "widgets": widgets}
 
-    def begin_widget_drag(self, size="2x4", kind="tiles"):
+    def begin_widget_drag(self, size="2x4", kind="tiles", package=None):
         """Make a widget under the pointer and carry it along, snapping, until
         the left button is released - so it can be dragged from the editor
         straight onto the desktop."""
-        added = self.add_widget(size, kind)
+        added = self.add_widget(size, kind, package)
+        if not added.get("id"):
+            return added
         threading.Thread(target=self._carry_widget, args=(added["id"],),
                          daemon=True).start()
         return added
@@ -242,6 +252,7 @@ class WidgetsMixin:
         stop = self._widget_pin_stops.pop(widget_id, None)
         if stop:
             stop.set()
+        self._forget_custom_state(widget_id)
         kind = self._widget_kind(widget_id)
         for table in (self._backdrop_sent,
                       self._duplication_after, self._system_glass_hwnds,
@@ -260,7 +271,11 @@ class WidgetsMixin:
 
     def set_widget_size(self, widget_id, size):
         widget = self._widget_cfg(widget_id)
-        if widget is None or size not in cfgmod.WIDGET_SIZES or widget.get("kind", "tiles") != "tiles":
+        if widget is not None and widget.get("kind") == "custom":      # a size its widget says it can be
+            wd = self._custom_def(widget_id)
+            if wd is None or size not in wd.supported_sizes():
+                return False
+        elif widget is None or size not in cfgmod.WIDGET_SIZES or widget.get("kind", "tiles") != "tiles":
             return False                  # the other kinds keep their own size
         widget["size"] = size
         cfgmod.save_config(self._cfg)

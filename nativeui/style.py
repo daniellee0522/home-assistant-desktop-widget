@@ -42,6 +42,9 @@ TEXT = {
     "field": (12, QFont.Normal, "ink2"),          # what a field, a slider or a choice sets
     "hint": (11.5, QFont.Normal, "ink2"),         # a note, a result, nothing found
     "tiny": (10.5, QFont.Normal, "ink2"),         # a unit beside a small field
+    "item": (12.5, QFont.DemiBold, "ink1"),       # a row of a list in the editor: a device, an entry of a setting
+    "row": (13, QFont.Normal, "ink1"),            # the label of a row of a settings group (nativeui/formrows.py)
+    "row_value": (13, QFont.Normal, "ink2"),      # what a row is set to, at its right
 
     # The Home panel, drawn in its own units (half a px each: the sizes are twice the others')
     "home_title": (38, QFont.ExtraBold, "ink1"),  # 我的家

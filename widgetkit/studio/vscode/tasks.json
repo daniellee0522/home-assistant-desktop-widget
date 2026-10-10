@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Widget Studio: preview this file",
+      "type": "shell",
+      "command": "python",
+      "args": ["-m", "widgetkit.studio", "${file}"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "never", "panel": "dedicated", "clear": true }
+    }
+  ]
+}

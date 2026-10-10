@@ -7,7 +7,7 @@ each with one job, and `main.py` is only the door.
 main.py              process set-up that must come before Qt loads (DPI awareness, no numpy), then app.lifecycle.run()
 app/                 the running program
   lifecycle.py         main(): the widgets, the tray, the Shell (what the tray menu, sleep and display changes do)
-  api/                 the Api every window works through, one mixin per concern (below)
+  api/                 the Api every window works through, one mixin per concern (below); customs.py: widgets of the widget kit
   widget_windows.py    one desktop widget's window: made, pinned to the bottom, put back where it was left
   capture.py           the three ways of reading the screen, made once
   compose.py           our windows laid over a capture of the screen
@@ -31,6 +31,11 @@ winsys/              Windows itself: Win32, the desktop's windows, capture, the 
   qtshell.py           Qt's event loop, the GUI-thread marshal, the log, the watchdog, sleep/display notices
   tray.py, hotkey.py   the tray icon, the global shortcut
 nativeui/            every window's drawing and behaviour (below)
+widgetkit/           the widget kit: widgets that are not the program's own kinds (docs/widgetkit.md). The program runs them through
+                     app/api/customs.py (packages, settings, permissions), nativeui/customview.py (the desktop window's part) and
+                     nativeui/editor_custom*.py + formrows.py (the editor's shelf, settings and permissions); the kit imports
+                     nativeui.render/style and changes nothing in them
+.claude/skills/ha-widget-author/   the Claude skill that writes widgets for the kit (docs/ha-widget-author.skill is its zip)
 packaging/           installer build, release, README screenshots
 tests/               tests/README.md
 tools/               pictures and measurements: tools/README.md

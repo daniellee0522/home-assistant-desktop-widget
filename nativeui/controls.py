@@ -800,3 +800,71 @@ class Progress(View):
         if self.playing and self.seeking is None and not self._ticking:
             self._ticking = True
             QTimer.singleShot(1000, self._tick)
+
+
+class Switch(View):
+    """The on/off switch of iOS: a capsule track that turns green, a white knob that slides (and can be dragged), a spring in
+    between. `on_change(bool)` is called once the knob has arrived, so what is built again from the answer shows it settled."""
+    cursor = Qt.PointingHandCursor
+    W, H = 46, 28
+
+    def __init__(self, on, on_change, color="accent_green", enabled=True):
+        super().__init__(0, 0, self.W, self.H)
+        self.interactive = enabled
+        self.on, self.color, self.change = bool(on), color, on_change
+        self.position = float(self.on)                     # 0 = off .. 1 = on, where the knob is drawn
+        self.dragging = self.moved = self.skip_click = False
+        self.press_x = self.start_position = 0.0
+        self.on_press, self.on_move, self.on_release, self.on_click = self._press, self._move, self._release, self._click
+
+    def _press(self, e):
+        self.stop_animation()
+        self.scene.capture = self
+        self.dragging, self.moved, self.skip_click = True, False, False
+        self.press_x, self.start_position = e.x, self.position
+        return True
+
+    def _move(self, e):
+        if self.dragging:
+            dx = e.x - self.press_x
+            self.moved |= abs(dx) > 4
+            if self.moved:
+                self.position = max(0.0, min(1.0, self.start_position + dx / (self.W - self.H)))
+                self.changed()
+        return True
+
+    def _settle(self, target, ms):
+        changed = bool(target) != self.on
+        self.on = bool(target)
+        self.animate(ms, "spring", position=float(target), done=(lambda: self.change(self.on)) if changed else None)
+
+    def _release(self, e):
+        if not self.dragging:
+            return True
+        self._move(e)
+        self.dragging = False
+        self.skip_click = self.moved
+        if self.moved:
+            self._settle(self.position >= 0.5, 260)
+        return True
+
+    def _click(self, e):
+        if not self.skip_click:
+            self._settle(not self.on, 220)
+        self.skip_click = False
+        return True
+
+    def paint(self, p):
+        t = max(0.0, min(1.0, self.position))
+        track_off, track_on = ui.resolve(self.scene, "btn_fill_strong"), ui.resolve(self.scene, self.color)
+        track = QColor.fromRgbF(*(a + (b - a) * t for a, b in zip(track_off.getRgbF(), track_on.getRgbF())))
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(0, 0, self.W, self.H), self.H / 2, self.H / 2)
+        d = self.H - 4
+        x = 2 + (self.W - self.H) * t
+        for spread, alpha in ((2.5, 18), (1.2, 26)):       # the knob's shadow
+            p.setBrush(QColor(0, 0, 0, alpha))
+            p.drawEllipse(QRectF(x - spread / 2, 2 + 1.2 - spread / 2, d + spread, d + spread))
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(QRectF(x, 2, d, d))

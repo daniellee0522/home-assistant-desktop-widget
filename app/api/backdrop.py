@@ -11,7 +11,7 @@ from app.capture import BACKDROP_NOISE, compat_capture, desktop_capture, DUPLICA
 from app.compose import compose_popover_backdrop, composite_rgba_window, grab_widget_rgba, patch_covered
 from app.geometry import is_widget_kind, liquid_params, popover_needs_compat
 from winsys.capture_pixels import within_noise, within_noise_bgrx
-from winsys.scan import nothing_visible_of, window_snapshot, windows_below, windows_over
+from winsys.scan import nothing_visible_of, window_snapshot, window_snapshots, windows_below, windows_over
 from winsys.win32 import get_hwnd, rects_overlap, user32, visible_rect
 
 
@@ -21,6 +21,9 @@ class _Answer(Exception):
     def __init__(self, reply):
         super().__init__()
         self.reply = reply
+
+
+OVER_LOOK_S = 0.04              # how old a look at the windows may be when the GPU copies the desktop for a widget
 
 
 class _BackdropJob:
@@ -149,7 +152,7 @@ class BackdropMixin:
         job.look_over = is_widget_kind(kind) and job.can_read_screen and not job.compose_widget
         shared = self._shared_windows if job.look_over else None
         job.snapshot = shared[0] if shared else None
-        job.ours = (shared[1] if shared else self._own_hwnds()) if job.look_over else ()
+        job.ours = (shared[1] if shared else self._own_hwnds_out_of_capture()) if job.look_over else ()
         job.covers = windows_over(hwnd, area, job.ours, job.snapshot) if job.look_over else []
 
     def _unchanged_reply(self, job):
@@ -170,7 +173,7 @@ class BackdropMixin:
             # The widget drawn into this frame changes on its own, so the screen under it cannot set the pace.
             after = None
         direct = (self._gpu_direct_frame(job.window, kind, job.rect, job.last_hash)
-                  if job.look_over and not job.covers and job.defer_pixels and kind != "popover" else None)
+                  if job.look_over and job.defer_pixels and kind != "popover" else None)
         if direct is None and job.gpu and kind == "flyout" and job.can_read_screen and not job.compose_widget:
             direct = self._flyout_direct(job.rect)
             direct = None if direct is None else (direct, 1, None)
@@ -187,7 +190,10 @@ class BackdropMixin:
                     # A popover over this widget composes the picture only when it opens.
                     self._widget_frames[kind] = (
                         x, y, w, h, lambda: (screen_duplication.grab(x, y, w, h, None, 0.2) or (None, None))[1])
+                hwnd, area = job.hwnd, (x, y, x + w, y + h)
                 raise _Answer(dict(gpu=(x, y, w, h), copy=screen_duplication.copy_region, pre_blur=direct[0],
+                                   covers=(lambda: self._windows_over_now(hwnd, area)) if is_widget_kind(kind) else None,
+                                   wallpaper=(lambda: compat_capture.grab(x, y, w, h)) if is_widget_kind(kind) else None,
                                    divide=direct[1], rotation=direct[2], w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
                                    ms=(time.perf_counter() - job.started) * 1000))
         got = screen_duplication.grab(x, y, w, h, after,
@@ -375,6 +381,22 @@ class BackdropMixin:
             return None
         return pre_blur, divide, source[0].rotation
 
+    def _windows_over_now(self, hwnd, area):
+        """The rectangles of other programs' windows over `area` of the widget `hwnd` right now. Asked when the GPU is about to
+        copy the desktop for it (it fills those parts from its last clean picture): the windows are looked at again if the last
+        look is older than OVER_LOOK_S (a frame's own look, taken when it was captured, usually serves), and one look serves
+        every widget that asks within it. The rectangles are the windows' own
+        (without the invisible border and the shadow the processor path takes), so that what is filled in from the last clean
+        picture is no more than the window covers."""
+        now = time.monotonic()
+        seen = getattr(self, "_over_seen", None)
+        if seen is None or now - seen[0] > OVER_LOOK_S:
+            try:
+                seen = self._over_seen = (now, window_snapshot(exact=True), self._own_hwnds_out_of_capture())
+            except Exception:
+                return []
+        return windows_over(hwnd, area, seen[2], seen[1])
+
     def _without_windows_over(self, kind, hwnd, rect, raw, covers, ours, snapshot=None):
         """A widget's picture of the screen with other programs' windows over it replaced by the desktop:
         from its last clean picture, or the wallpaper when it has none yet. The picture becomes the clean one."""
@@ -467,7 +489,12 @@ class BackdropMixin:
             shots = []
             # The desktop's windows are looked at once for every widget of this frame.
             try:
-                self._shared_windows = (window_snapshot(), self._own_hwnds())
+                # (one pass gives both the rectangles with room for a shadow, which the planning below uses, and the windows'
+                # own, which the renderer asks for when it copies the desktop a moment later)
+                padded, exact = window_snapshots()
+                ours = self._own_hwnds_out_of_capture()
+                self._shared_windows = (padded, ours)
+                self._over_seen = (time.monotonic(), exact, ours)
             except Exception:
                 self._shared_windows = None
             try:

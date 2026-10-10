@@ -102,7 +102,11 @@ carries it over. Add a test that pushes a new state while it is active.
 - Liquid glass of a widget takes the desktop on the GPU: the duplication keeps its copy of the screen as a
   keyed-mutex shared texture (`dxgi_capture.copy_region`), the renderer copies its window's rectangle out of it
   on its own device (`Renderer.issue_desktop` / `update_desktop`) and a compute shader tells whether the picture
-  moved by more than noise, so a still desktop redraws nothing. Never put the duplication and the renderer on one
+  moved by more than noise, so a still desktop redraws nothing. The copy is of the desktop as it is when the renderer
+  takes it, so `DesktopFrame.cover_boxes` asks (`Api._windows_over_now`) which other programs' windows are over the widget at that moment
+  (one being dragged, a frame kept to be drawn again while the card fades) and the renderer fills those parts from the last picture
+  drawn, which has no window in it, with a copy on the GPU (`Renderer._clear_the_covered`); the processor is not asked. With no clean
+  picture yet the glass is left as it is. Never put the duplication and the renderer on one
   device: their commands then share a queue and a lock, and every copy waits for the screen. Every style and blur level takes this path: the classic glass is the
   desktop averaged over 8 x 8 cells and blurred on the GPU (`Renderer(classic=True)`), and a frost above 45 is blurred on a
   shrunk picture (`DesktopFrame.divide`). A rotated screen's copy is turned upright by a pass of the renderer

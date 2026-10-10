@@ -228,7 +228,29 @@ def choose_image_file(title):
         path, _ = QFileDialog.getOpenFileName(
             None, title, "", "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         return path or ""
-    return _invoke(None, ask, wait=True) or ""
+    return _invoke(None, ask, wait=True, patient=True) or ""
+
+
+def choose_widget_file(title):
+    """A native open-file dialog for a widget (a .hawidget package, or one .py file); the path, or "" if cancelled."""
+    def ask():
+        path, _ = QFileDialog.getOpenFileName(None, title, "", "Widget (*.hawidget *.py);;All files (*)")
+        return path or ""
+    return _invoke(None, ask, wait=True, patient=True) or ""
+
+
+IMAGE_TYPES = ("png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "tga")
+
+
+def choose_image_files(title):
+    """A native open-files dialog for pictures (still and moving: the formats Qt can read); the paths chosen, [] if cancelled."""
+    def ask():
+        from PySide6.QtGui import QImageReader
+        known = {f.data().decode().lower() for f in QImageReader.supportedImageFormats()}
+        patterns = " ".join("*." + t for t in IMAGE_TYPES if t in known)
+        paths, _ = QFileDialog.getOpenFileNames(None, title, "", "Images (%s);;All files (*)" % patterns)
+        return list(paths or [])
+    return _invoke(None, ask, wait=True, patient=True) or []
 
 
 def ensure_marshal():
@@ -239,8 +261,9 @@ def ensure_marshal():
         _marshal = _Marshal()
 
 
-def _invoke(widget, fn, wait=False):
-    """Marshal fn onto the GUI thread."""
+def _invoke(widget, fn, wait=False, patient=False):
+    """Marshal fn onto the GUI thread. `wait`: until it has run, at most five seconds (a slow frame is not a hang, but a hang must
+    not take the caller with it). `patient`: for what waits on a person (a file dialog): as long as it takes."""
     app = QApplication.instance()
     if app is None or _marshal is None or threading.current_thread() is threading.main_thread():
         return fn()
@@ -257,9 +280,7 @@ def _invoke(widget, fn, wait=False):
 
     _marshal.post(run)
     if wait:
-        # A slow frame is not a hang, but a hang must not take the caller
-        # with it.
-        done.wait(5.0)
+        done.wait(None if patient else 5.0)
     return box.get("value")
 
 

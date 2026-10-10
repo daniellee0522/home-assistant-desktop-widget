@@ -9,6 +9,7 @@ What comes from elsewhere than the states (the forecast, the camera's picture, t
 """
 import datetime
 import math
+import threading
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -451,14 +452,39 @@ def _stem(face):
 
 
 _digit_paths = {}
+_warming = set()
+_UNSET = object()
 
 
-def clock_digits(W, H, hhmm, choice=None):
+def warm_clock_digits(W, H, when, choice=None):
+    """Make the digits of the minute `when` (a datetime) on a thread of its own, so that the first drawing of that minute finds them
+    ready. Their outline is made from the font and merged (path unions), which takes from 30 to over 300 ms the first time and
+    nothing after: drawn on the GUI thread as the minute changes it is a stall, and a liquid glass shows it. Called with the coming
+    minute as soon as the present one is up."""
+    face = clock_face(choice)                      # (here: the font database belongs to this thread)
+    hhmm = when.strftime("%H:%M")
+    key = (W, H, hhmm, face)
+    if key in _digit_paths or key in _warming:
+        return
+
+    def work():
+        try:
+            clock_digits(W, H, hhmm, choice, face)
+        except Exception:
+            pass
+        finally:
+            _warming.discard(key)
+    _warming.add(key)
+    threading.Thread(target=work, daemon=True, name="clock-digits").start()
+
+
+def clock_digits(W, H, hhmm, choice=None, face=_UNSET):
     """The time as one outline, in the card's coordinates: the hours and the minutes drawn from the font, as
     tall as a third of the card and as wide as the ring leaves, its strokes CLOCK_STEM wide; and between them a
     colon of two round dots (a font's own often sits off the middle), placed as iOS places them: one a quarter
     down, one three quarters."""
-    face = clock_face(choice)
+    if face is _UNSET:
+        face = clock_face(choice)
     key = (W, H, hhmm, face)
     if key in _digit_paths:
         return _digit_paths[key]
@@ -509,7 +535,10 @@ def clock_digits(W, H, hhmm, choice=None):
         out.addEllipse(QPointF(cx, y_top + h * frac), d / 2, d / 2)
     out = out.simplified()
     if len(_digit_paths) > 8:
-        _digit_paths.clear()
+        try:
+            _digit_paths.pop(next(iter(_digit_paths)), None)
+        except RuntimeError:                      # (another thread was adding one: the next time)
+            pass
     _digit_paths[key] = out
     return out
 

@@ -1,0 +1,9 @@
+{
+  "id": "example.photoframe",
+  "name": {"en": "Photo frame", "zh": "相框"},
+  "version": "1.0",
+  "kit": 1,
+  "entry": "main.py",
+  "author": "HA Widgets",
+  "permissions": []
+}

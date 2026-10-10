@@ -10,6 +10,7 @@ prefixed with `_` is the program's own.
 import os
 
 from .backdrop import BackdropMixin
+from .customs import CustomsMixin
 from .flyout import FlyoutMixin
 from .glass import GlassMixin
 from .ha import HomeAssistantMixin
@@ -20,7 +21,7 @@ from .widgets import WidgetsMixin
 from .windows import WindowsMixin
 
 
-class Api(WindowsMixin, PrefsMixin, WidgetsMixin, HomeAssistantMixin, FlyoutMixin, PopoverMixin, GlassMixin,
+class Api(WindowsMixin, PrefsMixin, WidgetsMixin, CustomsMixin, HomeAssistantMixin, FlyoutMixin, PopoverMixin, GlassMixin,
           BackdropMixin, IdleMixin):
     """`cfg`: the settings (read from the settings file when None); `client`: a Home Assistant client to use
     instead of making one; `start`: configure and start the client (a test gives False)."""
@@ -29,6 +30,7 @@ class Api(WindowsMixin, PrefsMixin, WidgetsMixin, HomeAssistantMixin, FlyoutMixi
         self._init_prefs(cfg)
         self._init_windows()
         self._init_widgets()
+        self._init_customs()
         self._init_glass()
         self._init_flyout()
         self._init_popover()

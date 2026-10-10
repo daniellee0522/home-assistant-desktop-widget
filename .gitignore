@@ -23,3 +23,7 @@ visual/
 # Tests and developer scripts stay on the developer's machine; the repository is the program.
 tests/
 tools/
+widget_library/
+
+.studio-*.json
+*.studio.json

@@ -1,0 +1,8 @@
+[
+  {
+    "key": "ctrl+alt+w",
+    "command": "workbench.action.tasks.runTask",
+    "args": "Widget Studio: preview this file",
+    "when": "editorLangId == python"
+  }
+]

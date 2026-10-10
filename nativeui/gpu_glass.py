@@ -480,6 +480,7 @@ class Renderer:
         elif not frame.copy_into(current.texture, self.device, self.context):
             self.issued = None
             return False
+        self._clear_the_covered(frame, current, size)
         measured = False
         if self.difference is not None and self.shown is not None and self.shown_size == size:
             last = self._temporary('capture%d' % self.shown, size)
@@ -497,6 +498,26 @@ class Renderer:
             measured = True
         self.issued = (frame, index, size, measured)
         return True
+
+    def _clear_the_covered(self, frame, current, size):
+        """Where another program's window lies over the widget, the desktop copy holds the window. Those parts are taken from the
+        picture drawn before (which has none in it) with a copy on the GPU. With no picture drawn yet (a window was over the widget
+        from the start: a widget dragged from the editor lands under it) the desktop without windows, taken once, stands in. With
+        neither the frame is used as it is: a glass with a window in it is better than a card with no glass and no words."""
+        boxes = frame.cover_boxes()
+        if not boxes:
+            return
+        if self.shown is not None and self.shown_size == size:
+            clean = self._temporary('capture%d' % self.shown, size)
+        else:
+            data = frame.wallpaper() if frame.wallpaper is not None else None
+            if not data or len(data) != size[0] * size[1] * 4:
+                return
+            clean = self._temporary('wallpaper', size)
+            clean.upload(bytes(data), size[0] * 4)
+        for l, t, r, b in boxes:
+            box = (C.c_uint * 6)(l, t, 0, r, b, 1)
+            self._command(46, (P, U, U, U, U, P, U, P), current.texture, 0, l, t, 0, clean.texture, 0, C.byref(box))
 
     def update_desktop(self, frame):
         """The same picture as update(), taken from the desktop's own texture without a CPU copy.

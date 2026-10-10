@@ -149,6 +149,14 @@ class WindowsMixin:
             windows.add(helper.hwnd)
         return windows
 
+    def _own_hwnds_out_of_capture(self):
+        """Our windows that a capture of the screen does not show (the widgets and their glass, the panel's compositor): these
+        are not in a widget's picture of the desktop, so they are not taken out of it. Settings is left out of this set: it is
+        drawn on the screen like any program's window, and over a widget it must not be in the widget's glass."""
+        windows = self._own_hwnds()
+        windows.discard(get_hwnd(self._settings_window) if self._settings_window else None)
+        return windows
+
     def _broadcast(self, name, *args, windows=None):
         """Call `name` with `args` on every window (or on those given) that has it, without
         waiting. Each window is given its own copy of the arguments, so none can change what

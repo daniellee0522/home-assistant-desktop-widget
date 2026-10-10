@@ -419,6 +419,10 @@ class SettingsScene(EditorMixin, OverlayScene):
         self.select_hint(stack, "毛玻璃更新", [("live", "動態 (桌布變動時即時更新)"), ("still", "靜態 (只在移動 widget 時更新，最省資源)")],
                          prefs.get("glass_sampling", "live"), lambda v: self.save_pref({"glass_sampling": v}),
                          "使用動態桌布 (如 Wallpaper Engine) 時，動態會隨每個畫面重新取樣。桌布暫停或靜止時兩者都不耗資源；想在動態桌布播放時也省資源，選靜態。")
+        if prefs.get("glass_sampling", "live") == "live":
+            self.select_hint(stack, "動態桌布時的玻璃更新率", [("30", "每秒 30 次 (最流暢)"), ("20", "每秒 20 次"), ("15", "每秒 15 次 (最省資源)")],
+                             str(prefs.get("glass_rate", "30")), lambda v: self.save_pref({"glass_rate": v}),
+                             "桌布一直在動時，每個 widget 的玻璃每次更新都要複製、模糊並呈現一次，更新越少越省處理器。模糊後的玻璃在 20 次以下仍然順暢。")
         self.slider_row(stack, "縮放比例", prefs.get("zoom", 100), 50, 200, 5, "%", lambda v: self.save_pref({"zoom": int(v)}))
 
     def panel_picture_block(self, stack, panel):

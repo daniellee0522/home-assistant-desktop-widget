@@ -42,7 +42,7 @@ SUPPORTED_DOMAINS = [
 # What a widget shows: its devices as tiles, or one of the other kinds (nativeui/kinds.py). A widget is made
 # of its kind (dragged from the editor's palette) and keeps it; the other kinds have a size of their own.
 # (A "shortcuts" kind was tried and folded back: its scenes and scripts are tiles of an ordinary widget.)
-WIDGET_KINDS = ("tiles", "clock", "calendar", "weather", "camera", "chart", "media")
+WIDGET_KINDS = ("tiles", "clock", "calendar", "weather", "camera", "chart", "media", "custom")
 KIND_SIZE = {"clock": "2x2", "calendar": "2x2", "weather": "2x4", "camera": "2x4", "chart": "2x4", "media": "2x4"}
 
 DEFAULT_CONFIG = {
@@ -70,6 +70,9 @@ DEFAULT_CONFIG = {
     #   "live"  - whenever the picture there changes (video wallpapers move it)
     #   "still" - now and then, and when the widget moves or changes
     "glass_sampling": "live",
+    # How many times a second the glass follows a desktop that keeps changing (an animated wallpaper, a video): "30", "20" or
+    # "15". Every picture costs a copy, a blur and a presentation for each widget, so fewer is cheaper.
+    "glass_rate": "30",
     # How blurred the liquid glass is, 0 (the clearest) to 100 (close to the classic frost).
     "liquid_blur": 0,
     # The tray panel's own theme; "follow" uses the widget's.
@@ -174,6 +177,14 @@ def _migrate_tile(t):
     }
 
 
+def _clean_custom(c):
+    """What a widget made with the widget kit keeps: which package it is (`widget`, the package's id) and its own
+    settings (`config`: the user's answers, by field key)."""
+    c = c if isinstance(c, dict) else {}
+    config = c.get("config")
+    return {"widget": str(c.get("widget") or ""), "config": dict(config) if isinstance(config, dict) else {}}
+
+
 def _clean_widget(w, fallback_xy=(200, 200)):
     size = w.get("size")
     try:
@@ -193,6 +204,8 @@ def _clean_widget(w, fallback_xy=(200, 200)):
     font = w.get("font")
     if kind == "clock" and isinstance(font, dict) and isinstance(font.get("file"), str) and font["file"]:
         out["font"] = {"file": font["file"], "name": str(font.get("name") or "")}   # its digits' font
+    if kind == "custom":
+        out["custom"] = _clean_custom(w.get("custom"))
     return out
 
 
