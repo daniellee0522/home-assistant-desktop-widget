@@ -70,8 +70,9 @@ DEFAULT_CONFIG = {
     #   "live"  - whenever the picture there changes (video wallpapers move it)
     #   "still" - now and then, and when the widget moves or changes
     "glass_sampling": "live",
-    # How many times a second the glass follows a desktop that keeps changing (an animated wallpaper, a video): "30", "20" or
-    # "15". Every picture costs a copy, a blur and a presentation for each widget, so fewer is cheaper.
+    # How many times a second the glass follows a desktop that is changing (an animated wallpaper, a video): "30", "20" or
+    # "15", always, whatever the display's own rate. A still desktop is not followed. Every picture costs a copy, a blur and a
+    # presentation for each widget, so fewer is cheaper.
     "glass_rate": "30",
     # How blurred the liquid glass is, 0 (the clearest) to 100 (close to the classic frost).
     "liquid_blur": 0,

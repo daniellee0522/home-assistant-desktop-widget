@@ -105,7 +105,8 @@ class GlassMixin:
 
     def _glass_pace(self):
         if self.kind == 'main' or self.kind.startswith('w:'):
-            return 1.0 / self._glass_refresh_rate
+            from .widget_capture import glass_pace          # a widget's glass follows a changing desktop at the user's rate
+            return glass_pace(self.api)
         if self.kind == 'flyout':
             return 1 / 120 if getattr(self, '_gpu_polling', False) else 1 / 60    # (a poll on the GPU is cheap)
         return 1 / 30

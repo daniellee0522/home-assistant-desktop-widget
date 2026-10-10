@@ -314,9 +314,9 @@
  "這個 Widget 無法使用": "This widget is unavailable",
  "無法匯入": "Could not import",
  "已匯入": "Imported",
- "動態桌布時的玻璃更新率": "Glass update rate over a moving wallpaper",
  "每秒 30 次 (最流暢)": "30 a second (smoothest)",
  "每秒 20 次": "20 a second",
  "每秒 15 次 (最省資源)": "15 a second (lightest)",
- "桌布一直在動時，每個 widget 的玻璃每次更新都要複製、模糊並呈現一次，更新越少越省處理器。模糊後的玻璃在 20 次以下仍然順暢。": "While the wallpaper keeps moving, each widget's glass is copied, blurred and presented at every update, so fewer updates use less of the processor. Blurred glass still looks smooth at 20 a second."
+ "桌面在變動時，玻璃永遠以這個固定速度更新（不論螢幕的更新率或變動多久）；桌面靜止時不更新、不耗資源。每次更新每個 widget 都要複製、模糊並呈現一次，次數越少越省處理器；模糊後的玻璃在 20 次仍然順暢。": "While the desktop changes, the glass follows it at exactly this rate (whatever the display's own rate and however long it has been moving); a still desktop is not followed and costs nothing. Each update copies, blurs and presents every widget, so fewer use less of the processor; blurred glass still looks smooth at 20.",
+ "玻璃更新率": "Glass update rate"
 }

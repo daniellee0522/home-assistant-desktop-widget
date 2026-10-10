@@ -231,42 +231,41 @@ def prepare():
             traceback.print_exc()
 
 
-# A desktop that changes at every frame for longer than STEADY_AFTER_S (a video, an animated wallpaper, a window
-# being scrolled for a long time) is followed at STEADY_PACE instead of the display's rate: the frost is blurred
-# well past what 100+ pictures a second can show, and each one costs a capture, a window scan and a blur.
-STEADY_AFTER_S = 1.5
-STEADY_PACE = 1 / 30
+# The glass follows a desktop that changes at one fixed rate, the user's `glass_rate` (30, 20 or 15 a second; Settings): the
+# same in the first second of a change as in the hundredth, and whatever the display's own rate. A desktop that does not
+# change costs nothing: the capture waits for a change (DXGI), and a widget whose picture is unchanged is not drawn again.
+GLASS_RATES = (30, 20, 15)
+DEFAULT_RATE = 30
 
 
-def steady_pace(api):
-    """Seconds between pictures of a desktop that keeps changing: the user's `glass_rate` (30, 20 or 15 a second)."""
+def glass_pace(api):
+    """Seconds between two pictures of a changing desktop: 1 / the user's `glass_rate`."""
     cfg = getattr(api, '_cfg', None) or {}
     try:
-        rate = int(cfg.get('glass_rate', 30))
+        rate = int(cfg.get('glass_rate', DEFAULT_RATE))
     except (TypeError, ValueError):
-        rate = 30
-    return 1 / rate if rate in (30, 20, 15) else STEADY_PACE
+        rate = DEFAULT_RATE
+    return 1 / (rate if rate in GLASS_RATES else DEFAULT_RATE)
 
 
-def _steady_pause(shots, moving_since, cycle_at, pace=STEADY_PACE):
-    """Keeps a desktop that has changed at every cycle for STEADY_AFTER_S to `pace`. Returns the state to
-    pass in next time: when the changing began (None if it stopped) and when this cycle began."""
+def hold_pace(shots, cycle_at, pace):
+    """After a cycle that brought a changed picture, waits out what is left of `pace` since the cycle before it began, so that
+    changes are followed at that rate and no faster. A cycle that brought nothing new (the desktop is still) waits for nothing:
+    its capture already waited for a change. Returns when the next cycle's clock starts."""
     now = time.monotonic()
-    if not any(callable(shot) or (shot and not shot.get('unchanged')) for shot in shots):
-        return None, now
-    moving_since = moving_since or now
-    if now - moving_since > STEADY_AFTER_S:
+    if any(callable(shot) or (shot and not shot.get('unchanged')) for shot in shots):
         wait = cycle_at + pace - now
         if wait > 0:
             time.sleep(wait)
-    return moving_since, time.monotonic()
+        now = time.monotonic()
+    return now
 
 
 def run():
     global _thread
     cursors = {}
     due = 0
-    moving_since, cycle_at = None, 0.0
+    cycle_at = 0.0
     while True:
         with _lock:
             readers = list(_members.values())
@@ -338,7 +337,7 @@ def run():
                 all_shots.extend(shots)
                 answers.extend(shots)
             submit(packets)
-            moving_since, cycle_at = _steady_pause(answers, moving_since, cycle_at, min(steady_pace(a) for a in groups))
+            cycle_at = hold_pace(answers, cycle_at, min(glass_pace(a) for a in groups))
             # DXGI's wait is the static detector. Sources without one retain
             # the original quiet backoff instead of polling at monitor speed.
             if all_shots and all(not shot or not shot.get('paced') for shot in all_shots):
