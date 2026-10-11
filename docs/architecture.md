@@ -15,7 +15,9 @@ app/                 the running program
   startup.py           the "start with Windows" command, the shortcut check, window minimum sizes
   probe.py             HA_WIDGET_OPEN_PANEL: watch the panel's first opening in the running program
 core/                the program's data and Home Assistant; imports nothing of ours
-  config.py            the settings file: defaults, cleaning, migration from older files, saving
+  config.py            the settings file: defaults, cleaning, migration from older files, saving (the token sealed)
+  secret.py            a secret sealed for this Windows user (DPAPI), for the Home Assistant token in the settings file
+  diag.py              `note()`: a throttled line in the log for what may fail and did (an `except` that must not stop anything)
   ha_client.py         REST and WebSocket client
   home.py              the Home view's grouping of devices by room
   alerts.py            what is worth a notification (locks, safety sensors)
@@ -69,12 +71,12 @@ the GUI thread (`qtshell.ensure_marshal()`). The Api tells a window something wi
 
 | Module | What it is |
 | --- | --- |
-| `ui.py`, `style.py`, `controls.py` | the toolkit (views, scenes, scroll boxes, menus), the house style, the detail's controls |
+| `ui.py`, `scene.py`, `style.py`, `controls.py` | the toolkit (views in `ui.py`; the scene that paints, routes the mouse and animates them in `scene.py`), the house style, the detail's controls |
 | `render.py`, `kinds.py`, `appearance.py` | drawing a tile and a widget; the other kinds of widget; what a tile is shown as |
-| `widget.py` | a desktop widget |
-| `panel.py`, `homeview.py`, `homeedit.py`, `homemodel.py` | the tray panel and its Home view (the model has no window) |
-| `detail.py` | the card a hold or right-click opens |
-| `settings.py`, `editor.py` | Settings, the widget editor, the picker |
+| `widget.py`, `widget_input.py`, `widget_media.py`, `widget_paint.py`, `widget_common.py` | a desktop widget: the surface, split by mixin (hit-testing and keys, a player's extras, painting) and what they share |
+| `panel.py`, `panel_slide.py`, `panel_detail.py`, `homeview.py`, `homeedit.py`, `homemodel.py` | the tray panel and its Home view (the model has no window) |
+| `detail.py`, `detail_builders.py` | the card a hold or right-click opens, and what each kind of device shows in it |
+| `settings.py`, `editor.py`, `editor_views.py` | Settings, the widget editor (its views in `editor_views.py`), the picker |
 | `overlay.py` | what the Api holds for the card, the panel and Settings |
 | `glass.py`, `gpu_glass.py`, `liquid.py`, `widget_glass.py`, `widget_capture.py` | the glass behind a window: the worker, the CPU and Direct3D lens, one presentation clock and one capture worker for all GPU widgets |
 | `dcomp.py`, `dcomp_liquid.py` | the panel's slide by the desktop compositor and its glass material |

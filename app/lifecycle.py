@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from app.api import Api
 from app.capture import compat_capture, desktop_capture, screen_duplication
 from app.widget_windows import create_widget_window, restore_widget_place
+from core import diag
 from winsys import qtshell
 from winsys.tray import build_tray_icon, restore_tray_icon
 from winsys.windows import apply_window_shape, hide_own_console, run_on_ui_thread, send_to_bottom, set_noactivate
@@ -126,17 +127,17 @@ class Shell:
             try:
                 apply_window_shape(win)
             except Exception:
-                pass
+                diag.note("shaping a window after resume")
         try:
             api._apply_capture_exclusion()
         except Exception:
-            pass
+            diag.note("excluding windows from capture after resume")
         # A connection open across a suspend is usually half-open, and recv() on it can block for minutes.
         # Reconnect now.
         try:
             api._client._kick()
         except Exception:
-            pass
+            diag.note("reconnecting after resume")
         # Every window's backdrop and frame hash describe the old screen.
         api._broadcast("invalidate_glass")
 
@@ -146,6 +147,7 @@ def main():
 
     api = Api()
     qtshell.prepare(log_dir=BASE_DIR)
+    diag.set_sink(qtshell.log)             # what may fail and did is noted in the log (core/diag.py)
 
     for widget in api._cfg["widgets"]:
         create_widget_window(api, widget)
@@ -159,12 +161,16 @@ def main():
     if os.environ.get("HA_WIDGET_SAMPLE"):
         from app.probe import start_sampler
         start_sampler(os.environ["HA_WIDGET_SAMPLE"])
+    if os.environ.get("HA_WIDGET_SPIKES"):
+        from app.probe import start_spike_log
+        start_spike_log(os.environ["HA_WIDGET_SPIKES"])
 
     tray_icon = build_tray_icon(shell.activate, shell.toggle_visibility, shell.open_settings,
                                 shell.toggle_theme, shell.refresh_now, shell.quit_action)
     api._tray_icon = tray_icon
     tray_icon.run_detached()
     api._apply_hotkey()
+    api.warn_if_hotkey_taken()
 
     qtshell.start()
     # The event loop ends without Quit when Windows asks the program to close (an installer updating it,

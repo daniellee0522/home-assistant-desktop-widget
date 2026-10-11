@@ -3,6 +3,7 @@
 import threading
 import time
 
+from core import diag
 from winsys.scan import desktop_is_front, fullscreen_app_present
 from winsys.win32 import get_hwnd
 
@@ -69,6 +70,6 @@ class IdleMixin:
                         self._dimmed = wanted
                         self._push_dim()
                 except Exception:
-                    pass
+                    diag.note("dimming the widgets")
 
         threading.Thread(target=loop, daemon=True).start()

@@ -73,8 +73,11 @@ class Library:
         out += [(i, e["manifest"]["name"], e["manifest"]["version"], False) for i, e in self.installed.items()]
         return out
 
-    def install(self, path):
-        """Unpack a package into the library (replacing an older version of the same widget). Nothing is run."""
+    def install(self, path, approved=True):
+        """Unpack a package into the library (replacing an older version of the same widget). Nothing is run.
+
+        A package installed with `approved=False` is not imported until `approve` is called for it: the program asks the
+        person first (what it is, who wrote it, what it asks for), because importing runs its code."""
         manifest = package.read_manifest(path)
         if manifest["id"] in self.builtin:
             raise LibraryError("%s is built in" % manifest["id"])
@@ -95,7 +98,10 @@ class Library:
             self.grants.save()
             self.notes.append("%s now comes from %r (it was %r): its permissions will be asked again"
                               % (manifest["id"], manifest.get("author"), old["manifest"].get("author")))
-        self.installed[manifest["id"]] = {"manifest": manifest, "path": dest}
+        entry = {"manifest": manifest, "path": dest}
+        if not approved:
+            entry["approved"] = False
+        self.installed[manifest["id"]] = entry
         self._loaded.pop(manifest["id"], None)
         self.save()
         if old and old["path"] != dest:
@@ -110,8 +116,29 @@ class Library:
             entry = self.installed.get(widget_id)
             if not entry:
                 raise LibraryError("no such widget: %s" % widget_id)
+            if not entry.get("approved", True):         # (an entry from before approval existed was added by choice)
+                raise LibraryError("%s has not been approved yet: its code is not run" % widget_id)
             self._loaded[widget_id] = package.load(entry["path"]).widget
         return self._loaded[widget_id]
+
+    def is_approved(self, widget_id):
+        """May the package's code be run? Built-in ones and ones the person has approved: yes."""
+        entry = self.installed.get(widget_id)
+        return widget_id in self.builtin or bool(entry and entry.get("approved", True))
+
+    def approve(self, widget_id):
+        """The person has seen what the package is and what it asks for and chose to use it: import it now. A package whose
+        code does not load is taken out again and the reason raised (a PackageError)."""
+        entry = self.installed.get(widget_id)
+        if not entry:
+            raise LibraryError("no such widget: %s" % widget_id)
+        entry.pop("approved", None)
+        self.save()
+        try:
+            self.widget(widget_id)
+        except package.PackageError:
+            self.uninstall(widget_id)
+            raise
 
     def pending_permissions(self, widget_id):
         """What the user has not yet answered for this widget, from its manifest (no code is run to find out)."""

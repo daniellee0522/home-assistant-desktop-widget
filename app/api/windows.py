@@ -5,6 +5,7 @@ import json
 import threading
 
 from app.startup import MIN_WINDOW_H, MIN_WINDOW_W
+from core import diag
 from nativeui import detail as native_detail, panel as native_panel
 from winsys.win32 import get_hwnd, run_on_ui_thread
 from winsys.windows import apply_window_shape, set_noactivate, set_window_pos, set_window_rect, set_window_size
@@ -168,7 +169,7 @@ class WindowsMixin:
             try:
                 window.send(name, *json.loads(text))
             except Exception:
-                pass
+                diag.note("telling a window %r" % (name,))
 
     def resize_popover_window(self, phys_w, phys_h, seq=None, origin=None):
         # Where the popover goes depends on its size, so it is placed and

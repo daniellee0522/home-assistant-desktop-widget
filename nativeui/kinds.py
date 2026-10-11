@@ -478,6 +478,52 @@ def warm_clock_digits(W, H, when, choice=None):
     threading.Thread(target=work, daemon=True, name="clock-digits").start()
 
 
+def _outlines(path):
+    """The closed outlines of `path`, each a path of its own, curves kept."""
+    found, current, i, count = [], None, 0, path.elementCount()
+    while i < count:
+        el = path.elementAt(i)
+        if el.type == QPainterPath.MoveToElement:
+            if current is not None:
+                found.append(current)
+            current = QPainterPath()
+            current.moveTo(el.x, el.y)
+        elif el.type == QPainterPath.LineToElement:
+            current.lineTo(el.x, el.y)
+        else:                                       # a curve: this point and the next two
+            c2, end = path.elementAt(i + 1), path.elementAt(i + 2)
+            current.cubicTo(el.x, el.y, c2.x, c2.y, end.x, end.y)
+            i += 2
+        i += 1
+    if current is not None:
+        found.append(current)
+    return found
+
+
+def _widened(path, e):
+    """`path` merged with a stroke `e` wide round its outlines (round joins and ends). The merge is made a digit at a
+    time, outlines that lie within `e` of each other (a digit and its counters) together: it costs most of what a clock
+    spends a minute, and a digit by itself costs less than all of them together. What the digits' strokes do to each other is
+    left to the merge of the whole that follows."""
+    stroker = QPainterPathStroker()
+    stroker.setWidth(e)
+    stroker.setJoinStyle(Qt.RoundJoin)
+    stroker.setCapStyle(Qt.RoundCap)
+    groups = []                                     # [right edge, path] left to right
+    for rect, outline in sorted(((o.boundingRect(), o) for o in _outlines(path)), key=lambda ro: ro[0].left()):
+        if groups and rect.left() <= groups[-1][0] + e:
+            groups[-1][0] = max(groups[-1][0], rect.right())
+            groups[-1][1].addPath(outline)
+        else:
+            group = QPainterPath()
+            group.addPath(outline)
+            groups.append([rect.right(), group])
+    merged = QPainterPath()
+    for _, group in groups:
+        merged.addPath(group + stroker.createStroke(group))
+    return merged
+
+
 def clock_digits(W, H, hhmm, choice=None, face=_UNSET):
     """The time as one outline, in the card's coordinates: the hours and the minutes drawn from the font, as
     tall as a third of the card and as wide as the ring leaves, its strokes CLOCK_STEM wide; and between them a
@@ -523,11 +569,7 @@ def clock_digits(W, H, hhmm, choice=None, face=_UNSET):
         out.addPath(t.map(q))
         x += b.width() * kx + gap + e
     if e > 0.05:
-        stroker = QPainterPathStroker()
-        stroker.setWidth(e)
-        stroker.setJoinStyle(Qt.RoundJoin)
-        stroker.setCapStyle(Qt.RoundCap)
-        out = out + stroker.createStroke(out)
+        out = _widened(out, e)
     cx = x0 + boxes[0].width() * kx + e / 2 + gap / 2
     d = 1.05 * max(CLOCK_STEM * h, stem * (h - e) * kx / k + e)      # a dot, about as wide as a stroke
     y_top = H / 2 + 8 - h / 2

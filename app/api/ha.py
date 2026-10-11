@@ -5,7 +5,7 @@ import datetime
 import threading
 import time
 
-from core import config as cfgmod, home, local_media
+from core import config as cfgmod, diag, home, local_media
 from core.ha_client import HAClient
 from winsys import qtshell
 
@@ -161,6 +161,7 @@ class HomeAssistantMixin:
         try:
             by_id = {s.get("entity_id"): s for s in self._client.get_states()}
         except Exception:
+            diag.note("reading the states of new devices")
             return
         items = [[e, by_id[e]] for e in entities if e in by_id]
         if items:
@@ -251,7 +252,7 @@ class HomeAssistantMixin:
                     self._alerts.check(entity_id, self._known_states.get(entity_id), new_state,
                                        bool(sensors), bool(locks), self._cfg.get("language", "zh-TW"))
                 except Exception:
-                    pass
+                    diag.note("checking a state for an alert")
             self._known_states[entity_id] = new_state
         if not self._ui_ready or not (self._widgets or self._window):
             with self._pending_lock:

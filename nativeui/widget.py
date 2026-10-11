@@ -8,18 +8,17 @@ itself: draw the tiles, take the touches, ask for the glass.
 Threads: the Qt widget lives on the GUI thread; the glass is made on its own thread from
 what `Api.get_desktop_backdrop` answers, and only the newest picture ever reaches the GUI.
 """
-import ctypes
 import datetime
 import os
 import threading
 import time
 import traceback
-from ctypes import wintypes
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRectF, Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer
+from PySide6.QtGui import QGuiApplication, QImage, QPainter
+from PySide6.QtWidgets import QWidget
 
+from core import diag
 from winsys import qtshell
 
 from . import kinds, render
@@ -27,47 +26,30 @@ from .actions import TileActions
 from .customview import CustomHost
 from .glass import GlassMixin
 from .animation_clock import FrameTimer
+from .widget_common import DETAIL_KINDS, DRAG_PX, EASE_DIM_MS, EASE_WAKE_MS, HOLD_MS, HOLD_SLOP_PX, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, _Signals, _cursor, _rect, _user32, has_hold
+from .widget_input import SurfaceInput
+from .widget_media import SurfaceMedia
+from .widget_paint import SurfacePaint
 
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_user32.GetDpiForWindow.argtypes = [ctypes.c_void_p]
-_user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
-_user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
-_user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-                                 ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-
-HOLD_MS = 420                 # how long a press is held to open the detail card
-# How often what a widget of another kind shows besides states is fetched again (seconds).
-EXTRAS_EVERY = {"weather": 1200, "camera": 10, "chart": 300, "media": 3}
-# the kinds whose detail a tap opens (a player has its controls on itself)
-# The pace of a clock's ring while its hand moves (kinds.HAND_MOVE_S at the start of each second).
-SECOND_FRAME_MS = 33
-DETAIL_KINDS = ("weather", "camera", "chart")
-HOLD_SLOP_PX = 8              # moving further than this cancels the hold
-DRAG_PX = 5                   # moving further than this drags the widget
-SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
-WHEEL_STEP = 100              # CSS px a notch of the wheel scrolls
-EASE_DIM_MS, EASE_WAKE_MS = 700, 260
-
-
-class _Signals(QObject):
-    states = Signal()                     # tiles changed: draw them again
-
-
-def _cursor():
-    pt = wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
-
-
-def _rect(hwnd):
-    r = wintypes.RECT()
-    if hwnd and _user32.GetWindowRect(hwnd, ctypes.byref(r)):
-        return r.left, r.top, r.right, r.bottom
-    return None
-
-
-class _Surface(GlassMixin, QWidget):
+class _Surface(SurfacePaint, SurfaceMedia, SurfaceInput, GlassMixin, QWidget):
     """The Qt window of one widget."""
+
+    # Qt virtuals handled by SurfacePaint (taken by name here: Shiboken does not see an override in a plain mixin)
+    paintEvent = SurfacePaint._qt_paintEvent
+
+
+    # Qt virtuals handled by SurfaceInput (taken by name here: Shiboken does not see an override in a plain mixin)
+    leaveEvent = SurfaceInput._qt_leaveEvent
+    wheelEvent = SurfaceInput._qt_wheelEvent
+    keyPressEvent = SurfaceInput._qt_keyPressEvent
+    inputMethodEvent = SurfaceInput._qt_inputMethodEvent
+    inputMethodQuery = SurfaceInput._qt_inputMethodQuery
+    focusOutEvent = SurfaceInput._qt_focusOutEvent
+    dragEnterEvent = SurfaceInput._qt_dragEnterEvent
+    dragMoveEvent = SurfaceInput._qt_dragMoveEvent
+    dragLeaveEvent = SurfaceInput._qt_dragLeaveEvent
+    dropEvent = SurfaceInput._qt_dropEvent
+
 
     def __init__(self, facade, api, widget_id):
         super().__init__()
@@ -355,224 +337,6 @@ class _Surface(GlassMixin, QWidget):
         flash = {i: max(0.0, 1 - (now - t) / 0.6) for i, t in self.flash.items()}
         return {"hover": self.hover, "pressed": self.pressed, "flash": flash, "scroll": self.scroll}
 
-    def _draw(self, dim):
-        img = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
-        img.fill(Qt.transparent)
-        p = QPainter(img)
-        if self.wkind == "custom":
-            self.kit.draw(p, dim)
-        elif self.wkind == "tiles":
-            self.empty_button = render.draw_widget(p, self.size_key, self.tiles, self.states, self.theme, None,
-                                                   self.scale, dim, self.style, self._ui(), self.theme_raw)
-        else:
-            extras = self.extras
-            if self.wkind == "clock":                     # its ring is drawn live, in paintEvent
-                now = self._face_time or datetime.datetime.now()
-                if self._face_time is None:
-                    self._drawn_minute = now.replace(second=0, microsecond=0)
-                extras = dict(extras, live_ticks=True, now=now, font=self.clock_font)
-            got = kinds.draw_widget(p, self.wkind, self.size_key, self.tiles, self.states, self.theme,
-                                    self.scale, dim, self.style, self._ui(), self.theme_raw, extras)
-            self.kind_buttons = got if isinstance(got, list) else []
-            self.empty_button = None if isinstance(got, list) else got
-        p.end()
-        pix = QPixmap.fromImage(img)
-        pix.setDevicePixelRatio(self.dpi)
-        return pix
-
-    # -- the glass (nativeui/glass.py) asks what the card is -------------------------
-    def glass_card(self):
-        cw, ch = render.widget_size(self.size_key)
-        return cw, ch, self.tcol["radius_panel"]
-
-    def glass_tiles(self):
-        if self.wkind != "tiles":                # the other kinds draw over their glass themselves
-            return []
-        s, off, H = self.scale, self.scroll, render.widget_size(self.size_key)[1]
-        return [(round(x * s), round((y - off) * s), round(w * s), round(h * s), round(self.tcol["radius_tile"] * s))
-                for x, y, w, h in self.rects if 0 <= y - off and y - off + h <= H]
-
-    def set_transition_tile(self, tile_id=None):
-        self.transition_tile = tile_id
-        if tile_id is None:
-            self.capture_transition_tile = None
-            self.transition_cover = None
-        self.repaint()
-
-    def prepare_transition(self, tile_id):
-        self.capture_transition_tile = tile_id
-
-    def set_transition_cover(self, rect):
-        if rect != getattr(self, "transition_cover", None):
-            self.transition_cover = rect
-            self.update()
-
-    def _tile_path(self, tile_id):
-        index = next((i for i,t in enumerate(self.tiles) if t["id"] == tile_id), -1)
-        if index < 0 or index >= len(self.rects):
-            return None
-        x,y,w,h = self.rects[index]
-        ratio = self.scale/self.dpi
-        return render.squircle(x*ratio, (y-self.scroll)*ratio, w*ratio, h*ratio,
-                               self.tcol["radius_tile"]*ratio)
-
-    def _paint_image(self, hidden_tile=None, gpu_snapshot=True):
-        if gpu_snapshot and self._gpu_receiver is not None and self._gpu_receiver.visible:
-            return self._gpu_receiver.snapshot(hidden_tile)
-        image = QImage(self.pw,self.ph,QImage.Format_ARGB32_Premultiplied)
-        image.fill(Qt.transparent)
-        image.setDevicePixelRatio(self.dpi)
-        painter = QPainter(image)
-        hole = (self._tile_path(hidden_tile) if hidden_tile is not None else
-                self._transition_hole() if not gpu_snapshot else None)
-        if hole is not None:
-            outer = QPainterPath()
-            outer.addRect(QRectF(0,0,self.pw/self.dpi,self.ph/self.dpi))
-            painter.setClipPath(outer.subtracted(hole))
-        self._paint_contents(painter, include_glass=gpu_snapshot)
-        painter.end()
-        return image
-
-    def backdrop_image(self):
-        """Capture without the lifted tile, while the visible source can stay in place."""
-        return self._paint_image(getattr(self,"capture_transition_tile",None))
-
-    def transition_image(self, tile_id):
-        """The live source tile, rendered offscreen even while its on-screen copy is hidden."""
-        index = next((i for i, tile in enumerate(self.tiles) if tile["id"] == tile_id), -1)
-        if index < 0 or index >= len(self.rects):
-            return None
-        x, y, w, h = self.rects[index]
-        self.overlay = self.overlay_dim = None
-        image = self._paint_image()
-        return image.copy(round(x*self.scale), round((y-self.scroll)*self.scale),
-                          round(w*self.scale), round(h*self.scale))
-
-    def _transition_hole(self):
-        hole = self._tile_path(getattr(self, "transition_tile", None))
-        cover = getattr(self, 'transition_cover', None)
-        source_rect = _rect(self._hwnd) if cover is not None else None
-        if hole is not None and source_rect:
-            covered = render.squircle((cover.x()-source_rect[0])/self.dpi,
-                                       (cover.y()-source_rect[1])/self.dpi,
-                                       cover.width()/self.dpi, cover.height()/self.dpi,
-                                       self.tcol['radius_tile']*self.scale/self.dpi)
-            hole = hole.intersected(covered)
-        return hole
-
-    def paintEvent(self, event):
-        if self._gpu_receiver is not None and self._gpu_receiver.visible:
-            p = QPainter(self)
-            p.setCompositionMode(QPainter.CompositionMode_Source)
-            p.fillRect(self.rect(), Qt.transparent)
-            # A completely transparent layered HWND has no native hit-test
-            # pixels. Keep a one-byte alpha input backing under the compositor.
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 1))
-            p.scale(self.scale / self.devicePixelRatioF(), self.scale / self.devicePixelRatioF())
-            cw, ch = render.widget_size(self.size_key)
-            p.drawPath(render.squircle(0, 0, cw, ch, self.tcol['radius_panel']))
-            p.end()
-            self._gpu_receiver.queue(foreground=True)
-            return
-        if self._gpu_receiver is not None and self.wants_glass():
-            self._gpu_receiver.queue(foreground=True)
-        p = QPainter(self)
-        p.scale(self.dpi/(self.devicePixelRatioF() or 1), self.dpi/(self.devicePixelRatioF() or 1))
-        hole = self._transition_hole()
-        if hole is not None:
-            outer = QPainterPath()
-            outer.addRect(QRectF(0, 0, self.pw/self.dpi, self.ph/self.dpi))
-            p.setClipPath(outer.subtracted(hole))
-        self._paint_contents(p)
-        p.end()
-
-    def _paint_contents(self, p, include_glass=True):
-        if self.overlay is None and self.dim_t < 1:     # fully dimmed, the lit face is not on show
-            self.overlay = self._draw(False)
-        if self.dim_t > 0 and self.overlay_dim is None:
-            self.overlay_dim = self._draw(True)
-        if include_glass and self.glass is not None and not self.system_glass:
-            p.drawImage(0, 0, self.glass)
-        if self.dim_t <= 0:
-            p.drawPixmap(0, 0, self.overlay)
-        elif self.dim_t >= 1:
-            p.drawPixmap(0, 0, self.overlay_dim)
-        else:
-            # A cross-fade: (1 - t) of the lit picture plus t of the dimmed one.
-            if self.mix is None or self.mix.width() != self.pw or self.mix.height() != self.ph:
-                self.mix = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
-                self.mix.setDevicePixelRatio(self.dpi)
-            m = QPainter(self.mix)
-            m.setCompositionMode(QPainter.CompositionMode_Source)
-            m.fillRect(self.mix.rect(), Qt.transparent)
-            m.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            m.setOpacity(1 - self.dim_t)
-            m.drawPixmap(0, 0, self.overlay)
-            m.setCompositionMode(QPainter.CompositionMode_Plus)
-            m.setOpacity(self.dim_t)
-            m.drawPixmap(0, 0, self.overlay_dim)
-            m.end()
-            p.drawImage(0, 0, self.mix)
-        if self.wkind == "clock":
-            self._paint_ticks(p)
-
-    def _paint_ticks(self, p):
-        now = datetime.datetime.now()
-        hand = kinds.clock_hand(now, not self.dim_target)
-        W, H = render.widget_size(self.size_key)
-        p.save()
-        p.setRenderHint(QPainter.Antialiasing)
-        p.scale(self.scale / self.dpi, self.scale / self.dpi)
-        for dim, weight in ((False, 1 - self.dim_t), (True, self.dim_t)):
-            if weight > 0.001:
-                p.setOpacity(weight)
-                kinds.draw_clock_ticks(p, W, H, kinds.clock_ink(self.theme, dim), None if dim else hand,
-                                       self.tcol["radius_panel"])
-        p.restore()
-
-    def _warm_next_minute(self, now):
-        """The coming minute's digits are made in the background while this one is on show, so that changing to it is not a stall."""
-        cw, ch = render.widget_size(self.size_key)
-        kinds.warm_clock_digits(cw, ch, now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=1), self.clock_font)
-
-    def _second(self):
-        if not self.isVisible() or self.wkind != "clock":
-            self.second_timer.stop()
-            return
-        now = datetime.datetime.now()
-        self._warm_next_minute(now)
-        minute = now.replace(second=0, microsecond=0)
-        if self._drawn_minute is not None and minute != self._drawn_minute:
-            self.overlay = None                             # a new minute: the digits again
-            ahead, self._ahead = self._ahead, None
-            self.overlay_dim = ahead[1] if ahead is not None and ahead[0] == minute else None
-        elif self.dim_target and now.second >= 58 and self._ahead is None and self._drawn_minute is not None:
-            # Dimmed, the next minute's face is drawn now, a moment before it is needed, instead of in
-            # the frame the minute changes.
-            coming = minute + datetime.timedelta(minutes=1)
-            self._face_time = coming
-            try:
-                self._ahead = (coming, self._draw(True))
-            finally:
-                self._face_time = None
-        self.update()
-        self._next_second(now)
-
-    def _next_second(self, now=None):
-        """The next frame of the ring: soon while the hand moves, else at the next second. Dimmed, the ring is
-        still: the next frame is only the coming minute's face, drawn ahead at :58 and shown at :00."""
-        now = now or datetime.datetime.now()
-        ms = now.microsecond / 1000
-        if self.dim_target:
-            into_minute = now.second * 1000 + ms
-            ahead_at = 58000 if self._ahead is None and into_minute < 58000 else 60000
-            self.second_timer.start(int(ahead_at - into_minute) + 2)
-            return
-        moving = ms < kinds.HAND_MOVE_S * 1000
-        self.second_timer.start(int(min(SECOND_FRAME_MS, kinds.HAND_MOVE_S * 1000 - ms) + 1) if moving
-                                else int(1000 - ms) + 2)
-
     def widget_moved(self):
         """Moved (Api._on_widget_moved): a still glass takes its picture again."""
         self.sample_now.set()
@@ -706,37 +470,6 @@ class _Surface(GlassMixin, QWidget):
             QTimer.singleShot(600, lambda: self.set_dim(False) if self.dim_target else None)
         return True
 
-    # ---- the pointer -----------------------------------------------------------
-    def _point(self, e):
-        """The pointer in CSS px of the widget (the scroll undone for the tiles) and physical px."""
-        pos = e.position()
-        px, py = pos.x() * self.devicePixelRatioF(), pos.y() * self.devicePixelRatioF()
-        return px / self.scale, py / self.scale, px, py
-
-    def _tile_at(self, x, y):
-        y += self.scroll
-        for i, (tx, ty, tw, th) in enumerate(self.rects):
-            if tx <= x < tx + tw and ty <= y < ty + th and \
-                    render.squircle(tx, ty, tw, th, self.tcol["radius_tile"]).contains(QPointF(x, y)):
-                return i
-        return -1
-
-    def _hit_mini(self, i, x, y):
-        """+1 / -1 for a press on a climate button of tile i, 0 otherwise."""
-        tile = self.tiles[i]
-        st = self.states.get(tile["entity"])
-        if tile["domain"] != "climate" or not st or st.get("state") == "off":
-            return 0
-        tx, ty, tw, th = self.rects[i]
-        zoom = render.BIG_ZOOM if self.form == "big" else 1.0
-        local = QPointF((x - tx) / zoom, (y + self.scroll - ty) / zoom)
-        if self.form == "small" and self.hover != i:
-            return 0
-        for rect, sign in render.mini_buttons(self.form, tw / zoom, th / zoom):
-            if rect.contains(local):
-                return sign
-        return 0
-
     def mousePressEvent(self, e):
         if self.wkind == "custom":
             if e.button() == Qt.LeftButton:
@@ -768,35 +501,6 @@ class _Surface(GlassMixin, QWidget):
         self._invalidate_overlay()
         if has_hold(domain):
             self._hold.start(HOLD_MS)
-
-    def _button_at(self, x, y):
-        r = self.empty_button
-        return bool(r and not self.tiles and r.contains(QPointF(x, y)))
-
-    def _seek_to(self, x):
-        """Where the song would be with the bar let go at x (shown at once)."""
-        bar = next((r for r, a in self.kind_buttons if a == "seek"), None)
-        st = self.states.get(self.tiles[0]["entity"]) if self.tiles else None
-        if bar is None or not st:
-            return None
-        _, dur = kinds.media_position(st)
-        self.extras["seek_to"] = max(0.0, min(1.0, (x - bar.x()) / max(1.0, bar.width()))) * dur
-        self._redraw_tiles()
-        return self.extras["seek_to"]
-
-    def _action_at(self, x, y):
-        """A player's button under (x, y): its action, or None."""
-        for rect, action in self.kind_buttons:
-            if rect.adjusted(-6, -6, 6, 6).contains(QPointF(x, y)):
-                return action
-        return None
-
-    def _held(self):
-        if self._press and self._press.get("tile", -1) >= 0 and not self._press.get("moved"):
-            self._press["fired"] = True
-            self.pressed = -1
-            self._invalidate_overlay()
-            self.facade.popover(self.tiles[self._press["tile"]])
 
     def mouseMoveEvent(self, e):
         if self.wkind == "custom":
@@ -887,69 +591,6 @@ class _Surface(GlassMixin, QWidget):
             return
         self.facade.quick_action(tile, i)
 
-    def leaveEvent(self, e):
-        if self.wkind == "custom":
-            self.kit.leave()
-            return
-        self._hold.stop()
-        if self.hover >= 0:
-            self.hover = -1
-            self._invalidate_overlay()
-        if self.pressed >= 0:
-            self.pressed = -1
-            self._invalidate_overlay()
-
-    def wheelEvent(self, e):
-        if self.wkind == "custom":
-            if self.kit.wheel(e):
-                e.accept()
-            return
-        if self.scroll_max <= 0:
-            return
-        step = -e.angleDelta().y() / 120.0 * WHEEL_STEP
-        new = max(0.0, min(self.scroll + step, self.scroll_max))
-        if new != self.scroll:
-            self.scroll = new
-            self._invalidate_overlay()
-            if self._liquid_glass():
-                # The liquid glass blurs behind each tile (glass_tiles), which have just moved.
-                self.invalidate_glass()
-
-    # ---- the keyboard, the input method and files, for a widget of the kit ------------------------------
-    def keyPressEvent(self, e):
-        if not (self.wkind == "custom" and self.kit.key_press(e)):
-            super().keyPressEvent(e)
-
-    def inputMethodEvent(self, e):
-        if self.wkind == "custom":
-            self.kit.input_method(e)
-
-    def inputMethodQuery(self, query):
-        got = self.kit.input_query(query) if self.wkind == "custom" else None
-        return super().inputMethodQuery(query) if got is None else got
-
-    def focusOutEvent(self, e):
-        if self.wkind == "custom" and not self.hasFocus():
-            self.kit.focus_out()
-        super().focusOutEvent(e)
-
-    def dragEnterEvent(self, e):
-        if self.wkind == "custom" and e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dragMoveEvent(self, e):
-        if self.wkind == "custom" and self.kit.drag_move(e):
-            e.acceptProposedAction()
-        else:
-            e.ignore()
-
-    def dragLeaveEvent(self, e):
-        self.kit.drag_leave()
-
-    def dropEvent(self, e):
-        if self.wkind == "custom" and self.kit.drop(e):
-            e.acceptProposedAction()
-
     def stop(self):
         self.kit.close()
         super().stop()
@@ -959,147 +600,6 @@ class _Surface(GlassMixin, QWidget):
         # (it is the one fading out when a touch wakes the widget, which must not stall to draw twice).
         self.overlay = None
         self.update()
-
-    # ---- what another kind shows besides states -----------------------------------------
-    def refresh_extras(self):
-        """Fetch, off the GUI thread, what is due: the weather's coming days, the camera's picture (not while
-        dimmed: the desktop is out of sight), the sensors' last day."""
-        kind = self.wkind
-        if kind == "custom":
-            if self.isVisible():
-                self.kit.refresh()
-            return
-        if kind not in EXTRAS_EVERY or not self.tiles or not self.isVisible() or kind in self._fetching:
-            return
-        if kind == "camera" and self.dim_target:     # the desktop is out of sight (a song's cover, fetched only
-            return                                    # when the song changes, still follows it)
-        art_url = None
-        now = time.monotonic()
-        if kind == "media":
-            # its cover, as soon as the song changed (no waiting out an interval: a skip shows the new
-            # cover at once), and the old one gone meanwhile, never beside the new song's title
-            art_url = ((self.states.get(self.tiles[0]["entity"]) or {}).get("attributes") or {}).get("entity_picture")
-            if art_url == self.extras.get("art_url"):
-                return
-            if self.extras.get("art") is not None:
-                self.extras.update(art=None, art_url=None)
-                self._redraw_tiles()
-        elif now - self._extras_at.get(kind, -1e9) < EXTRAS_EVERY[kind]:
-            return
-        self._extras_at[kind] = now
-        self._fetching.add(kind)
-        tiles, states, api = list(self.tiles), dict(self.states), self.api
-
-        def go():
-            got = {}
-            try:
-                if kind == "weather":
-                    got["forecast"] = api.get_forecast(tiles[0]["entity"])
-                elif kind == "camera":
-                    e = tiles[0]["entity"]
-                    url = ((states.get(e) or {}).get("attributes") or {}).get("entity_picture") or "/api/camera_proxy/" + e
-                    data = api.get_picture(url)
-                    img = QImage.fromData(data) if data else None
-                    if img is not None and not img.isNull():
-                        got["picture"], got["picture_at"] = img, time.time()
-                elif kind == "chart":
-                    got["history"] = {t["entity"]: (api.get_history(t["entity"], 24) or {}).get("points") or []
-                                      for t in tiles}
-                elif kind == "media":
-                    data = api.get_picture(art_url) if art_url else None
-                    img = QImage.fromData(data) if data else None
-                    got["art"] = img if img is not None and not img.isNull() else None
-                    got["art_url"] = art_url
-            except Exception:
-                traceback.print_exc()
-
-            def done():
-                self._fetching.discard(kind)
-                if got and kind == self.wkind:
-                    self.extras.update(got)
-                    self._redraw_tiles()
-                if kind == "media":               # the song changed again while its cover came: that one's
-                    QTimer.singleShot(0, self.refresh_extras)
-            self.facade.run_on_ui_thread(done)
-        threading.Thread(target=go, daemon=True).start()
-
-    def _seek(self, at):
-        entity = self.tiles[0]["entity"]
-        st = self.states.get(entity) or {}
-        self.optimistic(entity, {"attributes": dict(st.get("attributes") or {}, media_position=at,
-                                                    media_position_updated_at=datetime.datetime.now(
-                                                        datetime.timezone.utc).isoformat())})
-        api = self.api
-
-        def go():
-            try:
-                api.call_service("media_player", "media_seek", entity, {"seek_position": round(at, 1)})
-            except Exception:
-                traceback.print_exc()
-        threading.Thread(target=go, daemon=True).start()
-
-    def _choose_source(self):
-        """Where it plays: this computer or one of Home Assistant's players, from a menu under its name."""
-        api = self.api
-
-        def go():
-            try:
-                sources = api.get_media_sources()
-            except Exception:
-                sources = []
-            self.facade.run_on_ui_thread(lambda: self._source_menu(sources))
-        threading.Thread(target=go, daemon=True).start()
-
-    def _source_menu(self, sources):
-        if not sources:
-            return
-        dark = self.theme == "dark"
-        menu = QMenu(self)
-        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
-        menu.setAttribute(Qt.WA_TranslucentBackground)
-        # as the screens' floating panes (style.popup_pane): a solid pane, a hairline rim, rounded rows
-        menu.setStyleSheet(
-            "QMenu { background: %s; border: 1px solid %s; border-radius: 14px; padding: 6px;"
-            " font-family: 'Segoe UI Variable Text', 'Microsoft JhengHei UI'; font-size: 14px; }"
-            "QMenu::item { color: %s; padding: 8px 18px 8px 12px; border-radius: 9px; }"
-            "QMenu::item:selected { background: %s; }"
-            "QMenu::item:checked { color: #409cff; font-weight: 600; }"
-            "QMenu::indicator { width: 0px; }" % (
-                "#1c1f25" if dark else "#f4f6f9", "rgba(255,255,255,0.14)" if dark else "rgba(0,0,0,0.12)",
-                "#f5f5f7" if dark else "#1d1d1f", "rgba(255,255,255,0.12)" if dark else "rgba(0,0,0,0.07)"))
-        current = self.tiles[0]["entity"] if self.tiles else None
-        for s in sources:
-            act = menu.addAction(("✓  " if s["entity_id"] == current else "     ") + render.tr(s["name"]))
-            act.setCheckable(True)
-            act.setChecked(s["entity_id"] == current)
-            act.setData(s["entity_id"])
-        rect = next((r for r, a in self.kind_buttons if a == "source"), None)
-        k = self.scale / (self.devicePixelRatioF() or 1.0)
-        at = self.mapToGlobal(QPoint(round(rect.x() * k), round(rect.bottom() * k))) if rect else None
-        chosen = menu.exec(at) if at is not None else menu.exec()
-        if chosen is not None and chosen.data() and chosen.data() != current:
-            api, wid, entity = self.api, self.widget_id, chosen.data()
-            threading.Thread(target=lambda: api.set_widget_source(wid, entity), daemon=True).start()
-
-    def _play(self, action):
-        """A player's button: previous, play or pause, next (shown at once, then asked of Home Assistant)."""
-        if action == "source":
-            self._choose_source()
-            return
-        entity = self.tiles[0]["entity"]
-        st = self.states.get(entity) or {}
-        if action == "play_pause" and st:
-            self.optimistic(entity, kinds.play_pause_patch(st))
-        service = {"previous": "media_previous_track", "play_pause": "media_play_pause",
-                   "next": "media_next_track"}[action]
-        api = self.api
-
-        def go():
-            try:
-                api.call_service("media_player", service, entity, {})
-            except Exception:
-                traceback.print_exc()
-        threading.Thread(target=go, daemon=True).start()
 
     # ---- flashes of the momentary tiles -------------------------------------------
     def flash_tile(self, i):
@@ -1113,11 +613,6 @@ class _Surface(GlassMixin, QWidget):
             self.flash_timer.stop()
         self._invalidate_overlay()
 
-
-
-def has_hold(domain):
-    """A press held on it opens the detail card: the devices with controls, and the read-only ones."""
-    return render.has_detail_on_hold(domain) or render.is_readonly(domain)
 
 
 class NativeWidget:
@@ -1235,7 +730,7 @@ class NativeWidget:
             try:
                 self.api.ui_ready(self.api._widget_kind(self.widget_id))
             except Exception:
-                pass
+                diag.note("telling the program a widget is ready")
             dump = os.environ.get("HA_WIDGET_DUMP")        # a picture of the widget, for looking at it in tests
             if dump:
                 time.sleep(float(os.environ.get("HA_WIDGET_DUMP_AFTER", "8")))

@@ -96,11 +96,34 @@ _STALL_SECS = 10.0
 _SUSPEND_SECS = 20.0
 
 
+LOG_KEEP_BYTES = 1_000_000          # a log this large or larger is put aside (as widget.log.1) when the program starts
+LOG_CEILING_BYTES = 8_000_000       # ... and one that grows past this within a run takes no more lines
+
+
+def rotate_log(path, keep=LOG_KEEP_BYTES):
+    """Before the log is opened: if it has grown to `keep` bytes, it becomes `path`.1 (the one before that is dropped) and a
+    new log begins, so that the file never grows without end and the last run before a problem is still there. Never raises."""
+    try:
+        if os.path.getsize(path) >= keep:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
+def _log_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
 def log(line):
     """A line in the program's own log, timestamped. Never raises."""
     try:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         if _LOG_PATH:
+            if _log_size(_LOG_PATH) > LOG_CEILING_BYTES:
+                return
             with open(_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write("%s  %s\n" % (stamp, line))
         else:
@@ -329,6 +352,7 @@ def prepare(log_dir=None):
     global _app, _marshal, _LOG_PATH, _heartbeat, _power_filter, _display_timer
     if log_dir:
         _LOG_PATH = os.path.join(log_dir, "widget.log")
+        rotate_log(_LOG_PATH)
         try:
             # Hard crashes (access violations) get their Python stacks logged.
             faulthandler.enable(open(_LOG_PATH, "a", encoding="utf-8"))

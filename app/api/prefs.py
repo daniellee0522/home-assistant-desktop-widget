@@ -224,6 +224,20 @@ class PrefsMixin:
             self._hotkey_ok = ok
             self._push_prefs()
 
+    def warn_if_hotkey_taken(self):
+        """At start-up: a shortcut another program already holds is said in a notice (the program would otherwise start with
+        a shortcut that does nothing and only the log to say why). Settings shows the same and changes it."""
+        wanted = self._cfg.get("hotkey", "")
+        if not wanted or self._hotkey_ok:
+            return False
+        shown = hotkeymod.label(wanted)
+        if str(self._cfg.get("language", "zh-TW")).startswith("zh"):
+            message = "快速鍵 %s 已被其他程式使用，暫時無法啟用。可在「設定」中改成別的組合。" % shown
+        else:
+            message = "The shortcut %s is already used by another program. Choose another one in Settings." % shown
+        self._notify("HA Widgets", message)
+        return True
+
     def _hotkey_pressed(self):
         threading.Thread(target=self.toggle_flyout, args=(True,), daemon=True).start()
 

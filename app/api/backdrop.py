@@ -10,6 +10,7 @@ from PIL import Image, ImageFilter
 from app.capture import BACKDROP_NOISE, compat_capture, desktop_capture, DUPLICATION_WAIT_SECS, screen_duplication
 from app.compose import compose_popover_backdrop, composite_rgba_window, grab_widget_rgba, patch_covered
 from app.geometry import is_widget_kind, liquid_params, popover_needs_compat
+from core import diag
 from winsys.capture_pixels import within_noise, within_noise_bgrx
 from winsys.scan import nothing_visible_of, window_snapshot, window_snapshots, windows_below, windows_over
 from winsys.win32 import get_hwnd, rects_overlap, user32, visible_rect
@@ -113,6 +114,7 @@ class BackdropMixin:
         except _Answer as answer:
             return answer.reply
         except Exception:
+            diag.note("making a widget's glass")
             return None
 
     def _plan_backdrop(self, job):

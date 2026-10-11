@@ -159,6 +159,16 @@ _COPY_REGION_ARGS = (_vp, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
                      ctypes.c_uint, _vp, ctypes.c_uint, _vp)
 
 
+def _entry(obj, index):
+    """The address of method `index` in the table of methods of the COM object `obj`, read directly (this runs for
+    every call; casting to pointer types to read two words was most of its cost)."""
+    address = _address(obj)
+    if not address:
+        raise ValueError("NULL pointer access")
+    return ctypes.c_size_t.from_address(
+        ctypes.c_size_t.from_address(address).value + index * ctypes.sizeof(ctypes.c_size_t)).value
+
+
 def _call(obj, index, *args, restype=_HRESULT, argtypes=None, what=None):
     """Call vtable slot `index` of COM object `obj` (a c_void_p)."""
     argtypes = tuple(argtypes or ())
@@ -166,8 +176,7 @@ def _call(obj, index, *args, restype=_HRESULT, argtypes=None, what=None):
     proto = _prototypes.get(key)
     if proto is None:
         proto = _prototypes[key] = ctypes.WINFUNCTYPE(restype, _vp, *argtypes)
-    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(_vp))).contents
-    result = proto(vtable[index])(obj, *args)
+    result = proto(_entry(obj, index))(obj, *args)
     if restype is _HRESULT and what and result < 0:
         raise DxgiError(what, result)
     return result
@@ -431,11 +440,15 @@ class _Output:
         """True if `tex_rect` may have changed after frame `after`."""
         if after is None or after < self.seq - len(self.history):
             return True
+        l, t, r, b = tex_rect
+        if l >= r or t >= b:
+            return False
         for seq, rects in reversed(self.history):
             if seq <= after:
                 break
-            if any(_intersect(tex_rect, r) for r in rects):
-                return True
+            for hl, ht, hr, hb in rects:       # inline: this runs per widget per frame, over a long history
+                if hl < r and hr > l and ht < b and hb > t:
+                    return True
         return False
 
     def read(self, tex_rect):
@@ -676,10 +689,13 @@ class DesktopDuplication:
                     return read.result
                 if timeout <= 0 and read.after is not None and self._outputs:
                     # A look that must not wait: nothing new in this
-                    # rectangle since `after`, so say so at once. The caller's
-                    # own `after` is handed back, so a change this look could
-                    # not read yet is still seen by the next one.
-                    return (read.after, None)
+                    # rectangle since `after`, so say so at once. When the
+                    # rectangle is known not to have changed, the cursor moves
+                    # up to the frames seen (so the next look scans no history
+                    # it has already ruled out); when it changed but could not
+                    # be read yet, the caller's own `after` is handed back, so
+                    # that change is still seen by the next one.
+                    return (self._still_cursor(read) or read.after, None)
         except DxgiError:
             pass                        # the capture thread rebuilds
         with self._lock:
@@ -858,6 +874,17 @@ class DesktopDuplication:
                     if read in self._reads:
                         self._reads.remove(read)
                 read.done.set()
+
+    def _still_cursor(self, read):
+        """The frames seen on every output under `read`, if none of them changed the rectangle since
+        `read.after`; else None. GPU lock held."""
+        parts = [(out,) + out.texture_rect(read.rect) for out in self._outputs]
+        parts = [p for p in parts if p[1]]
+        after = dict(read.after or ())
+        if not parts or any(out.name not in after or out.changed_since(tex, after[out.name])
+                            for out, _, tex in parts):
+            return None
+        return tuple((out.name, out.seq) for out, _, _ in parts)
 
     def _answer(self, read, final):
         """Fill read.result if it can be answered now. GPU lock held.

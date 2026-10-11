@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 
+from . import secret
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the project folder
 
 
@@ -232,8 +234,32 @@ def load_config():
             _migrate(cfg, loaded)
         except Exception as exc:
             _log("settings could not be read in full: %r" % (exc,))
+    clear_token = _open_token(cfg)
     _ensure_widgets(cfg)
+    if clear_token:
+        try:
+            save_config(cfg)
+        except Exception as exc:
+            _log("the token could not be sealed yet: %r" % (exc,))
     return cfg
+
+
+LOCKED_TOKEN = "_ha_token_sealed"          # a sealed token this user cannot open (kept as it is, not lost by the next save)
+
+
+def _open_token(cfg):
+    """The token as text in memory (in the file it is sealed for this Windows user: core/secret.py). True when the file holds
+    one in the clear, written by an earlier version, which is to be sealed by a save."""
+    token = cfg.get("ha_token") or ""
+    if secret.sealed(token):
+        opened = secret.unseal(token)
+        if opened is None:
+            _log("the saved Home Assistant token cannot be opened by this user: enter it again")
+            cfg[LOCKED_TOKEN], cfg["ha_token"] = token, ""
+        else:
+            cfg["ha_token"] = opened
+        return False
+    return bool(token) and secret.seal(token) is not None
 
 
 def _ensure_widgets(cfg):
@@ -340,6 +366,19 @@ def _int_between(value, low, high, default):
 _save_lock = threading.Lock()
 
 
+def _for_disk(cfg):
+    """What goes in the file: the settings with the token sealed (kept as it is where sealing is not possible, so that it is
+    never lost; a sealed one this user cannot open is written back unchanged until a new token is entered)."""
+    out = {k: v for k, v in cfg.items() if k != LOCKED_TOKEN}
+    token = cfg.get("ha_token") or ""
+    if token:
+        out["ha_token"] = secret.seal(token) or token
+        cfg.pop(LOCKED_TOKEN, None)
+    elif cfg.get(LOCKED_TOKEN):
+        out["ha_token"] = cfg[LOCKED_TOKEN]
+    return out
+
+
 def save_config(cfg):
     with _save_lock:
         sync_legacy(cfg)
@@ -347,7 +386,7 @@ def save_config(cfg):
         fd, tmp_path = tempfile.mkstemp(prefix=".ha_widgets_", dir=os.path.dirname(CONFIG_FILE))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                json.dump(_for_disk(cfg), f, ensure_ascii=False, indent=2)
             for attempt in range(4):
                 try:
                     os.replace(tmp_path, CONFIG_FILE)      # (a scanner may hold the file for a moment)

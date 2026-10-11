@@ -244,7 +244,7 @@ class SettingsScene(EditorMixin, OverlayScene):
             self.fields_text["token"] = self.token_field.value()
         # A menu open over the page stays open over the page built again (reattach_menu, below); anything
         # else floating closes.
-        menu = isinstance(self.popup, (controls.ChoiceMenu, controls.ColorMenu))
+        menu = isinstance(self.popup, (controls.ChoiceMenu, controls.ColorMenu)) or getattr(self.popup, "reanchors", False)
         if not menu:
             self.close_popup()
         self.root.clear()

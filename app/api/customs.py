@@ -4,14 +4,17 @@ its place (`widget["custom"]`); the packages, the permission answers and each co
 folder beside the config (widget_library/, widgetkit.library.Library; not the kit's own source folder)."""
 
 import copy
+import hashlib
+import json
 import os
+import shutil
 import tempfile
 import threading
 
 from core import config as cfgmod
 from widgetkit import package
 from widgetkit import permissions as perms
-from widgetkit.definition import text_of
+from widgetkit.definition import KIT_VERSION, text_of
 from widgetkit.library import Library, LibraryError
 from winsys import qtshell
 
@@ -55,19 +58,62 @@ class CustomsMixin:
                 "granted": sorted(table.get("granted", []))}
 
     # -- packages ------------------------------------------------------------------------------------------------------
-    def import_custom_widget(self, path):
-        """Install a .hawidget, a folder with a manifest, or one .py file that defines WIDGET. Its code is loaded once to check it works; a package that
-        does not load is taken out again. -> {"ok", "id", "name", "notes"} or {"ok": False, "error"}."""
+    def import_custom_widget(self, path, approve=False):
+        """Put a .hawidget, a folder with a manifest, or one .py file that defines WIDGET into the library. Importing a
+        widget runs its code, so nothing is run here: the package waits, unapproved, until the person has seen what it is and
+        what it asks for and `approve_custom_widget` is called (`approve=True` is for scripts and tests that stand in for
+        that answer). -> {"ok", "id", "name", "author", "permissions", "approved", "notes"} or {"ok": False, "error"}."""
+        lib = self._lib()
+        try:
+            staged = None
+            if str(path).lower().endswith(".py"):               # one Python file: held as a package whose manifest is not known yet
+                path = staged = self._stage_file(str(path))
+            try:
+                manifest = lib.install(str(path), approved=False)
+            finally:
+                if staged:
+                    shutil.rmtree(staged, ignore_errors=True)
+        except (package.PackageError, LibraryError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+        result = {"ok": True, "id": manifest["id"], "name": text_of(manifest["name"], self._lang()),
+                  "author": str(manifest.get("author", "")), "approved": False,
+                  "permissions": self._described(manifest), "notes": list(lib.notes)}
+        if approve:
+            return self.approve_custom_widget(manifest["id"], notes=result["notes"])
+        return result
+
+    def _described(self, manifest):
+        if manifest.get("from_file"):
+            return None                          # a single file says what it asks for only when it runs
+        return [perms.describe(p, self._lang()) for p in manifest.get("permissions", [])]
+
+    def _stage_file(self, py_path):
+        """A folder holding the file as it is, with a manifest made from its name: its code is not run (a manifest of the
+        file's own is made when the person approves it)."""
+        if not os.path.isfile(py_path) or os.path.getsize(py_path) > 2_000_000:
+            raise package.PackageError("not a widget file: %s" % py_path)
+        digest = hashlib.sha1(os.path.abspath(py_path).encode()).hexdigest()[:10]
+        folder = tempfile.mkdtemp(prefix="widget-file-")
+        shutil.copyfile(py_path, os.path.join(folder, "main.py"))
+        stem = os.path.splitext(os.path.basename(py_path))[0]
+        with open(os.path.join(folder, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"id": "file." + digest, "name": stem[:60] or "widget", "version": "1", "kit": KIT_VERSION,
+                       "entry": "main.py", "author": "", "permissions": [], "from_file": True}, f)
+        return folder
+
+    def approve_custom_widget(self, pkg_id, notes=None):
+        """The person chose to use an imported package: its code is run now (to check that it loads). A package that does not
+        load is taken out again. -> like `import_custom_widget`'s answer, with "approved": True."""
         lib, settings_file = self._lib(), cfgmod.CONFIG_FILE
         try:
-            if str(path).lower().endswith(".py"):               # one Python file that defines WIDGET: wrapped as a package
-                path = package.wrap_file(str(path), tempfile.mkdtemp(prefix="widget-file-"))
-            manifest = lib.install(str(path))
-            try:
-                lib.widget(manifest["id"])
-            except package.PackageError:
-                lib.uninstall(manifest["id"])
-                raise
+            entry = lib.installed.get(pkg_id)
+            if entry is None:
+                return {"ok": False, "error": "no such widget"}
+            if entry["manifest"].get("from_file"):
+                pkg_id = self._approve_file(entry)
+            else:
+                lib.approve(pkg_id)
+            manifest = lib.installed[pkg_id]["manifest"]
         except (package.PackageError, LibraryError, OSError) as e:
             return {"ok": False, "error": str(e)}
         finally:
@@ -76,20 +122,47 @@ class CustomsMixin:
         if any((w.get("custom") or {}).get("widget") == manifest["id"] for w in self._cfg.get("widgets", [])):
             self._push_prefs()                      # a newer version of one already placed: its copies take it up
         return {"ok": True, "id": manifest["id"], "name": text_of(manifest["name"], self._lang()),
-                "notes": list(lib.notes)}
+                "author": str(manifest.get("author", "")), "approved": True,
+                "permissions": self._described(manifest), "notes": list(notes if notes is not None else lib.notes)}
+
+    def _approve_file(self, entry):
+        """A single file that was held: run it once to read its WIDGET, keep it as a package of its own id."""
+        lib, stub = self._lib(), entry["manifest"]["id"]
+        main = os.path.join(entry["path"], "main.py")
+        folder = tempfile.mkdtemp(prefix="widget-file-")
+        try:
+            package.wrap_file(main, folder)
+            manifest = lib.install(folder, approved=False)
+        except (package.PackageError, LibraryError):
+            lib.uninstall(stub)                             # a file that does not load is not kept
+            raise
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        lib.uninstall(stub)
+        lib.approve(manifest["id"])
+        return manifest["id"]
+
+    def reject_custom_widget(self, pkg_id):
+        """The person chose not to use an imported package that was waiting: it is taken out, its code never run."""
+        if self._lib().is_approved(pkg_id):
+            return False
+        self._lib().uninstall(pkg_id)
+        return True
 
     def custom_widgets(self):
         """The packages installed, for the editor's palette."""
         lib, out = self._lib(), []
         for pkg_id, entry in lib.installed.items():
             m = entry["manifest"]
+            approved = lib.is_approved(pkg_id)
             try:
                 size = lib.widget(pkg_id).size
             except (LibraryError, package.PackageError):
                 size = "2x2"
             copies = sum(1 for w in self._cfg.get("widgets", []) if (w.get("custom") or {}).get("widget") == pkg_id)
             out.append({"id": pkg_id, "name": text_of(m["name"], self._lang()), "version": str(m.get("version", "")),
-                        "author": str(m.get("author", "")), "size": size, "copies": copies})
+                        "author": str(m.get("author", "")), "size": size, "copies": copies, "approved": approved,
+                        "permissions": self._described(m)})
         return out
 
     def custom_definition(self, pkg_id):

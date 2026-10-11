@@ -201,8 +201,11 @@ focus; while an input has the caret the window borrows it and gives it back (`se
 A person adds a widget of the kit from the widget editor (Settings → Widget 編輯器):
 
 * On the left, under the clock, calendar and the rest, **匯入的 Widget** has a **+** that opens a file dialog for a
-  `.hawidget` (`Api.import_custom_widget`: the manifest is checked, the code is loaded once to see it works, and a package
-  that does not load is taken out again). Each imported widget is shown there as it looks and is dragged onto the desktop
+  `.hawidget` (`Api.import_custom_widget`: the manifest is checked and **none of the code is run**; the package waits as a
+  closed *待審核* tile until the person has read what it is, who wrote it and what it asks for, and chosen to trust it
+  (`Api.approve_custom_widget`: only then is the code loaded once to see it works; a package that does not load is taken
+  out again; `Api.reject_custom_widget` removes one that waits). The permissions limit what the kit does for a widget, not
+  what its code can do: a widget is a program, not a sandboxed one). Each imported widget is shown there as it looks and is dragged onto the desktop
   like a clock; its cross (on hover) asks, in a menu, to take it out with every copy of it.
 * On the right, a copy is a chip under **我的 Widget**, with a preview. Under the preview are the sizes it says it can be,
   then **its own settings** made from its `Field`s (a text or number in a field, a bool as a tick, a choice as a card with a

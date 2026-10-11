@@ -17,6 +17,11 @@ from .theme import line_height, paragraph, text
 
 PAD = 24
 ROW = 64
+NOTE_H = 72
+NOTE = {"en": "A widget is a program: once added it can read your files and your Home Assistant token. These switches only "
+                "limit what the widget kit does for it; they are not a sandbox. Add only widgets from people you trust.",
+        "zh": "Widget 是一段程式：加入後它能讀取你電腦上的檔案與 Home Assistant 權杖。這些開關只限制工具組替它做的事，"
+                "並不是沙箱。只加入你信任的人寫的 widget。"}
 
 
 class ConsentCard:
@@ -36,7 +41,7 @@ class ConsentCard:
         self.hits.clear()
         x, w = rect.left() + PAD, rect.width() - 2 * PAD
         n = len(self.choice)
-        h = PAD + 30 + 22 + n * ROW + 20 + 52 + 36 + PAD
+        h = PAD + 30 + 22 + n * ROW + 20 + 52 + NOTE_H + PAD
         card = QRectF(rect.left(), rect.top(), rect.width(), h)
         style.shadow(p, card, 24, style.SHADOW)
         p.save()
@@ -53,9 +58,8 @@ class ConsentCard:
             self._row(p, th, perm, on, QRectF(x, y, w, ROW))
             y += ROW
         y += 8
-        paragraph(p, th, "hint", "Only add widgets from people you trust: a widget is a program." if not self.lang.startswith("zh")
-                  else "只加入你信任的人寫的 widget:它是一段程式。", QRectF(x, y, w, 40))
-        y += 36
+        paragraph(p, th, "hint", NOTE["zh" if self.lang.startswith("zh") else "en"], QRectF(x, y, w, NOTE_H - 8))
+        y += NOTE_H
         half = (w - 12) / 2
         controls.button(p, th, QRectF(x, y, half, 48), "Don't allow" if not self.lang.startswith("zh") else "取消",
                         th.accent("blue"), "tinted", hits=self.hits, id="cancel")

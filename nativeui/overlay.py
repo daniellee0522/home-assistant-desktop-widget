@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QTimer
 
 from winsys import qtshell
 
-from .ui import Scene
+from .scene import Scene
 
 class OverlayScene(Scene):
     """A Scene that is a window of the program: its events go to the facade."""

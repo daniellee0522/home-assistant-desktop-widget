@@ -7,6 +7,8 @@ import ctypes
 import threading
 from ctypes import wintypes
 
+from core import diag
+
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
 _user32.RegisterHotKey.restype = wintypes.BOOL
@@ -125,4 +127,4 @@ class GlobalHotkey:
                 try:
                     self.on_press()
                 except Exception:
-                    pass
+                    diag.note("the shortcut's action")

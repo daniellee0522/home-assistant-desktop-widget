@@ -13,6 +13,8 @@ import urllib.parse
 
 import websocket  # websocket-client
 
+from . import diag
+
 # The entity a state_changed message is about: the first "entity_id" in it, since Home Assistant
 # writes the event's data as {"entity_id": ..., "old_state": ..., "new_state": ...}. Read from the raw
 # text so the (often large) messages about entities nobody shows are dropped without being parsed.
@@ -214,7 +216,7 @@ class HAClient:
             try:
                 self.on_status(connected, detail)
             except Exception:
-                pass
+                diag.note("telling the program the connection state")
 
     def _ws_loop(self):
         backoff = 2
@@ -318,6 +320,7 @@ class HAClient:
             try:
                 states = self.get_states()
             except Exception:
+                diag.note("reading all states from Home Assistant")
                 continue
             for state in states:
                 if self._stop.is_set():
@@ -327,4 +330,4 @@ class HAClient:
                     try:
                         self.on_event(eid, state)
                     except Exception:
-                        pass
+                        diag.note("handling a Home Assistant state")

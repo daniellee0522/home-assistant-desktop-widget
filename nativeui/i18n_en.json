@@ -318,5 +318,17 @@
  "每秒 20 次": "20 a second",
  "每秒 15 次 (最省資源)": "15 a second (lightest)",
  "桌面在變動時，玻璃永遠以這個固定速度更新（不論螢幕的更新率或變動多久）；桌面靜止時不更新、不耗資源。每次更新每個 widget 都要複製、模糊並呈現一次，次數越少越省處理器；模糊後的玻璃在 20 次仍然順暢。": "While the desktop changes, the glass follows it at exactly this rate (whatever the display's own rate and however long it has been moving); a still desktop is not followed and costs nothing. Each update copies, blurs and presents every widget, so fewer use less of the processor; blurred glass still looks smooth at 20.",
- "玻璃更新率": "Glass update rate"
+ "玻璃更新率": "Glass update rate",
+ "待審核": "Waiting for review",
+ "請確認是否信任": "Choose whether to trust",
+ "已加入": "Added",
+ "作者": "Author",
+ "作者不明": "Author unknown",
+ "它要求的權限": "Permissions it asks for",
+ "執行後才會知道它要求哪些權限。": "Which permissions it asks for is known only once it runs.",
+ "它沒有要求任何權限。": "It asks for no permissions.",
+ "不使用並移除": "Don't use, remove",
+ "信任並使用": "Trust and use",
+ "Widget 是一段程式：信任後它會在本程式內執行，能讀取你電腦上的檔案與 Home Assistant 權杖。上面的權限只限制工具組提供的動作，並不是沙箱。只信任你認識的來源。": "A widget is a program: once trusted it runs inside this app and can read files on your computer and your Home Assistant token. The permissions above only limit the actions the widget kit offers; they are not a sandbox. Trust only sources you know.",
+ "這些開關只限制工具組替 Widget 做的事，並不是沙箱：Widget 本身是一段程式。": "These switches only limit what the widget kit does for the widget; they are not a sandbox: the widget itself is a program."
 }

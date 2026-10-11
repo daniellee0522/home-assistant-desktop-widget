@@ -628,16 +628,22 @@ def open_colors(anchor, current, on_pick):
     return _show(anchor, ColorMenu(current, pick, getattr(anchor, "key", "colors")))
 
 
+def open_pane(anchor, pane):
+    """Any other floating pane (one with `key`, `anchor`, `on_closed` and `reanchors = True`) for `anchor`, placed and
+    opened as a menu is."""
+    return _show(anchor, pane)
+
+
 def reattach_menu(scene, tree):
     """The screen was built again under a menu that is open: it stays, over the card that took the old one's
     place (marked open), and shows the choices as they are now. With no such card it closes."""
     pane = scene.popup
-    if not isinstance(pane, (ChoiceMenu, ColorMenu)) or pane.key is None:
+    if pane is None or not (isinstance(pane, (ChoiceMenu, ColorMenu)) or getattr(pane, "reanchors", False))             or pane.key is None:
         return
     found = []
 
     def walk(v):
-        if getattr(v, "key", None) == pane.key and v is not pane and not isinstance(v, (ChoiceMenu, ColorMenu)):
+        if getattr(v, "key", None) == pane.key and v is not pane and not isinstance(v, (ChoiceMenu, ColorMenu))                 and not getattr(v, "reanchors", False):
             found.append(v)
         for c in v.children:
             walk(c)
@@ -666,11 +672,13 @@ def reattach_menu(scene, tree):
 class Picture(View):
     """A picture from Home Assistant (a song's cover, a camera), fetched off the GUI thread through
     `fetch(url) -> bytes` and kept for the next time; rounded corners, an icon until it comes."""
-    _cache = {}                      # url -> QImage, the last few
+    _cache = {}                      # url -> QImage, the last few, at most CACHE_BYTES of decoded pictures together
+    CACHE_BYTES = 24 * 1024 * 1024
 
-    def __init__(self, w, h, url, fetch, run_on_ui_thread, icon="mdi:music", radius=14):
+    def __init__(self, w, h, url, fetch, run_on_ui_thread, icon="mdi:music", radius=14, keep=True):
         super().__init__(0, 0, w, h)
         self.url, self.fetch, self.run, self.icon, self.radius = url, fetch, run_on_ui_thread, icon, radius
+        self.keep = keep                 # False for a picture whose address is never asked for twice (a camera's frame)
         self.image = Picture._cache.get(url)
         self._asked = False
 
@@ -687,9 +695,11 @@ class Picture(View):
 
             def done():
                 if img is not None and not img.isNull():
-                    Picture._cache[url] = img
-                    while len(Picture._cache) > 8:
-                        Picture._cache.pop(next(iter(Picture._cache)))
+                    if self.keep:
+                        Picture._cache[url] = img
+                        while len(Picture._cache) > 8 or (len(Picture._cache) > 1 and sum(
+                                i.sizeInBytes() for i in Picture._cache.values()) > Picture.CACHE_BYTES):
+                            Picture._cache.pop(next(iter(Picture._cache)))
                     self.image = img
                     self.changed()
             self.run(done)

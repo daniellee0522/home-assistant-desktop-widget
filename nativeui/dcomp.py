@@ -111,11 +111,20 @@ def _function(entry, result_type, argtypes):
     return WINFUNCTYPE(result_type, c_void_p, *argtypes)(entry)
 
 
+_WORD = ctypes.c_size_t
+
+
+def _entry(obj, index):
+    """The address of method `index` of the COM object whose pointer is `obj`: read from its table of methods directly,
+    for this runs for every Direct3D call and building pointer types to read two words was most of its cost."""
+    if not obj:
+        raise ValueError("NULL pointer access")
+    return _WORD.from_address(_WORD.from_address(obj).value + index * ctypes.sizeof(_WORD)).value
+
+
 def _call(obj, index, argtypes, *args):
     """Call method `index` of the COM object whose pointer is `obj`; the HRESULT is checked."""
-    table = ctypes.cast(c_void_p(obj), POINTER(c_void_p)).contents.value
-    entry = ctypes.cast(table + index * ctypes.sizeof(c_void_p), POINTER(c_void_p)).contents.value
-    result = _function(entry, c_long, tuple(argtypes))(obj, *args)
+    result = _function(_entry(obj, index), c_long, tuple(argtypes))(obj, *args)
     if result < 0:
         raise OSError("COM method %d failed: 0x%08X" % (index, result & 0xFFFFFFFF))
     return result
@@ -124,9 +133,7 @@ def _call(obj, index, argtypes, *args):
 def _void(obj, index, argtypes, *args):
     """A call of a method that returns nothing (Direct3D's setters and draws): what it leaves in the return register
     is not an HRESULT and is not looked at."""
-    table = ctypes.cast(c_void_p(obj), POINTER(c_void_p)).contents.value
-    entry = ctypes.cast(table + index * ctypes.sizeof(c_void_p), POINTER(c_void_p)).contents.value
-    _function(entry, None, tuple(argtypes))(obj, *args)
+    _function(_entry(obj, index), None, tuple(argtypes))(obj, *args)
 
 
 def _new(obj, index, argtypes, *args):

@@ -41,7 +41,7 @@ class CustomSettingsMixin:
 
     def custom_sizes(self, body, tx, ty, widget):
         """The sizes the widget says it can be, as the chips tiles have (or its one size in words); returns the x after them."""
-        from .editor import Chip
+        from .editor_views import Chip
         info = self.custom_now or {}
         sizes = info.get("sizes") or [widget["size"]]
         if len(sizes) < 2:
@@ -233,6 +233,10 @@ class CustomSettingsMixin:
         group.x, group.y = RIGHT_X, y
         body.add(group)
         y += group.h
+        not_sandbox = style.label("hint", "這些開關只限制工具組替 Widget 做的事，並不是沙箱：Widget 本身是一段程式。",
+                                  x=RIGHT_X, y=y + 8, w=RIGHT_W, wrap=True, lh=1.4)
+        body.add(not_sandbox)
+        y += 8 + not_sandbox.h
         if pending:
             ok = Button("允許所選", size=12, weight=QFont.DemiBold, h=28, pad=12, fill="accent_blue",
                         hover_fill="accent_blue", color="white", on_click=lambda e: self.apply_permissions(wid))

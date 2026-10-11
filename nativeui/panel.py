@@ -11,37 +11,30 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QCursor, QImage, QPainter
 
-from . import dcomp, render, screens, ui
+from . import dcomp, render, screens
 from .actions import TileActions
-from . import controls, style
-from .detail import CARD_W, DetailContent
+from .detail import DetailContent
 from .homemodel import HomeModel
 from .overlay import OverlayScene, create_overlay
-from .ui import ScrollView, TileView, View
+from .ui import ScrollView, TileView
+from .panel_detail import FLYOUT_ZOOM, PanelDetail
+from .panel_slide import ENTER_CURVE, ENTER_MS, LEAVE_CURVE, LEAVE_MS, PanelSlide
 
 
 PAD, CELL_W, CELL_H, GAP = 14, 152, 146, 14
 GRID_ROWS = 3                          # rows of tiles shown; more scroll
 HOLD_MS, HOLD_SLOP = 420, 8
-FLYOUT_ZOOM = 0.5
 # The panel takes about the same share of any monitor: drawn at FLYOUT_ZOOM on one whose shorter side is
 # FIT_SIDE logical px (1080p), larger or smaller by that side on others, within FIT_RANGE; and never larger
 # than the work area holds, less FIT_MARGIN physical px all round.
 FIT_SIDE = 1080
 FIT_RANGE = (0.8, 1.5)
 FIT_MARGIN = 12
-# Like the system's own flyouts: it slides in from behind the bottom edge and out again, with no fade.
-ENTER_CURVE, LEAVE_CURVE = (0.2, 0.75, 0.25, 1.0), (0.5, 0.0, 1.0, 1.0)
-ENTER_MS, LEAVE_MS = 250, 150
 BG_VEIL = {"dark": (12, 14, 18, 0.26), "light": (255, 255, 255, 0.2)}
-# Details fit inside the panel's existing bounds. State updates and navigation never resize the glass.
-DETAIL_SCALE = 1 / FLYOUT_ZOOM
-DETAIL_MARGIN = 14
 DETAIL_MAX_H = 900                     # as tall as the Home panel
-DETAIL_MS = 320
 
 
-class PanelScene(OverlayScene):
+class PanelScene(PanelDetail, PanelSlide, OverlayScene):
     def __init__(self, facade, api):
         super().__init__(facade, api, "flyout")
         self.prefs = api._prefs()
@@ -324,146 +317,6 @@ class PanelScene(OverlayScene):
                 QTimer.singleShot(33, step)
         step()
 
-    def popover(self, tv, tile):
-        """A hold or a right click: the tile's detail, over the panel."""
-        self.open_detail(tile["id"], source=tv)
-
-    # -- a tile's detail, over the tiles ------------------------------------------------------------------------------
-    def open_detail(self, tile_id, source=None):
-        if self.detail_view is None and getattr(self, "closing_detail", None) is None:
-            if source is None:
-                candidates = self.home.tile_views() if self.home else self.tiles_views
-                source = next((v for v in candidates if v.tile["id"] == tile_id), None)
-            self.detail_origin = None
-            if source is not None:
-                x, y, k = source.in_scene()
-                rect = QRectF(x, y, source.w * k, source.h * k)
-                image = self.grab().toImage()
-                crop = QRectF(rect.x() * self.scale, rect.y() * self.scale,
-                              rect.width() * self.scale, rect.height() * self.scale).toAlignedRect()
-                self.detail_origin = (rect, image.copy(crop))
-                self.detail_source_id = tile_id
-                source.transition_hidden = True
-        if not self.detail.open(tile_id):
-            return
-        opening = self.detail_view is None
-        closing = getattr(self, "closing_detail", None)
-        if closing is not None:
-            self.detail_view = closing
-            closing.no_hit = False
-            self.closing_detail = None
-        self.detail_k = DETAIL_SCALE
-        self.layout_detail()
-        if opening:
-            # the tiles recede and the detail comes forward, as a capsule's devices do
-            self.root.no_hit = True
-            self.root.animate(DETAIL_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0)
-            v = self.detail_view
-            if closing is None:
-                v.alpha, v.zoom, v.blur, v.progress = 0.0, 1.0, 0.0, 0.0
-            v.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0, progress=1.0)
-            self.invalidate_glass()               # the liquid glass no longer blurs behind each tile
-
-    def layout_detail(self):
-        """(Re)build the detail over the tiles, and size the panel for it."""
-        if self.detail.tile is None:
-            return
-        old = self.detail_view
-        k, m = DETAIL_SCALE, DETAIL_MARGIN
-        base_w, base_h = self.base_css or (self.css_w, self.css_h)
-        room = max(1, base_h - 2 * m)
-        k = min(getattr(self, "detail_k", k), k, max(1, base_w - 2 * m) / CARD_W,
-                room / (72 + 150))
-        content = self.detail.build(max_h=room / k, fit=True)
-        # as large as fits, and no larger than it was while this device is shown: a new state (a longer
-        # song title) does not make it jump
-        k = self.detail_k = min(getattr(self, "detail_k", k), k, room / content.h,
-                              max(1, base_w - 2 * m) / CARD_W)
-        w, h = base_w, base_h
-        overlay = MorphBacking(0, 0, w, h, self, getattr(self, "detail_origin", None))
-        overlay.interactive = True                # the empty space around it goes back
-        overlay.on_press = lambda e: True
-        overlay.on_click = lambda e: self.close_detail()
-        holder = ui.CachedView((w - CARD_W * k) / 2, m, CARD_W, content.h)
-        holder.scale = k
-        holder.interactive = True                 # but not the empty space inside it, nor a click that a
-        holder.on_press = lambda e: True          # control in it (a slider) leaves unhandled
-        holder.on_click = lambda e: self.detail_background_click(e)
-        holder.add(content)
-        overlay.add(holder)
-        if old is not None:
-            controls.preserve_controls(self, old, overlay)
-            overlay.alpha, overlay.zoom, overlay.blur = old.alpha, old.zoom, old.blur
-            overlay.progress = old.progress
-            self.tweens.replace_view(old, overlay)
-            self.layer.remove(old)
-        candidates = self.home.tile_views() if self.home else self.tiles_views
-        for tile in candidates:
-            tile.transition_hidden = tile.tile["id"] == getattr(self, "detail_source_id", None)
-        self.layer.add(overlay)
-        self.detail_view = overlay
-        self.detail_css = (w, h)
-        if (w, h) != (self.css_w, self.css_h):
-            self.set_css_size(w, h)
-            self.request_size()
-        controls.reattach_menu(self, overlay)
-        self.request_paint()
-
-    def detail_background_click(self, event):
-        target = self.press_view
-        while target is not None and target is not self.detail_view:
-            if target.interactive and type(target) not in (View, ui.CachedView) and not isinstance(target, ScrollView):
-                return True
-            target = target.parent
-        self.close_detail()
-        return True
-
-    def close_detail(self, animate=True):
-        v = self.detail_view
-        if v is None:
-            return
-        self.detail.tile = None
-        self.detail_view = None
-        self.closing_detail = v
-        self.root.no_hit = False
-        self.close_popup()
-
-        def gone():
-            if self.detail_view is None:
-                candidates = self.home.tile_views() if self.home else self.tiles_views
-                for tile in candidates:
-                    tile.transition_hidden = False
-            if getattr(self, "closing_detail", None) is v:
-                self.closing_detail = None
-            self.layer.remove(v)
-            if self.detail_view is None and self.base_css and self.base_css != (self.css_w, self.css_h):
-                self.set_css_size(*self.base_css)
-                self.request_size()
-            self.request_paint()
-        if animate:
-            v.no_hit = True
-            v.animate(DETAIL_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0, progress=0.0, done=gone)
-            self.root.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0)
-        else:
-            v.stop_animation()
-            self.root.stop_animation()
-            self.root.alpha, self.root.zoom, self.root.blur = 1.0, 1.0, 0.0
-            gone()
-        self.invalidate_glass()
-
-    def _area_of(self, entity_id):
-        """The room a device is in, as the Home panel knows it ("" in the tile panel)."""
-        e = self.model.entity_by_id(entity_id)
-        return (e or {}).get("area") or ""
-
-    def _in_detail(self, view):
-        v = view
-        while v is not None:
-            if v is self.detail_view:
-                return True
-            v = v.parent
-        return False
-
     # -- the glass behind the card ------------------------------------------------------------------------------------
     def glass_tiles(self):
         out = []
@@ -631,30 +484,7 @@ class PanelScene(OverlayScene):
     def shown_up(self):
         self.start_glass()
 
-    def _vsync_motion(self):
-        """The panel's coming and going is paced by the desktop's compositions; everything else keeps its clock."""
-        self.tweens.timer.vsync = True
-
     # -- the slide done by the desktop's compositor (nativeui/dcomp.py) ---------------------------------------------
-
-    def _cancel_compositor(self):
-        """Discard the previous presentation before changing its appearance or showing again."""
-        self._slide_timer.stop()
-        if self._sliding is not None or self._compositor_resting:
-            slider = self._compositor_slider or dcomp.slider()
-            if slider is not None:
-                slider.hide()
-        self._sliding = None
-        self._compositor_resting = False
-        self._compositor_geometry = None
-        self._compositor_slider = None
-        self._compositor_capture = None
-        self._compositor_epoch += 1
-        self._compositor_raw = None
-        self._flyout_picture = self._flyout_glass = None
-        self._deferred_glass = False
-        self.moving = False
-        self.tweens.cancel(self)
 
     def prepare_for_show(self):
         if (self._sliding is not None and self._sliding[0] in ("enter", "leave")
@@ -672,214 +502,6 @@ class PanelScene(OverlayScene):
     def stop(self):
         self._cancel_compositor()
         super().stop()
-
-    def _slide_layers(self, size, at=None):
-        """Separate desktop glass and foreground pictures in physical window pixels."""
-        def picture(image):
-            image = image.convertToFormat(QImage.Format_ARGB32_Premultiplied)
-            image.setDevicePixelRatio(1.0)          # (its pixels are the window's, whatever scale it was made at)
-            if (image.width(), image.height()) != size:
-                # (the window can be a pixel larger than what is drawn: it is drawn from the corner, not stretched)
-                canvas = QImage(size[0], size[1], QImage.Format_ARGB32_Premultiplied)
-                canvas.fill(Qt.transparent)
-                painter = QPainter(canvas)
-                painter.drawImage(0, 0, image)
-                painter.end()
-                image = canvas
-            return image
-        # self.glass is already cut to the resting card. It must never be the
-        # stationary animation background: its old bottom corners would remain
-        # visible inside the moving card even with a correct outer clip.
-        source = self.latest if self.custom_bg() or not self._liquid_glass() else self.raw_latest
-        if source is None:
-            source = self.glass
-        glass = None
-        source_height = self.ph
-        if (at is not None and (size[1] > self.ph or self._liquid_glass())
-                and not self.custom_bg() and not self.system_glass):
-            capture = getattr(self.api, "get_desktop_backdrop", None)
-            try:
-                shot = capture("flyout", None, size[0], size[1], at[0], at[1], 0) if capture else None
-            except Exception:
-                shot = None
-            if shot and shot.get("blur_raw"):
-                source = QImage(shot["blur_raw"], shot["blur_w"], shot["blur_h"],
-                                shot["blur_w"] * 3, QImage.Format_RGB888).copy()
-                source_height = size[1]
-                self._compositor_background = ((*at, *size), source)
-            else:
-                cached = self._compositor_background
-                if cached is not None and cached[0] == (*at, *size):
-                    source, source_height = cached[1], size[1]
-        if source is not None and not self.system_glass:
-            glass = QImage(size[0], size[1], QImage.Format_ARGB32_Premultiplied)
-            glass.fill(Qt.transparent)
-            painter = QPainter(glass)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            painter.drawImage(QRectF(0, 0, self.pw, source_height), source)
-            if source_height < size[1]:
-                # A capture may still be arming. Keep an opaque blurred continuation
-                # until the screen edge instead of reusing the old rounded mask.
-                painter.drawImage(QRectF(0, source_height, self.pw, size[1] - source_height), source,
-                                  QRectF(0, source.height() - 1, source.width(), 1))
-            painter.end()
-        card = picture(self.content_image())
-        return glass, card
-
-    def _time_slide(self, milliseconds):
-        self._slide_deadline = time.monotonic() + milliseconds / 1000
-        self._slide_timer.start(milliseconds)
-
-    def _finish_slide_if_due(self):
-        remaining = self._slide_deadline - time.monotonic()
-        if self._sliding is None:
-            return
-        if remaining > 0:
-            self._slide_timer.start(max(1, int(remaining * 1000) + 1))
-            return
-        self._finish_slide()
-
-    def _refresh_compositor_background(self):
-        """Refresh screen pixels while retaining surfaces and the motion curve."""
-        rect, slider = self._compositor_capture, self._compositor_slider
-        if rect is None or slider is None or slider.material is None:
-            return
-        self._compositor_epoch += 1
-        self._compositor_raw = None
-        slider.pending_glass = None
-        self._compositor_presented_at = time.monotonic()
-        capture = getattr(self.api, "get_desktop_backdrop", None)
-        try:
-            shot = capture("flyout", None, rect[2], rect[3], rect[0], rect[1], 0) if capture else None
-        except Exception:
-            shot = None
-        if shot and shot.get("blur_raw"):
-            image = QImage(shot["blur_raw"], shot["blur_w"], shot["blur_h"],
-                           shot["blur_w"] * 3, QImage.Format_RGB888).copy()
-            self._compositor_background = (rect, image)
-            self._compositor_presented_at = time.monotonic()
-            slider.queue_glass(image)
-        self.force.set()
-        self.sample_now.set()
-
-    def _reverse_compositor(self, entering):
-        slider = self._compositor_slider
-        kind = self._sliding
-        if (kind is None or kind[0] not in ("enter", "leave")
-                or slider is None or not slider.shown):
-            return False
-        desired = "enter" if entering else "leave"
-        self._refresh_compositor_background()
-        if kind[0] == desired:
-            return True
-        offset = slider.motion_offset()
-        far = slider.size[1] + 24
-        target = 0.0 if entering else far
-        base = ENTER_MS if entering else LEAVE_MS
-        duration = max(25, round(base * min(1, abs(target - offset) / far)))
-        self._slide_timer.stop()
-        slider.slide(offset, target, duration / 1000, ENTER_CURVE if entering else LEAVE_CURVE)
-        self._sliding = (desired, duration)
-        self._time_slide(duration + 30)
-        return True
-
-    def _compositor_slide(self, entering):
-        """Slide the panel in or out by the compositor. False where that cannot be (the caller draws it itself)."""
-        if self._reverse_compositor(entering):
-            return True
-        slider = None if self.system_glass else dcomp.slider()     # (a glass the desktop draws is not in a picture)
-        hwnd = self.cache_hwnd()
-        rect = dcomp.window_rect(hwnd) if hwnd else None
-        if slider is None or rect is None or rect[2] < 2 or rect[3] < 2:
-            return False
-        self._finish_slide()                                        # one already going is taken to its end
-        self._compositor_slider = slider
-        self._compositor_resting = False
-        try:
-            monitor = screens.monitor_at(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
-            if monitor is not None:
-                # Extend only to the work area's edge, leaving the taskbar uncovered.
-                # The panel keeps its resting size throughout state updates.
-                rect = (rect[0], rect[1], rect[2], max(rect[3], monitor.work[3] - rect[1]))
-            glass, card = self._slide_layers((rect[2], rect[3]), at=rect[:2])
-            radius = min(self.card_radius(), self.css_w / 2, self.css_h / 2) * self.scale
-            outline = render.squircle(0, 0, self.css_w * self.scale, self.css_h * self.scale, radius)
-            columns = dcomp.outline_columns([(p.x(), p.y()) for p in outline.toFillPolygon()],
-                                            self.css_w * self.scale, self.css_h * self.scale, radius)
-            far = rect[3] + 24                                      # behind the taskbar and the screen's edge
-            material = None
-            if glass is not None and self._liquid_glass() and not self.custom_bg():
-                material = dict(size=(self.css_w * self.scale, self.css_h * self.scale), radius=radius,
-                                level=self.liquid_level, scale=self.scale, tiles=self.glass_tiles())
-            self.moving = True                                      # the glass sampler leaves the processor alone
-            self._compositor_capture = rect if material is not None else None
-            self._compositor_epoch += 1
-            self._compositor_since = time.monotonic()
-            self._compositor_presented_at = self._compositor_since
-            self._compositor_raw = None
-            self.sample_now.set()
-            if entering:
-                # A reused native window may still hold the previous resting
-                # bitmap. Clear it before the moving compositor is shown.
-                self.anim_alpha = 0.0
-                self.repaint()
-                slider.show(rect, glass, card, far, radius, above=hwnd, columns=columns, liquid=material)
-                slider.slide(far, 0.0, ENTER_MS / 1000, ENTER_CURVE)
-                self._sliding = ("enter", ENTER_MS)
-            else:
-                # Commit the helper and clear the native foreground before
-                # waiting for a desktop frame: waiting between them doubles tint.
-                slider.show(rect, glass, card, 0.0, radius, above=hwnd, columns=columns,
-                            liquid=material, wait=False)
-                self.anim_alpha = 0.0
-                self.repaint()
-                slider.slide(0.0, far, LEAVE_MS / 1000, LEAVE_CURVE)
-                self._sliding = ("leave", LEAVE_MS)
-        except Exception:
-            import traceback
-            dcomp.disable(traceback.format_exc())
-            self._sliding = None
-            self._compositor_capture = None
-            self.moving = False
-            return False
-        self._time_slide(self._sliding[1] + 30)
-        return True
-
-    def _finish_slide(self):
-        """Finish motion; live liquid glass keeps the same compositor beneath native controls."""
-        kind = self._sliding
-        if kind is None:
-            return
-        self._sliding = None
-        if kind[0] != "enter":
-            self._compositor_capture = None
-            self._compositor_epoch += 1
-            self._compositor_raw = None
-            self.force.set()
-        self._slide_timer.stop()
-        slider = self._compositor_slider or dcomp.slider()
-        if kind[0] == "enter":
-            if slider is not None and slider.material is not None and self._compositor_capture is not None:
-                self._compositor_resting = True
-                self._compositor_geometry = self._resting_geometry()
-                self.anim_alpha, self.anim_dy = 1.0, 0.0
-                self._settled()
-                self.repaint()
-                slider.settle_glass(self.cache_hwnd())
-                return
-            self.anim_alpha, self.anim_dy = 1.0, 0.0
-            self._settled()                                         # apply deferred glass before exposing the resting window
-            self.repaint()                                          # under the helper, which goes once this is there
-            if slider is not None:
-                slider.next_composition()
-                slider.fade_out(.060)
-                self._sliding = ("handoff", 60)
-                self._time_slide(75)
-        else:
-            if slider is not None:
-                slider.hide()
-            if kind[0] != "handoff":
-                self._left()
 
     def flyout_enter(self):
         if self._compositor_slide(True):
@@ -1038,61 +660,6 @@ class PanelScene(OverlayScene):
         else:
             self.close_detail()
 
-
-
-class Backing(View):
-    """What a detail stands on in the panel: the panel's shape, tinted so its words read over any desktop."""
-
-    def __init__(self, x, y, w, h, panel):
-        super().__init__(x, y, w, h)
-        self.panel = panel
-
-    def paint(self, p):
-        p.setPen(Qt.NoPen)
-        p.setBrush(style.readable_backing(self.scene.theme))
-        p.drawPath(render.squircle(0, 0, self.w, self.h, self.panel.card_radius()))
-
-
-class MorphBacking(Backing):
-    """A source tile expands into the detail; text stays at its final size behind the moving clip."""
-    def __init__(self, x, y, w, h, panel, origin):
-        super().__init__(x, y, w, h, panel)
-        self.origin = origin
-        self.progress = 1.0
-
-    def frame(self):
-        t = max(0.0, min(1.0, self.progress))
-        source = self.origin[0] if self.origin else QRectF(self.w * .01, self.h * .01, self.w * .98, self.h * .98)
-        return QRectF(source.x() * (1-t), source.y() * (1-t),
-                      source.width() + (self.w-source.width()) * t,
-                      source.height() + (self.h-source.height()) * t)
-
-    def paint_tree(self, p):
-        if not self.visible:
-            return
-        t = max(0.0, min(1.0, self.progress))
-        rect = self.frame()
-        radius = min(32, rect.height() / 2) * (1-t) + self.panel.card_radius() * t
-        p.save()
-        p.translate(self.x, self.y)
-        p.setClipPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
-        opacity = p.opacity()
-        if self.origin and not self.origin[1].isNull() and t < 1:
-            p.setOpacity(opacity * max(0.0, 1-4*t))
-            p.drawImage(rect, self.origin[1])
-        p.setOpacity(opacity * t)
-        p.setPen(Qt.NoPen)
-        p.setBrush(style.readable_backing(self.scene.theme))
-        p.drawPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
-        for child in self.children:
-            child.paint_tree(p)
-        p.restore()
-
-    def hit(self, x, y):
-        got = super().hit(x, y)
-        if got is not self and not self.frame().contains(QPointF(x-self.x, y-self.y)):
-            return self if not self.no_hit else None
-        return got
 
 
 def create_panel(api):

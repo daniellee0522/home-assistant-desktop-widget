@@ -14,6 +14,7 @@ from ctypes import wintypes
 
 import pystray
 from PIL import Image, ImageDraw, ImageFont
+from core import diag
 from core.version import running_version
 
 # Segoe Fluent Icons (Windows 11), then Segoe MDL2 Assets (Windows 10).
@@ -121,7 +122,7 @@ def _follow_taskbar_theme(icon):
                     state["light"] = now
                     icon.icon = _make_image(now)
             except Exception:
-                pass
+                diag.note("following the taskbar's light or dark")
             time.sleep(5.0)
 
     threading.Thread(target=loop, daemon=True).start()
