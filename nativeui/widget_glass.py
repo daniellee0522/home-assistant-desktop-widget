@@ -340,9 +340,20 @@ class Controller:
             self.surface.update()
 
     def fail(self, reason):
+        device = self.compositor.device if self.compositor is not None else None
         self.close()
         s = self.surface
-        s._gpu_failed = True
+        if device_lost(reason):
+            # The display driver was reset (a TDR) or the device went with a display: every card on it is lost.
+            # The native glass stands in until a new device is made, a few seconds on. The cards sharing the
+            # device go with it, so that the new ones do not share the dead one.
+            _schedulers.clear()             # their vblank waits are on the old device's outputs
+            retry_later(s)
+            for other in [c for c in _controllers if c.compositor is not None and c.compositor.device == device]:
+                if other.surface._gpu_receiver is other:
+                    other.fail(reason)
+        else:
+            s._gpu_failed = True
         s._gpu_receiver = None
         s.reset_glass()
         s.invalidate_glass()
@@ -365,10 +376,40 @@ class Controller:
         self.visible = False
 
 
+# Direct3D's "the device is gone" codes: removed, hung, reset, the driver's own failure.
+_DEVICE_LOST = ('0x887A0005', '0x887A0006', '0x887A0007', '0x887A0020')
+RETRY_FIRST_S, RETRY_LAST_S = 3.0, 60.0
+
+
+def device_lost(reason):
+    return any(code in reason for code in _DEVICE_LOST)
+
+
+def retry_later(surface):
+    """Try the GPU glass of `surface` again after a lost device: 3 seconds on, twice as long after each loss in a row
+    (a driver that keeps resetting), at most a minute. A loss more than ten minutes after the last starts again at 3."""
+    now = time.monotonic()
+    losses = getattr(surface, '_gpu_losses', 0)
+    if now - getattr(surface, '_gpu_lost_at', 0.0) > 600:
+        losses = 0
+    surface._gpu_losses, surface._gpu_lost_at = losses + 1, now
+    delay = min(RETRY_LAST_S, RETRY_FIRST_S * 2 ** losses)
+    surface._gpu_retry_at = now + delay
+
+    def retry():
+        try:
+            if surface._gpu_receiver is None and surface.isVisible():
+                prepare(surface)
+        except RuntimeError:                # the card was closed meanwhile
+            pass
+    QTimer.singleShot(round(delay * 1000) + 50, retry)
+
+
 def allowed(surface):
     return (os.name == 'nt' and os.environ.get('HA_WIDGET_GPU') != '0'
             and not surface.system_glass
             and not getattr(surface, '_gpu_failed', False)
+            and time.monotonic() >= getattr(surface, '_gpu_retry_at', 0.0)
             and getattr(surface.api, 'gpu_widget_glass_allowed', lambda kind: False)(surface.kind))
 
 
@@ -409,8 +450,12 @@ def prepare(surface):
                     from .widget_capture import register
                     register(surface)
             except Exception:
-                surface._gpu_failed = True
-                dcomp._log('Widget compositor unavailable:\n' + traceback.format_exc())
+                reason = traceback.format_exc()
+                if device_lost(reason):
+                    retry_later(surface)        # made while the driver was being reset
+                else:
+                    surface._gpu_failed = True
+                dcomp._log('Widget compositor unavailable:\n' + reason)
         else:
             receiver.queue(foreground=True)
     elif receiver is not None:

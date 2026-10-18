@@ -12,7 +12,7 @@ import traceback
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QImage, QPainter
 
-from . import appearance, controls, render, style
+from . import appearance, controls, morph, render, style
 from .overlay import OverlayScene, create_overlay
 from .ui import Button, ScrollView, TextField, View
 from .detail_builders import BODY_W, BODY_X, DETAIL, TALL_H, TALL_MIN, build_readout
@@ -356,12 +356,13 @@ class PageHolder(View):
             painter = QPainter(image)
             painter.setRenderHints(QPainter.Antialiasing|QPainter.TextAntialiasing|QPainter.SmoothPixmapTransform)
             painter.scale(scale,scale)
-            x,y,alpha = self.x,self.y,self.alpha
-            self.x,self.y,self.alpha = 0,0,1
+            # the picture is of the page at rest: where the morph puts it (dx, dy, zoom) is applied when it is drawn
+            placed = self.x,self.y,self.dx,self.dy,self.zoom,self.alpha
+            self.x,self.y,self.dx,self.dy,self.zoom,self.alpha = 0,0,0,0,1,1
             try:
                 View.paint_tree(self,painter)
             finally:
-                self.x,self.y,self.alpha = x,y,alpha
+                self.x,self.y,self.dx,self.dy,self.zoom,self.alpha = placed
                 painter.end()
             self._page_cache = image
 
@@ -371,7 +372,9 @@ class PageHolder(View):
         self.prepare_cache()
         p.save()
         p.setOpacity(p.opacity()*self.alpha)
-        p.drawImage(QRectF(self.x+self.dx,self.y+self.dy,self.w,self.h),self._page_cache)
+        w,h = self.w*self.zoom,self.h*self.zoom
+        x,y = self.x+self.dx+(self.w-w)*self.zoom_origin[0],self.y+self.dy+(self.h-h)*self.zoom_origin[1]
+        p.drawImage(QRectF(x,y,w,h),self._page_cache)
         p.restore()
 
 
@@ -463,18 +466,69 @@ class DetailCard(OverlayScene):
         super()._paint_now()
 
     def transition_glass_opacity(self):
-        return max(0.0, min(1.0, self.progress)) if self.transition_bounds is not None else 1.0
+        return morph.card_alpha(self.progress) if self.transition_bounds is not None else 1.0
 
     def transition_frame(self):
         target = QRectF(self.page_frame.x, self.page_frame.y, self.page_frame.w, self.page_frame.h)
         if self.transition_bounds is None:
             return target
-        source = self.transition_bounds[0]
-        t = max(0.0, min(1.0, self.progress))
-        return QRectF(source.x() + (target.x()-source.x()) * t,
-                      source.y() + (target.y()-source.y()) * t,
-                      source.width() + (target.width()-source.width()) * t,
-                      source.height() + (target.height()-source.height()) * t)
+        return morph.frame(self.transition_bounds[0], target, self.progress)
+
+    def apply_morph(self):
+        """While the card comes from or goes back to its tile, what is on it fades in its place, and its control comes
+        out of the tile's icon (morph.py)."""
+        holder = getattr(self, "page_holder", None)
+        if self.transition_bounds is None or holder is None or holder.parent is not self.root:
+            return
+        self.root.alpha = morph.content_alpha(self.progress)
+        if self.tile_icon() is not None:
+            morph.carry(holder, self.progress)
+        if self.tile is None and self.progress <= morph.LANDED and not getattr(self, "landing_told", True):
+            self.landing_told = True            # another tile's card may be waiting for this one to be back
+            told = getattr(self.api, "popover_landed", None)
+            if told:
+                threading.Thread(target=told, daemon=True).start()
+
+    def content_clipped(self):
+        return self.transition_bounds is None or self.progress >= 1
+
+    def paint_root(self, p):
+        if self.content_clipped() or self.page_targets is None:
+            super().paint_root(p)
+            return
+        morph.paint_revealed(p, self.transition_frame(), self.detail_radius(), QRectF(0, 0, self.css_w, self.css_h),
+                             self.root.paint_tree)
+
+    def paint_over_root(self, p):
+        holder = getattr(self, "page_holder", None)
+        icon = self.tile_icon() if holder is not None and holder.parent is self.root else None
+        if icon is not None:
+            morph.paint_hero(p, holder, self.progress, *icon)
+
+    def source_picture(self):
+        """The tile's picture the card grows from, without its icon while that is carried (morph.without_icon)."""
+        image = self.transition_source[1] if self.transition_source else None
+        icon = self.tile_icon()
+        if image is None or icon is None:
+            return image
+        key = (image.cacheKey(), icon[0])
+        if getattr(self, "_source_picture", (None, None))[0] != key:
+            self._source_picture = (key, morph.without_icon(image, self.transition_bounds[0], icon[0]))
+        return self._source_picture[1]
+
+    def tile_icon(self):
+        """Where the tile's icon is on the widget and how it is drawn there: the card's control grows out of it."""
+        surf = getattr(self, "source_surface", None)
+        if surf is None or self.transition_bounds is None or getattr(surf, "wkind", None) != "tiles":
+            return None
+        index = next((i for i, t in enumerate(surf.tiles) if t["id"] == self.source_tile_id), len(surf.rects))
+        if index >= len(surf.rects):
+            return None
+        tile, form, (_, _, w, h) = surf.tiles[index], surf.form, surf.rects[index]
+        source, state, theme, tcol = self.transition_bounds[0], surf.states.get(tile["entity"]), surf.theme, surf.tcol
+        at, f = render.tile_icon_at(form, 0, 0, w, h), self.transition_bounds[0].width() / max(1.0, w)
+        rect = QRectF(source.x() + at.x() * f, source.y() + at.y() * f, at.width() * f, at.height() * f)
+        return rect, lambda p, r: render.draw_tile_icon_in(p, tile, state, form, r, theme, tcol)
 
     def transition_clip(self):
         if self.page_targets is None:
@@ -503,13 +557,14 @@ class DetailCard(OverlayScene):
             render.draw_card_bg(p, self.css_w, self.css_h, self.t, self.style, self.theme,
                                 radius=self.t["radius_tile"], plain=True)
             return
+        self.apply_morph()
         target = self.transition_frame()
         t = self.transition_glass_opacity()
-        image = self.transition_source[1] if self.transition_source else None
+        image = self.source_picture()
         p.save()
-        if image is not None and not image.isNull() and t < 1:
-            p.setOpacity(p.opacity() * max(0.0, 1-4*t))
-            p.drawImage(self.transition_frame(), image)
+        if image is not None and not image.isNull() and self.progress < 1:
+            p.setOpacity(p.opacity() * morph.tile_alpha(self.progress))
+            p.drawImage(target, image)
         p.restore()
         p.save()
         p.setOpacity(p.opacity() * t)
@@ -533,6 +588,7 @@ class DetailCard(OverlayScene):
         self.page_targets = None
         self.detail_fits.clear()
         self.tweens.cancel(self.page_frame)
+        self.tweens.cancel(self)                  # the last card's morph must not go on driving this one's
         self.progress = 0.0 if anchor else 1.0
 
     def set_owner(self, kind):
@@ -569,8 +625,9 @@ class DetailCard(OverlayScene):
 
     def enter(self):
         if self.transition_bounds is not None:
-            self.tweens.animate(self, {"progress": 1.0}, 360, "spring", None)
-            self.root.animate(360, "spring", alpha=1.0, dy=0.0)
+            self.root.stop_animation()
+            self.root.dy = 0.0
+            self.tweens.animate(self, {"progress": 1.0}, morph.OPEN_MS, "spring", None)
         else:
             self.root.animate(150, "out", alpha=1.0, dy=0.0)
 
@@ -583,9 +640,9 @@ class DetailCard(OverlayScene):
             if image is not None and not image.isNull():
                 self.transition_source = (self.transition_source[0], image)
         self.content.tile = None
+        self.landing_told = False
         self.close_popup()
         threading.Thread(target=lambda: self.api.set_popover_activatable(False), daemon=True).start()
-        self.root.animate(150, "out", alpha=0.0, dy=6.0)
 
         generation = getattr(self, "transition_generation", None)
         def finish():
@@ -593,9 +650,9 @@ class DetailCard(OverlayScene):
                 close = (lambda: self.api.close_popover(expected_generation=generation)) if generation is not None else self.api.close_popover
                 threading.Thread(target=close, daemon=True).start()
         if self.transition_bounds is not None:
-            self.root.animate(360, "spring", alpha=0.0, dy=0.0)
-            self.tweens.animate(self, {"progress": 0.0}, 360, "spring", finish)
+            self.tweens.animate(self, {"progress": 0.0}, morph.CLOSE_MS, "spring", finish)
         else:
+            self.root.animate(150, "out", alpha=0.0, dy=6.0)
             QTimer.singleShot(170, finish)
 
     def escape(self):
@@ -750,8 +807,9 @@ class DetailCard(OverlayScene):
             holder.alpha = previous_holder.alpha
             self.tweens.replace_view(previous_holder, holder)
         self.page_holder = holder
-        if not changing_page:
-            controls.preserve_controls(self, old_tree, holder)
+        if not changing_page and getattr(self, "built_tile", None) == self.tile["id"]:
+            controls.preserve_controls(self, old_tree, holder)   # (another tile's controls are not this one's)
+        self.built_tile = self.tile["id"]
         controls.reattach_menu(self, view)      # a menu open over it stays, over the new card
         holder.prepare_cache()
         if changing_page:

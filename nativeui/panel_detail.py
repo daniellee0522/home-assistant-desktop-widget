@@ -3,7 +3,7 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
 
 from . import render, ui
-from . import controls, style
+from . import controls, morph, style
 from .detail import CARD_W
 from .ui import ScrollView, View
 
@@ -15,7 +15,7 @@ DETAIL_SCALE = 1 / FLYOUT_ZOOM
 DETAIL_MARGIN = 14
 
 
-DETAIL_MS = 320
+DETAIL_MS = morph.OPEN_MS
 
 
 class Backing(View):
@@ -32,38 +32,49 @@ class Backing(View):
 
 
 class MorphBacking(Backing):
-    """A source tile expands into the detail; text stays at its final size behind the moving clip."""
+    """A source tile grows into the detail, its control coming out of the tile's icon (morph.py)."""
     def __init__(self, x, y, w, h, panel, origin):
         super().__init__(x, y, w, h, panel)
         self.origin = origin
         self.progress = 1.0
 
     def frame(self):
-        t = max(0.0, min(1.0, self.progress))
         source = self.origin[0] if self.origin else QRectF(self.w * .01, self.h * .01, self.w * .98, self.h * .98)
-        return QRectF(source.x() * (1-t), source.y() * (1-t),
-                      source.width() + (self.w-source.width()) * t,
-                      source.height() + (self.h-source.height()) * t)
+        return morph.frame(source, QRectF(0, 0, self.w, self.h), self.progress)
 
     def paint_tree(self, p):
         if not self.visible:
             return
-        t = max(0.0, min(1.0, self.progress))
+        t = morph.progress(self.progress)
         rect = self.frame()
-        radius = min(32, rect.height() / 2) * (1-t) + self.panel.card_radius() * t
+        radius = morph.radius(min(32, rect.height() / 2), self.panel.card_radius(), t)
+        icon = getattr(self.panel, "detail_icon", None)
+        if icon is not None and self.children:
+            morph.carry(self.children[0], t)
         p.save()
         p.translate(self.x, self.y)
-        p.setClipPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
         opacity = p.opacity()
+        p.save()
+        p.setClipPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
         if self.origin and not self.origin[1].isNull() and t < 1:
-            p.setOpacity(opacity * max(0.0, 1-4*t))
+            p.setOpacity(opacity * morph.tile_alpha(t))
             p.drawImage(rect, self.origin[1])
-        p.setOpacity(opacity * t)
+        p.setOpacity(opacity * morph.card_alpha(t))
         p.setPen(Qt.NoPen)
         p.setBrush(style.readable_backing(self.scene.theme))
         p.drawPath(render.squircle(rect.x(), rect.y(), rect.width(), rect.height(), radius))
-        for child in self.children:
-            child.paint_tree(p)
+        p.restore()
+        # what is on the card stands where it will be and comes into sight as the card reaches it (morph.py)
+        p.setOpacity(opacity * morph.content_alpha(t))
+        if t < 1:
+            morph.paint_revealed(p, rect, radius, QRectF(0, 0, self.w, self.h),
+                                 lambda q: [child.paint_tree(q) for child in self.children])
+        else:
+            for child in self.children:
+                child.paint_tree(p)
+        if icon is not None and self.children:
+            p.setOpacity(opacity)
+            morph.paint_hero(p, self.children[0], t, *icon)
         p.restore()
 
     def hit(self, x, y):
@@ -86,14 +97,15 @@ class PanelDetail:
             if source is None:
                 candidates = self.home.tile_views() if self.home else self.tiles_views
                 source = next((v for v in candidates if v.tile["id"] == tile_id), None)
-            self.detail_origin = None
+            self.detail_origin = self.detail_icon = None
             if source is not None:
                 x, y, k = source.in_scene()
                 rect = QRectF(x, y, source.w * k, source.h * k)
                 image = self.grab().toImage()
                 crop = QRectF(rect.x() * self.scale, rect.y() * self.scale,
                               rect.width() * self.scale, rect.height() * self.scale).toAlignedRect()
-                self.detail_origin = (rect, image.copy(crop))
+                self.detail_icon = self.tile_icon(source, x, y, k)
+                self.detail_origin = (rect, morph.without_icon(image.copy(crop), rect, self.detail_icon[0]))
                 self.detail_source_id = tile_id
                 source.transition_hidden = True
         if not self.detail.open(tile_id):
@@ -115,6 +127,14 @@ class PanelDetail:
                 v.alpha, v.zoom, v.blur, v.progress = 0.0, 1.0, 0.0, 0.0
             v.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0, progress=1.0)
             self.invalidate_glass()               # the liquid glass no longer blurs behind each tile
+
+    def tile_icon(self, source, x, y, k):
+        """Where the tile's icon is and how it is drawn: the card's control grows out of it (morph.paint_hero)."""
+        tile, state, form, dim = source.tile, source.state, source.form, source.dim
+        theme, tcol = self.theme, render.tokens(self.theme, source.dim, self.style)
+        at = render.tile_icon_at(form, 0, 0, source.w, source.h)
+        rect = QRectF(x + at.x() * k, y + at.y() * k, at.width() * k, at.height() * k)
+        return rect, lambda p, r: render.draw_tile_icon_in(p, tile, state, form, r, theme, tcol, dim)
 
     def layout_detail(self):
         """(Re)build the detail over the tiles, and size the panel for it."""
@@ -143,8 +163,10 @@ class PanelDetail:
         holder.on_click = lambda e: self.detail_background_click(e)
         holder.add(content)
         overlay.add(holder)
+        overlay.tile_id = self.detail.tile["id"]
         if old is not None:
-            controls.preserve_controls(self, old, overlay)
+            if getattr(old, "tile_id", None) == overlay.tile_id:     # (another tile's controls are not this one's)
+                controls.preserve_controls(self, old, overlay)
             overlay.alpha, overlay.zoom, overlay.blur = old.alpha, old.zoom, old.blur
             overlay.progress = old.progress
             self.tweens.replace_view(old, overlay)
@@ -194,8 +216,8 @@ class PanelDetail:
             self.request_paint()
         if animate:
             v.no_hit = True
-            v.animate(DETAIL_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0, progress=0.0, done=gone)
-            self.root.animate(DETAIL_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0)
+            v.animate(morph.CLOSE_MS, "spring", alpha=0.0, zoom=1.0, blur=0.0, progress=0.0, done=gone)
+            self.root.animate(morph.CLOSE_MS, "spring", alpha=1.0, zoom=1.0, blur=0.0)
         else:
             v.stop_animation()
             self.root.stop_animation()

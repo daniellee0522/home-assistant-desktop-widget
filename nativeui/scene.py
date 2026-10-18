@@ -402,7 +402,10 @@ class Scene(GlassMixin, QWidget):
                 if clip is not None:
                     q.setClipPath(clip)
                 self.paint_card(q)
-                self.root.paint_tree(q)
+                if clip is not None and not self.content_clipped():
+                    q.setClipping(False)
+                self.paint_root(q)
+                self.paint_over_root(q)
                 q.restore()
                 self.layer.paint_tree(q)
             finally:
@@ -413,6 +416,17 @@ class Scene(GlassMixin, QWidget):
 
     def paint_card(self, p):
         """The card's own tint and rims, under everything."""
+
+    def content_clipped(self):
+        """Whether the views are cut by transition_clip as the card's own tint is (not while a card comes out of its
+        tile: morph.py)."""
+        return True
+
+    def paint_root(self, p):
+        self.root.paint_tree(p)
+
+    def paint_over_root(self, p):
+        """What is drawn over the views, under the floating panes (a card's control on its way from a tile: detail.py)."""
 
     def paint_blurred(self, view, p):
         """A view drawn through a blur: the subtree goes to a picture, the picture is blurred."""

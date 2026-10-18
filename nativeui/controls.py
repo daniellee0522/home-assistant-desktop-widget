@@ -63,6 +63,7 @@ def _text(p, text, f, color, x, y, align="l", w=0.0):
 class TallSlider(View):
     """A tall rounded bar filled from the bottom to the value (a light's brightness, a fan's speed, a
     cover's opening), with a short line at the top of the fill. Drag or press anywhere on it."""
+    hero = True                         # what the tile's icon becomes when its card opens (morph.py)
     cursor = Qt.PointingHandCursor
 
     def __init__(self, w, h, value, lo, hi, color, on_input=None, on_commit=None, step=1, gradient=None):
@@ -134,6 +135,7 @@ class TallSlider(View):
 
 class TallSwitch(View):
     """Binary control: direct drag, endpoint commit, or a faster tap along the same path."""
+    hero = True                         # what the tile's icon becomes when its card opens (morph.py)
     cursor = Qt.PointingHandCursor
 
     def __init__(self, w, h, on, color, icon, on_click):
@@ -260,6 +262,7 @@ def preserve_controls(scene, old, new):
 class Dial(View):
     """A thermostat's dial: a 270 degree arc with the set temperature on it to drag, a dot where the room
     is, and in the middle the mode and the set temperature."""
+    hero = True                         # what the tile's icon becomes when its card opens (morph.py)
     cursor = Qt.PointingHandCursor
     START, SWEEP = 225.0, 270.0
 

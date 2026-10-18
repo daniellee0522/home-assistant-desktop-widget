@@ -597,9 +597,24 @@ def draw_centred(p, text, f, color, rect):
                          rect.top() + (rect.height() - fm.height() / 10) / 2 + fm.ascent() / 10))
 
 
-def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
-    """What is on a tile, in the tile's own units (a big tile is these units
-    zoomed by 1.4), from its top-left corner."""
+def tile_icon_rect(form, cw, ch):
+    """Where a tile's icon (or its reading) is, in the tile's own units: draw_tile_icon draws it there, and a card
+    opened from the tile grows its control out of it (morph.py)."""
+    if form == "bar":
+        return bar_icon_rect(cw, ch)
+    pad, size = (18, 52) if form == "big" else (14, 40)
+    return QRectF(pad, pad, size, size)
+
+
+def tile_icon_at(form, x, y, w, h):
+    """tile_icon_rect of a tile drawn at (x, y, w, h), in the units it is drawn in (a big tile's are zoomed)."""
+    zoom = BIG_ZOOM if form == "big" else 1.0
+    r = tile_icon_rect(form, w / zoom, h / zoom)
+    return QRectF(x + r.x() * zoom, y + r.y() * zoom, r.width() * zoom, r.height() * zoom)
+
+
+def draw_tile_icon(p, tile, st, cw, ch, form, theme, tcol, dim):
+    """A tile's icon, its badge or its reading, at tile_icon_rect, in the tile's own units."""
     domain = tile["domain"]
     ok = st is not None
     on = ok and domain not in MOMENTARY and is_on(domain, st)
@@ -607,20 +622,12 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
     shown = climate_badge(st, on) if domain == "climate" and ok and not tile.get("icon") else None
     reading = shown if roomy else None
     badge = None if roomy else shown
-    readonly = is_readonly(domain)
-    value = tr(value_text(domain, st)) if ok and not badge and not reading else ""
-    readout = readonly and bool(value)
     c1 = tcol["on_text1"] if on else tcol["off_text1"]
-    c2 = tcol["on_text2"] if on else tcol["off_text2"]
-    label = tr(state_text(tile, st) if ok else "無法連線")
-    name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
     icolor = icon_color(tile, st, on, theme, tcol) if ok else tcol["off_text1"]
     if dim:
         icolor = (255, 255, 255, 0.95) if on else tcol["off_text1"]
-
-    # -- the icon ------------------------------------------------------
     if form == "bar":
-        disc_rect = bar_icon_rect(cw, ch)
+        disc_rect = tile_icon_rect(form, cw, ch)
         dx, dy = disc_rect.x(), disc_rect.y()
         if reading:
             text = reading["text"]               # "24°": a thermostat does not say whether it is °C or °F
@@ -642,9 +649,8 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
             p.drawEllipse(QRectF(dx, dy, 100, 100))
             draw_icon(p, icon_name(tile, st), glyph, QRectF(dx + 26, dy + 26, 48, 48))
     else:
-        pad = 18 if form == "big" else 14
-        size = 52 if form == "big" else 40
-        ix, iy = pad, pad
+        box = tile_icon_rect(form, cw, ch)
+        ix, iy, size = box.x(), box.y(), box.width()
         if reading:
             f = font(60, QFont.Bold, -0.5)
             fm = QFontMetricsF(f)
@@ -666,6 +672,38 @@ def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
             draw_centred(p, badge["text"], font(17.5, QFont.Bold), fg, box)
         else:
             draw_icon(p, icon_name(tile, st), icolor, QRectF(ix, iy, size, size))
+
+
+def draw_tile_icon_in(p, tile, st, form, rect, theme, tcol, dim=False):
+    """draw_tile_icon, its place on the tile put on `rect`."""
+    cw, ch = 152.0, 146.0
+    r = tile_icon_rect(form, cw, ch)
+    p.save()
+    p.translate(rect.x(), rect.y())
+    p.scale(rect.width() / r.width(), rect.height() / r.height())
+    p.translate(-r.x(), -r.y())
+    draw_tile_icon(p, tile, st, cw, ch, form, theme, tcol, dim)
+    p.restore()
+
+
+def draw_content(p, tile, st, cw, ch, form, theme, tcol, dim, hover=False):
+    """What is on a tile, in the tile's own units (a big tile is these units
+    zoomed by 1.4), from its top-left corner."""
+    domain = tile["domain"]
+    ok = st is not None
+    on = ok and domain not in MOMENTARY and is_on(domain, st)
+    roomy = form != "small"
+    shown = climate_badge(st, on) if domain == "climate" and ok and not tile.get("icon") else None
+    reading = shown if roomy else None
+    badge = None if roomy else shown
+    readonly = is_readonly(domain)
+    value = tr(value_text(domain, st)) if ok and not badge and not reading else ""
+    readout = readonly and bool(value)
+    c1 = tcol["on_text1"] if on else tcol["off_text1"]
+    c2 = tcol["on_text2"] if on else tcol["off_text2"]
+    label = tr(state_text(tile, st) if ok else "無法連線")
+    name = tile.get("room") or (st or {}).get("attributes", {}).get("friendly_name") or tile["entity"]
+    draw_tile_icon(p, tile, st, cw, ch, form, theme, tcol, dim)
 
     # -- the text ------------------------------------------------------
     if form == "bar":

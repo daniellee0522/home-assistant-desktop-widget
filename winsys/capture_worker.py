@@ -22,6 +22,9 @@ def _serve(connection):
         connection.close()
 
 
+_MAX_STUCK = 3
+
+
 class CaptureWorker:
     def __init__(self, timeout=1.5, startup_timeout=8.0):
         self.timeout = timeout
@@ -29,23 +32,32 @@ class CaptureWorker:
         self._lock = threading.Lock()
         self._process = None
         self._connection = None
+        self._stuck = []            # workers that would not end when told to, ended again at every stop
         self._retry_at = 0.0
         atexit.register(self.close)
 
     def _stop(self):
+        """End the worker. Never raises: one that will not end (stuck in a call to a hung window) is put aside
+        and ended again later, and the next grab starts a new one. It used to be kept, with its pipe closed, and
+        every grab after it failed until the program was started again: the widgets' glass was gone."""
         if self._connection is not None:
             self._connection.close()
             self._connection = None
-        if self._process is not None:
-            if self._process.pid is not None:
-                if self._process.is_alive():
-                    self._process.terminate()
-                self._process.join(timeout=1)
-            if self._process.is_alive():
-                # Keep ownership so the next cleanup can retry.
-                raise RuntimeError('capture worker did not terminate')
-            self._process.close()
-            self._process = None
+        process, self._process = self._process, None
+        if process is not None and process.pid is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+        if process is not None:
+            self._stuck.append(process)
+        for process in list(self._stuck):
+            try:
+                if process.pid is not None and process.is_alive():
+                    process.terminate()
+                    continue
+                process.close()
+            except (OSError, ValueError):
+                pass
+            self._stuck.remove(process)
 
     def grab(self, *args):
         # Other windows keep their last frame instead of queuing behind
@@ -56,6 +68,11 @@ class CaptureWorker:
             if time.monotonic() < self._retry_at:
                 return None
             if self._process is None:
+                if len(self._stuck) >= _MAX_STUCK:
+                    self._stop()            # a new one only once one of these has ended
+                    if len(self._stuck) >= _MAX_STUCK:
+                        self._retry_at = time.monotonic() + 2.0
+                        return None
                 ctx = multiprocessing.get_context('spawn')
                 self._connection, child = ctx.Pipe()
                 self._process = ctx.Process(target=_serve, args=(child,), daemon=True)

@@ -10,6 +10,10 @@ from winsys.windows import (
     apply_window_shape, bring_to_front, centre_on_window_monitor, set_noactivate, set_window_pos)
 
 
+# How long a second tile's card waits at most for the first to say it is back in its tile (popover_landed: ~120 ms).
+LAND_WAIT_S = 0.4
+
+
 class PopoverMixin:
     def _init_popover(self):
         self._popover_window = None
@@ -17,6 +21,7 @@ class PopoverMixin:
         self._popover_resize_lock = threading.Lock()
         self._popover_open_lock = threading.RLock()
         self._popover_generation = 0
+        self._popover_landed = threading.Event()   # set when a card's closing morph has come back to its tile
         # The tile the popover belongs to (x, y, w, h in physical pixels) and the last real size it took; see
         # _popover_origin.
         self._popover_anchor = None
@@ -46,6 +51,17 @@ class PopoverMixin:
             place_against(y, h, y, th or h, work[1], work[3]),
         )
 
+    def _state_of_tile(self, tile_id):
+        """(entity, its last known state) of a tile. The card is fitted to what it is first built with and keeps that
+        size, and a card window made just now reads its states only after it has opened: it is given this one first."""
+        if tile_id.startswith("home:"):
+            entity = tile_id[5:]
+            return entity, self._home_states.get(entity) or self._known_states.get(entity)
+        tiles = [t for w in self._cfg.get("widgets") or [] for t in w.get("tiles") or []]
+        tiles += (self._cfg.get("panel") or {}).get("tiles") or []
+        entity = next((t.get("entity") for t in tiles if t.get("id") == tile_id), None)
+        return entity, (self._known_states.get(entity) if entity else None)
+
     def open_popover(self, tile_id, screen_x, screen_y, tile_w=0, tile_h=0,
                      owner_kind=None, source_image=None):
         with self._popover_open_lock:
@@ -56,6 +72,8 @@ class PopoverMixin:
                       owner_kind=None, source_image=None):
         """Show the detail card over a tile. Coordinates are physical.
         `owner_kind` is the window the tile is in."""
+        if "popover" in self._overlays_open and self._popover_window:
+            self._close_open_card()
         if not self._ensure_overlay("popover"):
             return
         self._popover_owner = owner_kind
@@ -65,10 +83,9 @@ class PopoverMixin:
         # The card takes the theme of the window it opens from (the panel has
         # its own).
         self._popover_window.send("set_owner", owner_kind)
-        if tile_id.startswith("home:"):
-            state = self._home_states.get(tile_id[5:])
-            if state:
-                self._broadcast("push_states", [[tile_id[5:], state]], windows=(self._popover_window,))
+        entity, state = self._state_of_tile(tile_id)
+        if state:
+            self._broadcast("push_states", [[entity, state]], windows=(self._popover_window,))
         self._popover_anchor = (int(screen_x), int(screen_y), int(tile_w), int(tile_h))
         hwnd = get_hwnd(self._popover_window)
         if hwnd:
@@ -161,7 +178,22 @@ class PopoverMixin:
                 pass
         self._apply_capture_exclusion()
 
+    def _close_open_card(self):
+        """Another tile's card is up (a second right click): it goes back into its own tile as a card closes, and
+        then this one opens from its tile as from a closed card. Moved while shown, the old card showed at the new
+        tile until the new one was built, and jumped from its size down to the new tile's; hidden at once, its tile
+        came back without a motion."""
+        self._popover_landed.clear()
+        self._popover_window.send("close_card")
+        self._popover_landed.wait(LAND_WAIT_S)
+        self._close_popover()
+
+    def popover_landed(self):
+        """The card closing is back in its tile (it calls this before its spring has settled)."""
+        self._popover_landed.set()
+
     def close_popover(self, expected_generation=None):
+        self._popover_landed.set()              # (before the lock: an opening may be waiting for it, holding it)
         with self._popover_open_lock:
             if expected_generation is not None and expected_generation != self._popover_generation:
                 return False

@@ -188,6 +188,7 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
 
     def rebuild(self, keep_scroll=False):
         scroll = self.grid_scroll.offset if (keep_scroll and self.grid_scroll is not None) else 0.0
+        scrolls = self.home.kept_scrolls() if (keep_scroll and self.home is not None) else None
         self.root.clear()
         # the detail's own fields stay (its edit panel may be in the middle of a name)
         self.fields[:] = [f for f in self.fields if self._in_detail(f)]
@@ -196,7 +197,7 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
         self.home = None
         if self.mode == "home":
             from .homeview import HomeView
-            self.home = HomeView(self)
+            self.home = HomeView(self, scrolls)
             self.root.add(self.home)
             self.set_css_size(self.home.w, self.home.h)
         else:

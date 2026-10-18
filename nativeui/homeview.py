@@ -141,7 +141,9 @@ class MembershipButton(Button):
 
 
 class HomeView(EditMixin, View):
-    def __init__(self, panel):
+    def __init__(self, panel, scrolls=None):
+        """`scrolls`: where the view this one replaces was scrolled (kept_scrolls), so that the panel built again for
+        new preferences (as each move in edit mode saves them) shows the same place."""
         super().__init__(0, 0, W, H)
         self.panel = panel
         self.m = panel.model
@@ -152,8 +154,10 @@ class HomeView(EditMixin, View):
         self.sig = ""
         self.loading = False
         self.data_loaded = bool(self.m.entities)
-        self.body_scroll_keep = 0.0
-        self.cat_scroll_keep = 0.0
+        scrolls = scrolls or {}
+        self.body_scroll_keep = scrolls.get("body", 0.0)
+        self.cat_scroll_keep = scrolls.get("cat", 0.0)
+        self.summary_keep, self.rooms_keep = scrolls.get("summary", 0.0), scrolls.get("rooms", 0.0)
         self.build()
 
     # -- data ---------------------------------------------------------------------------------------------
@@ -237,6 +241,12 @@ class HomeView(EditMixin, View):
         self.layout_summary()
 
     # -- building -------------------------------------------------------------------------------------------------------
+    def kept_scrolls(self):
+        """Where each of its lists is scrolled, for a HomeView that takes its place."""
+        self.keep_scrolls()
+        return {"body": self.body_scroll_keep, "cat": self.cat_scroll_keep,
+                "summary": self.summary.offset, "rooms": self.rooms_row.offset}
+
     def keep_scrolls(self):
         body = getattr(self, "body", None)
         cat = getattr(self, "cat_view", None)
@@ -253,8 +263,8 @@ class HomeView(EditMixin, View):
         old_sheet = getattr(self, "sheet_view", None)
         self.sheet_view = None
         self.keep_scrolls()
-        summary_offset = getattr(getattr(self, "summary", None), "offset", 0)
-        rooms_offset = getattr(getattr(self, "rooms_row", None), "offset", 0)
+        summary_offset = getattr(getattr(self, "summary", None), "offset", self.summary_keep)
+        rooms_offset = getattr(getattr(self, "rooms_row", None), "offset", self.rooms_keep)
         self.clear()
         self.pills = {}
         self.status_labels = []
@@ -676,10 +686,10 @@ class HomeView(EditMixin, View):
             m.panel["hidden_chips"] = sorted(s)
             self.persist()
         else:
-            m.room = key
-        self.body_scroll_keep = 0
-        if getattr(self, "body", None) is not None:
-            self.body.scroll_to(0)
+            m.room = key                        # another room's list: from its top (hiding one keeps where it was)
+            self.body_scroll_keep = 0
+            if getattr(self, "body", None) is not None:
+                self.body.scroll_to(0)
         self.build()
         self.apply_category_state(animate=False)
         if changing:

@@ -418,6 +418,9 @@ class EditMixin:
         self.reorder = None
         if not r or not r["dragging"]:
             return True
+        # Let go over itself, the one dragged would take the release as a tap after this: a chip's tap hides its room,
+        # and showed the list from the top. A drop is not a tap.
+        el.on_click = lambda e: True
         container = r["moving"].parent
         x = r["axis"] == "x"
         shown = [c.key for c in container.children if getattr(c, "key", None) not in (None, "", OTHER_ROOM)] if x else \
