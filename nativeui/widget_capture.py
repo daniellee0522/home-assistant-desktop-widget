@@ -22,8 +22,9 @@ _pool = None
 
 class DesktopFrame:
     """A window's part of the desktop that stays on the GPU: the renderer copies it itself."""
-    def __init__(self, rect, pre_blur, copy, divide=1, rotation=None, covers=None, wallpaper=None):
+    def __init__(self, rect, pre_blur, copy, divide=1, rotation=None, covers=None, wallpaper=None, made=None):
         self.rect = tuple(rect)
+        self.made = made                  # which making of the screen's duplication it is taken from (None: not said)
         self.wallpaper = wallpaper        # () -> the desktop here without any window, as BGRA bytes (or None): used once, when a window is
                                           # over the widget before any picture without one has been drawn
         self.covers = covers              # () -> screen rectangles (l, t, r, b) of other programs' windows over it now; None: not asked
@@ -148,7 +149,8 @@ def publish(reader, shot, generation):
             return
         reader.digest, reader.taken, reader.quiet = shot.get('hash'), True, 0
         return s, DesktopFrame(shot['gpu'], shot.get('pre_blur', 0), shot['copy'], shot.get('divide', 1),
-                                         shot.get('rotation'), shot.get('covers'), shot.get('wallpaper')), generation
+                                         shot.get('rotation'), shot.get('covers'), shot.get('wallpaper'),
+                                         shot.get('made')), generation
     raw = shot.get('blur_raw')
     if not raw or abs(shot['w'] - s.pw) > 3 or abs(shot['h'] - s.ph) > 3:
         reader.digest = None

@@ -97,8 +97,9 @@ carries it over. Add a test that pushes a new state while it is active.
   frame, which the desktop takes up out of step with its refresh and which shows as steps. Where it cannot be had
   (`HA_WIDGET_DCOMP=0`, a glass the desktop draws, no hardware device) `PanelScene` draws the slide itself. The panel
   (and the card opened from it) is topmost while open, so that closing it can be seen over the program just clicked.
-  The desktop blends the translucent card over the glass by its own rule, so the panel differs slightly in brightness
-  over the slide; see the notes in `dcomp.py` before trying to remove that.
+  The desktop blends the translucent card over the glass by its own rule (in linear light with automatic colour
+  management), not Qt's, so the panel rests over the helper's still glass too and its window draws only the card's
+  contents (`PanelSlide._rest_over_compositor`); otherwise buttons change colour where the slide ends. See `dcomp.py`.
 - Liquid glass of a widget takes the desktop on the GPU: the duplication keeps its copy of the screen as a
   keyed-mutex shared texture (`dxgi_capture.copy_region`), the renderer copies its window's rectangle out of it
   on its own device (`Renderer.issue_desktop` / `update_desktop`) and a compute shader tells whether the picture

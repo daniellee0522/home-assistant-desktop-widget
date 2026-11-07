@@ -267,7 +267,8 @@ class GlassMixin:
                 shot = api.get_desktop_backdrop(kind, last_hash, pw, ph, cx, cy,
                                                 0 if still else None,
                                                 **({"gpu": True} if kind == "flyout" and capture_rect is not None
-                                                   and getattr(api, "flyout_gpu_backdrop", False) else {}))
+                                                   and getattr(api, "flyout_gpu_backdrop", False)
+                                                   and self._liquid_glass() else {}))     # (classic: a picture)
                 if not shot:
                     last_hash = None
                     self.sample_now.wait(0.25)

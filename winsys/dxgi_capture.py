@@ -22,6 +22,8 @@ import threading
 import time
 from ctypes import wintypes
 
+from winsys.win32 import user32
+
 _HRESULT = ctypes.c_long
 _vp = ctypes.c_void_p
 
@@ -47,6 +49,18 @@ _BUSY_WAIT_MS = 8
 _BUSY_SECS = 0.5
 # Frames of change history kept to answer "changed since frame N".
 _HISTORY = 240
+# How often at most the duplications are rebuilt because a read lies on a screen none of them shows (one that came back
+# after they were made, as a monitor waking slower than the machine), and how often that is written to the log.
+_MISSING_REBUILD_SECS = 3.0
+_MISSING_NOTE_SECS = 60.0
+# A duplication that gives nothing for _SILENT_SECS, while the pointer has been moving over its screen for _MOVED_SECS
+# (a pointer that moves is always reported), is dead and made again.
+_SILENT_SECS = 2.0
+_MOVED_SECS = 0.5
+# Seconds after duplications are made again following a loss (the secure desktop, a sleep, a screen coming back) at which
+# they are made once more. The first frame of a duplication is the whole desktop, and the one taken as the desktop comes
+# back can be black; a part that never changes (the wallpaper under the widgets) would then stay black for good.
+_RETAKE_SECS = (2.0, 6.0)
 
 
 class _GUID(ctypes.Structure):
@@ -224,6 +238,17 @@ def _create_device(d3d11, adapter):
 # Geometry
 # ---------------------------------------------------------------------
 
+def _cursor():
+    """The pointer's desktop position, or None (as on the secure desktop)."""
+    p = wintypes.POINT()
+    return (p.x, p.y) if user32.GetCursorPos(ctypes.byref(p)) else None
+
+
+def _on_a_screen(rect):
+    """Whether a monitor shows any of the desktop rectangle `rect` (l, t, r, b)."""
+    return bool(user32.MonitorFromRect(ctypes.byref(wintypes.RECT(*rect)), 0))     # MONITOR_DEFAULTTONULL
+
+
 def _intersect(a, b):
     l, t, r, bt = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
     return (l, t, r, bt) if l < r and t < bt else None
@@ -285,6 +310,22 @@ class _Output:
         self.seq = int(time.monotonic() * 1000)
         self.history = []          # (seq, texture-space rects that changed)
         self.valid = None          # texture-space area `copy` holds
+        self.heard = time.monotonic()      # when it last gave anything, a frame or only the pointer
+        self.pointer = self.moved_at = None
+
+    def dead(self, now):
+        """Whether this duplication has stopped giving frames although the screen still moves: nothing, not even the
+        pointer, for _SILENT_SECS, and the pointer has since moved over it for _MOVED_SECS. (After the secure desktop, a
+        lock or an elevation prompt, a duplication can be made again that never gives a frame, and no call fails.)"""
+        pos = _cursor() if now - self.heard >= _SILENT_SECS else None
+        if pos is None or not _intersect((pos[0], pos[1], pos[0] + 1, pos[1] + 1), self.desktop):
+            self.pointer = self.moved_at = None
+            return False
+        if self.pointer is None:
+            self.pointer = pos
+        elif pos != self.pointer and self.moved_at is None:
+            self.moved_at = now
+        return self.moved_at is not None and now - self.moved_at >= _MOVED_SECS
 
     @property
     def size(self):
@@ -338,6 +379,7 @@ class _Output:
             return False
         if hr < 0:
             raise DxgiError("AcquireNextFrame", hr)
+        self.heard = time.monotonic()
         with lock:
             try:
                 # A pointer-only update leaves the desktop image as it was.
@@ -567,6 +609,10 @@ class DesktopDuplication:
         self._broken_until = 0.0
         self._failures = 0
         self._reset = False
+        self._missing_at = self._missing_noted = self._silent_noted = -1e9
+        self._unsettled = False    # lost since the duplications were last made: take the desktop again after making them
+        self._retakes = []         # when to make them again
+        self.made = 0              # counts the makings: a picture kept from before one may be of a desktop that was not there
         self._frame_at, self._last_out = 0.0, None
         self._log = None
         self._luids = {}           # reader device -> its adapter's identity
@@ -666,7 +712,7 @@ class DesktopDuplication:
         """Drop every duplication and forgive earlier failures, as after a suspend: the outputs and the
         adapter were made for a display set that may no longer exist, and a duplication of one of those can
         stay valid-looking yet never deliver a frame again. The capture thread rebuilds on the next read."""
-        self._reset = True
+        self._reset = self._unsettled = True
         self._broken_until = 0.0
         self._failures = 0
         self._luids.clear()
@@ -723,6 +769,7 @@ class DesktopDuplication:
                             del self._interest[rect]
                     idle = not self._reads and not self._interest
                 if idle:
+                    self._retakes = []        # the next making takes the desktop as it is then
                     self._teardown()
                     self._wake.clear()
                     self._wake.wait()
@@ -735,6 +782,11 @@ class DesktopDuplication:
                         self._teardown()
                         self._fail("Desktop duplication unavailable: %s" % exc)
                         continue
+                    self._plan_retakes()
+                elif self._retakes and time.monotonic() >= self._retakes[0]:
+                    del self._retakes[0]
+                    self._teardown()          # made again on the next turn, with the desktop as it is now
+                    continue
                 try:
                     self._serve()
                     self._pump()
@@ -742,14 +794,23 @@ class DesktopDuplication:
                     # Lost desktop (mode change, secure desktop) or device:
                     # rebuild. Pending reads are answered on the new one.
                     self._note("Desktop duplication reset: %s" % exc)
+                    self._unsettled = True
                     self._teardown()
                     time.sleep(0.25)
         except Exception as exc:
             self._teardown()
             self._fail("Desktop duplication stopped: %r" % exc)
 
+    def _plan_retakes(self):
+        """Just made: if made after a loss, plan to make them again at _RETAKE_SECS (see there). Those makings plan none."""
+        if self._unsettled:
+            self._unsettled = False
+            now = time.monotonic()
+            self._retakes = [now + secs for secs in _RETAKE_SECS]
+
     def _fail(self, text):
         self._note(text)
+        self._unsettled = True
         self._failures += 1
         self._broken_until = time.monotonic() + min(30.0, 0.5 * 2 ** self._failures)
         with self._lock:
@@ -791,6 +852,7 @@ class DesktopDuplication:
             _release(factory)
         with self._gpu:
             self._outputs, self._devices = outputs, devices
+            self.made += 1
 
     @staticmethod
     def _build_adapter(d3d11, adapter, outputs, devices):
@@ -862,6 +924,19 @@ class DesktopDuplication:
                 wait_ms = _BUSY_WAIT_MS if out is self._last_out or len(active) == 1 else 0
             if out.acquire(wait_ms, self._gpu):
                 self._frame_at, self._last_out = time.monotonic(), out
+            elif out.dead(time.monotonic()):
+                self._silent_output(out)
+                return
+
+    def _silent_output(self, out):
+        """`out` stopped giving frames without a call failing: drop the duplications, which the next turn makes again."""
+        now = time.monotonic()
+        if now - self._silent_noted >= _MISSING_NOTE_SECS:
+            self._silent_noted = now
+            self._note("Desktop duplication of %s gave nothing for %.0f s while the pointer moved: rebuilding"
+                       % (out.name, now - out.heard))
+        self._unsettled = True
+        self._teardown()
 
     def _serve(self):
         with self._lock:
@@ -894,6 +969,12 @@ class DesktopDuplication:
         """
         parts = [(out,) + out.texture_rect(read.rect) for out in self._outputs]
         parts = [p for p in parts if p[1]]
+        if not parts:
+            # No duplication shows this rectangle: answered "unavailable" (the caller reads the screen another way), never
+            # with a black picture, and the duplications are made again if a screen does show it.
+            self._missing_output(read.rect)
+            read.result = None
+            return True
         frame = tuple((out.name, out.seq) for out, _, _ in parts)
         after = dict(read.after or ())
         changed = (read.after is None or not parts
@@ -923,6 +1004,20 @@ class DesktopDuplication:
             read.result = (frame, None)
             return True
         return False
+
+    def _missing_output(self, rect):
+        """`rect` lies on no output held. If a monitor shows it, the outputs were made before that screen was there (after a
+        sleep the machine wakes before a monitor, and no duplication call fails to say so): rebuild them, at most every
+        _MISSING_REBUILD_SECS while it lasts."""
+        now = time.monotonic()
+        if now - self._missing_at < _MISSING_REBUILD_SECS or not _on_a_screen(rect):
+            return
+        self._missing_at = now
+        if now - self._missing_noted >= _MISSING_NOTE_SECS:
+            self._missing_noted = now
+            self._note("Desktop duplication shows no output under %r: rebuilding" % (rect,))
+        self._reset = self._unsettled = True
+        self._wake.set()
 
     @staticmethod
     def _compose(rect, parts):

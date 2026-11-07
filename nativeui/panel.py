@@ -9,7 +9,9 @@ import time
 import traceback
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QCursor, QImage, QPainter
+from PySide6.QtGui import QCursor, QGuiApplication, QImage, QPainter
+
+from winsys.accent import accent_palette
 
 from . import dcomp, render, screens
 from .actions import TileActions
@@ -75,8 +77,15 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
                                     on_close=self.close_detail, area_of=self._area_of)
         self.detail_view = None
         self.base_css = None
+        self.accent = None                   # the system's accent shades while the glass follows them (panel_tint)
+        self.fill_in_glass = False           # the card's tint is in the slide's glass, not on the card (panel_slide.py)
+        self._resting_glass_from = None      # the picture the compositor's glass at rest was last made from
+        self._rest_glass = None              # that glass (the compositor's layer), and the card the slide carries
+        self._slide_card = None
+        self._rest_picture = None            # the card's contents over that glass, as the window draws them at rest
         self.configure()
         self.retheme()
+        QGuiApplication.instance().paletteChanged.connect(lambda *_: self.follow_accent())
         self.rebuild()                       # so it has its size before it is ever shown
         threading.Thread(target=self._load_states, daemon=True).start()
 
@@ -93,13 +102,15 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
         self.liquid_level = prefs.get("liquid_blur", 0)
         self.system_glass = (prefs.get("system_glass_active") or {}).get("flyout") is True
         self.mode = "home" if panel.get("mode") == "home" else "grid"
+        self.tint = "accent" if prefs.get("panel_tint") == "accent" else "none"
+        self.accent = accent_palette() if self.tint == "accent" else None
         self.model.panel = panel if panel else self.model.panel
 
     def _look(self):
         """What, when it changes, the panel is themed, measured and given its glass again for."""
         panel = self.prefs.get("panel") or {}
         return (self.theme_raw, self.style, self.language, self.liquid_level, self.system_glass, self.mode,
-                panel.get("bg_image"), panel.get("bg_blur"))
+                panel.get("bg_image"), panel.get("bg_blur"), self.tint, self.accent)
 
     def apply_prefs(self, prefs):
         before = self._look()
@@ -125,8 +136,34 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
     def card_radius(self):
         return self.t["radius_panel"]
 
+    def follow_accent(self):
+        """The system's colour may have changed (Windows says so through Qt's palette, and it is looked at again
+        each time the panel is armed): the card is painted again in the new one."""
+        if self.tint != "accent":
+            return
+        accent = accent_palette()
+        if accent != self.accent:
+            self.accent = accent
+            self._card_picture = None
+            self._content_dirty = True
+            self.request_paint()
+
+    def card_tokens(self):
+        """The card's colours: the theme's, in the system's accent when the glass follows it."""
+        return render.accent_tinted(self.t, self.accent, self.theme)
+
+    def _tint_in_glass(self):
+        """Whether the card's tint lies in the compositor's glass layer rather than on the card: while the slide's
+        picture is made, and while a classic panel rests over the compositor's glass (panel_slide.py)."""
+        return self.fill_in_glass or self._classic_resting()
+
+    def _classic_resting(self):
+        return self._compositor_resting and not self._liquid_glass()
+
     def paint_card(self, p):
-        key = (self.pw, self.ph, self.scale, self.css_w, self.css_h, self.theme, self.style, id(self.t))
+        tint_in_glass = self._tint_in_glass()
+        key = (self.pw, self.ph, self.scale, self.css_w, self.css_h, self.theme, self.style, id(self.t),
+               tuple(self.accent or ()), tint_in_glass)
         if self._card_picture is None or self._card_picture[0] != key:
             image = QImage(self.pw, self.ph, QImage.Format_ARGB32_Premultiplied)
             image.fill(Qt.transparent)
@@ -134,7 +171,8 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
             painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
             painter.scale(self.scale, self.scale)
             try:
-                render.draw_card_bg(painter, self.css_w, self.css_h, self.t, self.style, self.theme)
+                render.draw_card_bg(painter, self.css_w, self.css_h, self.card_tokens(), self.style, self.theme,
+                                    fill=not tint_in_glass)
             finally:
                 painter.end()
             self._card_picture = (key, image)
@@ -449,6 +487,7 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
         self.anim_origin = self.origin()
         self.tweens.cancel(self)
         self.moving = False
+        self.follow_accent()
         if self.mode == "home":
             if self.home is None:
                 self.rebuild()
@@ -564,6 +603,8 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
                 slider = self._compositor_slider or dcomp.slider()
                 if slider is not None and slider.material is not None:
                     slider.queue_glass(held[1])
+                elif isinstance(held[1], QImage):
+                    self._push_resting_glass(held[1])       # (the classic glass, with its tint)
             return
         if getattr(self, "moving", False):
             self.glass_queued.clear()
@@ -617,9 +658,62 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
     def _resting_geometry(self):
         return (dcomp.window_rect(self.cache_hwnd()), self.css_w, self.css_h, self.scale, self.card_radius())
 
+    def glass_changed(self):
+        if self._classic_resting():
+            self._push_resting_glass()
+        super().glass_changed()
+
+    def _resting_shot(self):
+        """The last picture of the desktop under the compositor's whole layer, taken while it slid or rests, or None."""
+        held = self._compositor_background
+        return held[1] if held is not None and held[0] == self._compositor_capture else None
+
+    def _push_resting_glass(self, shot=None):
+        """The classic glass at rest lies in the compositor's layer under the panel's window (panel_slide.py): a new
+        picture of the desktop (`shot`, of the layer's whole area, as the slide takes it), or a new tint, goes there.
+        (Drawn by the panel, the card's translucent parts over it were blended by another rule than the slide's, and
+        the buttons changed colour where it ended.)"""
+        slider = self._compositor_slider or dcomp.slider()
+        if slider is None or not slider.shown or slider.size is None:
+            return
+        shot = shot if shot is not None else self._resting_shot()
+        source = shot if shot is not None else self.latest
+        tint = self.card_tokens()["panel"]
+        made = self._resting_glass_from
+        if made is not None and made[0] is source and made[1:] == (tint, slider.size):
+            return
+        glass = self._glass_layer(slider.size, shot=shot)
+        if glass is not None:
+            slider.set_glass(glass)
+            self._rest_glass = glass
+            if self._sliding is not None and self._slide_card is not None:
+                slider.set_card(self._over_glass(self._slide_card, glass))   # (what it carries is over this glass)
+            elif self._compositor_resting:
+                self.update()
+        self._resting_glass_from = (source, tint, slider.size)
+
+    def painted_content(self):
+        """At rest over the compositor's classic glass, the card's contents blended over that glass where they are
+        seen (panel_slide._over_glass), as the slide carried them."""
+        img = self.content_image()
+        glass = self._rest_glass
+        if not self._classic_resting() or glass is None:
+            return img
+        key = (img.cacheKey(), glass.cacheKey())
+        held = self._rest_picture
+        if held is not None and held[0] == key:
+            return held[1]
+        flat = QImage(img)
+        flat.setDevicePixelRatio(1.0)                           # (in the window's pixels, as the glass is)
+        out = self._over_glass(flat, glass)
+        out.setDevicePixelRatio(img.devicePixelRatio())
+        self._rest_picture = (key, out)
+        return out
+
     def _sync_resting_glass(self):
         slider = self._compositor_slider or dcomp.slider()
-        if slider is None or slider.material is None:
+        liquid = self._liquid_glass()
+        if slider is None or not slider.shown or (liquid and slider.material is None):
             return
         geometry = self._resting_geometry()
         if geometry != self._compositor_geometry:
@@ -634,16 +728,20 @@ class PanelScene(PanelDetail, PanelSlide, OverlayScene):
             outline = render.squircle(0, 0, self.css_w * self.scale, self.css_h * self.scale, radius)
             columns = dcomp.outline_columns([(p.x(), p.y()) for p in outline.toFillPolygon()],
                                            self.css_w * self.scale, self.css_h * self.scale, radius)
-            slider.show(rect, glass, card, 0, radius, above=self.cache_hwnd(), columns=columns,
-                        liquid=dict(size=(self.css_w * self.scale, self.css_h * self.scale), radius=radius,
-                                    level=self.liquid_level, scale=self.scale, tiles=self.glass_tiles()))
+            material = (dict(size=(self.css_w * self.scale, self.css_h * self.scale), radius=radius,
+                             level=self.liquid_level, scale=self.scale, tiles=self.glass_tiles()) if liquid else None)
+            slider.show(rect, glass, card, 0, radius, above=self.cache_hwnd(), columns=columns, liquid=material)
             slider.settle_glass(self.cache_hwnd())
-            self._compositor_capture = rect
+            self._resting_glass_from = (self.latest, self.card_tokens()["panel"], slider.size)
+            self._compositor_capture = rect                         # (the glass is taken over the layer's area)
             self._compositor_epoch += 1
             self._compositor_presented_at = time.monotonic()
             self._compositor_geometry = geometry
             self.force.set()
-        slider.material.tiles = list(self.glass_tiles())[:64]
+        if slider.material is not None:
+            slider.material.tiles = list(self.glass_tiles())[:64]
+        else:
+            self._push_resting_glass()                          # (a new tint, or a picture the slide had held back)
 
     def moveEvent(self, event):
         super().moveEvent(event)

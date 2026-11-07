@@ -338,9 +338,13 @@ class Scene(GlassMixin, QWidget):
         # behind it changes up to sixty times a second while the views do not, and drawing them again for
         # each new glass costs a few ms where the picture costs a tenth of one. Coming in or going away
         # also only scales and fades that picture.
-        img = self.content_image()
+        img = self.painted_content()
         p.drawImage(QRectF(0, 0, img.width() / q, img.height() / q), img)
         p.end()
+
+    def painted_content(self):
+        """What the window draws over its glass: the card's picture (the tray panel's can carry its glass)."""
+        return self.content_image()
 
     def transition_glass_opacity(self):
         return 1.0

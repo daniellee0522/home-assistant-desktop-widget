@@ -80,6 +80,8 @@ DEFAULT_CONFIG = {
     "liquid_blur": 0,
     # The tray panel's own theme; "follow" uses the widget's.
     "panel_theme": "follow",
+    # The tray panel's glass: "none" (the theme's own grey) or "accent" (the Windows accent colour, followed).
+    "panel_tint": "none",
     # Dim the widget once the desktop has been covered for dim_after_sec
     # (immediately for a full-screen app) until the desktop returns or the
     # widget is clicked.

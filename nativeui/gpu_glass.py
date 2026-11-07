@@ -327,6 +327,7 @@ class Renderer:
             self.presentation_index = 0
             self.cs = self.difference = None
             self.shown = self.shown_size = self.issued = None
+            self.made = None
             self.peak = self.peak_stage = None
             try:
                 code = compile_shader(b'cs', b'cs_5_0')
@@ -467,6 +468,11 @@ class Renderer:
         of them looks at its result."""
         self._pipeline_bound = False
         size = (frame.w, frame.h)
+        made = getattr(frame, 'made', None)
+        if made is not None and made != self.made:
+            # The duplication was made again (after the lock screen, a sleep, a refresh): the picture drawn before may be one
+            # taken as the desktop came back, black. Kept, it would fill every part a window covers for good.
+            self.made, self.shown = made, None
         index = 0 if self.shown is None else 1 - self.shown
         current = self._temporary('capture%d' % index, size)
         turn = frame.rotation if frame.rotation in (2, 3, 4) else 0

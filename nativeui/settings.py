@@ -415,6 +415,9 @@ class SettingsScene(EditorMixin, OverlayScene):
             mode = "fast"
         self.select_hint(stack, "毛玻璃來源", modes, mode, lambda v: self.save_pref({"glass_mode": v}),
                          "毛玻璃是把視窗底下的桌面擷取下來再模糊畫上去的。擷取模式為了讀得夠快，會把 widget 從畫面擷取中排除，代價是截圖和錄影裡看不到它；相容模式不排除，但改用比較慢的方式取得桌布。")
+        self.select_hint(stack, "面板玻璃顏色", [("none", "中性"), ("accent", "跟隨系統顏色")], prefs.get("panel_tint", "none"),
+                         lambda v: self.save_pref({"panel_tint": v}),
+                         "跟隨系統顏色時，系統匣面板的玻璃染上 Windows 的強調色（設定 > 個人化 > 色彩），更換時跟著改變。")
         self.panel_picture_block(stack, panel)
         self.select_hint(stack, "毛玻璃更新", [("live", "動態 (桌布變動時即時更新)"), ("still", "靜態 (只在移動 widget 時更新，最省資源)")],
                          prefs.get("glass_sampling", "live"), lambda v: self.save_pref({"glass_sampling": v}),

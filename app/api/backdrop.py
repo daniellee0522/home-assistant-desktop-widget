@@ -196,7 +196,8 @@ class BackdropMixin:
                 raise _Answer(dict(gpu=(x, y, w, h), copy=screen_duplication.copy_region, pre_blur=direct[0],
                                    covers=(lambda: self._windows_over_now(hwnd, area)) if is_widget_kind(kind) else None,
                                    wallpaper=(lambda: compat_capture.grab(x, y, w, h)) if is_widget_kind(kind) else None,
-                                   divide=direct[1], rotation=direct[2], w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
+                                   divide=direct[1], rotation=direct[2], made=screen_duplication.made,
+                                   w=w, h=h, system_glass=False, paced=True, hash=hash(got[0]) & 0x7FFFFFFF,
                                    ms=(time.perf_counter() - job.started) * 1000))
         got = screen_duplication.grab(x, y, w, h, after,
                                       DUPLICATION_WAIT_SECS if job.wait_secs is None else job.wait_secs)

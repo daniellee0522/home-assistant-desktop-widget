@@ -37,6 +37,7 @@ class PrefsMixin:
             "system_glass_ok": bool(SYSTEM_GLASS_SUPPORTED),
             "system_glass_active": self._system_glass_status(),
             "panel_theme": self._cfg.get("panel_theme", "follow"),
+            "panel_tint": self._cfg.get("panel_tint", "none"),
             "dim_when_idle": bool(self._cfg.get("dim_when_idle", True)),
             "dim_after_sec": int(self._cfg.get("dim_after_sec", 120)),
             "hotkey": self._cfg.get("hotkey", ""),
@@ -74,6 +75,8 @@ class PrefsMixin:
         "language": lambda v: v if v in ("zh-TW", "en") else "zh-TW",
         # "follow" uses the widget's theme for the tray panel.
         "panel_theme": lambda v: v if v in ("follow", "auto", "light", "dark") else "follow",
+        # "accent" tints the tray panel's glass with the Windows accent colour (and follows it).
+        "panel_tint": lambda v: v if v in ("none", "accent") else "none",
         "lock_position": bool,
         "zoom": lambda v: max(50, min(200, int(v))),
         "glass_mode": lambda v: v if v in ("system", "fast", "compat") else "fast",

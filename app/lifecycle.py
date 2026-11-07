@@ -11,7 +11,10 @@ from app.api import Api
 from app.capture import compat_capture, desktop_capture, screen_duplication
 from app.widget_windows import create_widget_window, restore_widget_place
 from core import diag
+from nativeui import widget_glass
 from winsys import qtshell
+from winsys.scan import window_snapshot
+from winsys.win32 import class_name, rects_overlap, window_rect
 from winsys.tray import build_tray_icon, restore_tray_icon
 from winsys.windows import apply_window_shape, hide_own_console, run_on_ui_thread, send_to_bottom, set_noactivate
 
@@ -75,7 +78,50 @@ class Shell:
         self.api.save_prefs({"theme": following})
 
     def refresh_now(self, icon=None, item=None):
+        """The states again, and every way of reading the screen made again: the way back when the glass has stopped
+        following the desktop and nothing noticed."""
         self.api._refresh_now()
+        self.recover_capture()
+        run_on_ui_thread(self.api._window, self.restore_window)
+        qtshell.log("Capture rebuilt on request; windows taken as over the widgets: %s" % self.windows_over_widgets())
+
+    def windows_over_widgets(self):
+        """{widget: the class names of other programs' windows taken as over it}, for the log: the glass fills those parts from its
+        last picture, so a window wrongly taken as over a widget holds an old picture there."""
+        found = {}
+        try:
+            snapshot, ours = window_snapshot(exact=True), self.api._own_hwnds_out_of_capture()
+            for kind, widget_window in self.api._widgets.items():
+                hwnd = widget_window.native.cache_hwnd()
+                area = window_rect(hwnd)
+                names = []
+                for other, rect in snapshot:
+                    if other == hwnd:
+                        break                         # the rest are below it
+                    if rect is not None and other not in ours and area and rects_overlap(area, rect):
+                        names.append(class_name(other))
+                if names:
+                    found[kind] = names
+        except Exception as exc:
+            return "unknown (%r)" % exc
+        return found or "none"
+
+    def recover_capture(self):
+        """Drop what reads the screen (made again on the next read) and let every widget try its GPU glass again, even
+        one that gave it up; every window's glass is then taken anew."""
+        api = self.api
+        desktop_capture.reset()
+        screen_duplication.reset()
+        compat_capture.close()
+
+        def retry_gpu_glass():
+            for widget_window in list(api._widgets.values()):
+                surface = widget_window.native
+                surface._gpu_failed, surface._gpu_retry_at = False, 0.0
+                widget_glass.prepare(surface)
+
+        run_on_ui_thread(api._window, retry_gpu_glass)
+        api._broadcast("invalidate_glass")
 
     def quit_action(self, icon=None, item=None):
         self.api._quit()
@@ -98,6 +144,11 @@ class Shell:
         api._apply_capture_exclusion()
         api._apply_system_glass()
         qtshell.log("Display surfaces refreshed")
+
+    def display_changed(self):
+        """A screen came, went or changed: the duplications were made for the screens as they were."""
+        screen_duplication.reset()
+        self.restore_window()
 
     def restore_tray(self):
         """The entry point to the panel even when the desktop widget was manually hidden: independent of the
@@ -152,7 +203,7 @@ def main():
     for widget in api._cfg["widgets"]:
         create_widget_window(api, widget)
     shell = Shell(api)
-    qtshell.on_display_change(shell.restore_window)
+    qtshell.on_display_change(shell.display_changed)
     qtshell.on_resume(shell.on_resume)
     api._watch_for_idle()
     if os.environ.get("HA_WIDGET_OPEN_PANEL"):

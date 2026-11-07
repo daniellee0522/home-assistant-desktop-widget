@@ -95,6 +95,24 @@ def tokens(theme, dim=False, style="classic"):
     return t
 
 
+# A card tinted with the system's accent, as Windows tints the Start menu and the taskbar: a light shade under
+# dark words, a dark shade under light ones (indexes into winsys.accent's eight shades), never fainter than
+# ACCENT_TINT_ALPHA. The dark one is as deep as the tinted taskbar beside it, which shows its shade nearly solid:
+# at half strength the glass under it (a bright page) washed it out, and the panel looked paler than the taskbar.
+ACCENT_SHADE = {"light": 1, "dark": 5}
+ACCENT_TINT_ALPHA = {"light": 0.6, "dark": 0.82}
+
+
+def accent_tinted(tcol, palette, theme):
+    """`tcol` with its card's colour taken from `palette` (winsys.accent.accent_palette), or `tcol` itself
+    when there is none."""
+    if not palette:
+        return tcol
+    theme = "dark" if theme == "dark" else "light"
+    r, g, b = palette[ACCENT_SHADE[theme]]
+    return dict(tcol, panel=(r, g, b, max(tcol["panel"][3], ACCENT_TINT_ALPHA[theme])))
+
+
 ACCENT = {"yellow": "#ffb320", "blue": "#409cff", "cyan": "#48aaff", "green": "#34c759",
           "teal": "#2fd0c2", "red": "#ff5b4a"}
 LIGHT_THEME_BULB = "#ffbe6c"
@@ -905,9 +923,10 @@ def squircle_pill(rect):
     return path
 
 
-def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False):
+def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False, fill=True):
     """The card's tint and rims over its glass. `plain`: the quiet pane of the detail card, which
-    has none of the liquid style's light along its rim."""
+    has none of the liquid style's light along its rim. `fill=False`: the rims alone, the tint being in the glass (but for a trace
+    of it that keeps the card's pixels taking the pointer)."""
     radius = radius or tcol["radius_panel"]
     card = squircle(0, 0, W, H, radius)
     p.setPen(Qt.NoPen)
@@ -916,8 +935,15 @@ def draw_card_bg(p, W, H, tcol, style, theme, radius=None, plain=False):
         p.drawPath(card)
         inner_shadow(p, card, QColor(255, 255, 255, round(255 * 0.35)))
         return
-    p.setBrush(rgba(tcol["panel"]))
-    p.drawPath(card)
+    if fill:
+        p.setBrush(rgba(tcol["panel"]))
+        p.drawPath(card)
+    else:
+        # A trace of the tint: a window's clear pixels let the pointer through to what is behind it.
+        trace = rgba(tcol["panel"])
+        trace.setAlpha(1)
+        p.setBrush(trace)
+        p.drawPath(card)
     inner_shadow(p, card, rgba(tcol["card_edge"]))
     if tcol["card_edge_top"]:
         inner_shadow(p, card, rgba(tcol["card_edge_top"]), dy=1, spread=0)

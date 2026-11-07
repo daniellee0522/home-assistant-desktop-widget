@@ -19,9 +19,11 @@ their shared desktop texture follows the inverse curve, so the exact rounded mas
 What this costs: the card is translucent over the glass, and the desktop blends two translucent layers by its own rule,
 not the encoded-value blend Qt makes for the panel's own picture. Measured through Desktop Duplication, that rule is
 neither that blend nor linear light (white at half over black shows as 150 where Qt's is 128 and linear light's is
-186), and it does not follow one curve, so a card remade to come out the same was tried and was no nearer. The panel
-is therefore a little different in brightness over the slide than before and after it. Handing the desktop one opaque
-picture (glass and card blended here) has no such difference, but then the glass moves with the card.
+186; with automatic colour management on, the blend is in linear light through the display's profile), and it does
+not follow one curve, so a card remade to come out the same was tried and was no nearer. So the desktop blends at rest
+too: the classic and liquid panels come to rest over this helper's still glass, the panel's own window drawing only
+what is on the card (panel_slide._rest_over_compositor), and the card's tint lies in the glass. Handing the desktop one
+opaque picture (glass and card blended here) would also match, but then the glass moves with the card.
 
 Nothing here is imported for its side effects, and anything that fails (no hardware device, an old Windows) makes
 `slider()` return None: the caller keeps drawing the panel itself.
@@ -656,6 +658,22 @@ class Slider:
                 self._start_material()
         finally:
             _release(animation)
+
+    def set_glass(self, image):
+        """A new picture (premultiplied ARGB, the size of the window) for the still glass, shown at once: the classic
+        panel's glass at rest, under its window."""
+        if not self.shown or (image.width(), image.height()) != self.size:
+            return
+        self._upload(self.glass_surface, image)
+        _call(self.composition, 3, ())                                                       # Commit
+
+    def set_card(self, image):
+        """A new picture for the moving card (the size of the window), shown at once: the classic panel's, whose
+        contents carry the glass under them, while the glass changes as it slides."""
+        if not self.shown or (image.width(), image.height()) != self.size:
+            return
+        self._upload(self.card_surface, image)
+        _call(self.composition, 3, ())                                                       # Commit
 
     def settle_glass(self, above):
         """Keep the same live glass under the native foreground, without swapping backdrops."""

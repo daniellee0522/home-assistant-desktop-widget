@@ -63,6 +63,8 @@ user32.FindWindowExW.restype = ctypes.c_void_p
 user32.PrintWindow.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
 user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.MonitorFromRect.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+user32.MonitorFromRect.restype = ctypes.c_void_p
 
 gdi32 = ctypes.WinDLL("gdi32")
 gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
